@@ -1,55 +1,279 @@
-//! Загрузчик glTF 2.0 с поддержкой PBR metallic-roughness.
+//! Загрузчик glTF 2.0 с поддержкой PBR, skin и animation.
+//!
+//! Что реализовано:
+//! - **Иерархия нод** — world-матрицы накапливаются рекурсивно от корня сцены.
+//! - **Дедупликация мешей** — один mesh → один GPU-буфер, даже если N нод
+//!   ссылаются на него.
+//! - **Скелетный skinning** — 4-костный blending, MAX_JOINTS = 64.
+//! - **Animation** — translation/rotation/scale, linear + slerp интерполяция.
+//! - **PBR materials** — base_color, metallic, roughness, normal, emissive.
+//!
+//! Что НЕ реализовано (задел на будущее):
+//! - texture samplers из glTF (сейчас всегда LINEAR + CLAMP)
+//! - alpha mode (OPAQUE / MASK / BLEND)
+//! - double-sided
+//! - morph targets
+//! - KHR_materials_unlit, KHR_texture_transform
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use glam::Mat4;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::material::Material;
 use super::mesh::{Mesh, Vertex3D};
 use super::renderer::Renderer;
+use super::skinning::{AnimationClip, Skeleton, Track, MAX_JOINTS, PARENT_NONE};
 
+// ============================================================
+// Публичные типы
+// ============================================================
+
+/// Опции загрузки. Позволяют отключить ненужные этапы (текстуры, анимации).
+#[derive(Debug, Clone)]
+pub struct GltfLoadOptions {
+    /// Префикс для имён ресурсов (mesh_<index>, tex_<index>, mat_<index>).
+    pub prefix: String,
+    /// Загружать ли изображения и создавать текстуры.
+    pub load_textures: bool,
+    /// Загружать ли skin/animation.
+    pub load_animations: bool,
+    /// Максимальное количество костей в скелете.
+    /// Если скелет больше — берём первые MAX_JOINTS.
+    pub max_joints: usize,
+}
+
+impl Default for GltfLoadOptions {
+    fn default() -> Self {
+        Self {
+            prefix: "gltf".into(),
+            load_textures: true,
+            load_animations: true,
+            max_joints: MAX_JOINTS,
+        }
+    }
+}
+
+/// Один инстанс модели — нода, ссылающаяся на mesh.
+/// Модель-матрица — **world** (с учётом иерархии).
 pub struct GltfInstance {
     pub mesh_name: String,
     pub material_name: String,
     pub model: Mat4,
+    pub skeleton_name: Option<String>,
+    pub default_animation: Option<String>,
+    /// Имя ноды из glTF (для отладки).
+    pub node_name: Option<String>,
 }
 
+pub struct LoadedGltf {
+    pub instances: Vec<GltfInstance>,
+    pub skeletons: HashMap<String, Skeleton>,
+    pub animations: HashMap<String, AnimationClip>,
+    /// Меши, которые были созданы (имя → количество вершин).
+    pub meshes: HashMap<String, usize>,
+}
+
+// ============================================================
+// Точка входа
+// ============================================================
+
+/// Загружает glTF в Renderer с настройками по умолчанию.
 pub fn load_gltf_into(
     renderer: &mut Renderer,
     path: impl AsRef<Path>,
     prefix: &str,
-) -> Result<Vec<GltfInstance>> {
+) -> Result<LoadedGltf> {
+    let opts = GltfLoadOptions {
+        prefix: prefix.into(),
+        ..Default::default()
+    };
+    load_gltf_into_with(renderer, path, &opts)
+}
+
+/// Загрузка с полным контролем над опциями.
+pub fn load_gltf_into_with(
+    renderer: &mut Renderer,
+    path: impl AsRef<Path>,
+    opts: &GltfLoadOptions,
+) -> Result<LoadedGltf> {
     let path = path.as_ref();
     let (doc, buffers, images) = gltf::import(path)
         .with_context(|| format!("failed to import glTF: {}", path.display()))?;
 
-    // === Текстуры ===
-    let mut texture_name_map: HashMap<usize, String> = HashMap::new();
-    for (i, img) in images.iter().enumerate() {
-        let name = format!("{}_tex_{}", prefix, i);
-        let data = &img.pixels;
-        let w = img.width;
-        let h = img.height;
+    let prefix = &opts.prefix;
 
-        match img.format {
-            gltf::image::Format::R8G8B8A8 => {
-                renderer.load_texture_rgba(&name, data, w, h)?;
-            }
-            gltf::image::Format::R8G8B8 => {
-                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                for px in data.chunks_exact(3) {
-                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+    // === 1. Текстуры ===
+    let mut texture_name_map: HashMap<usize, String> = HashMap::new();
+    if opts.load_textures {
+        for (i, img) in images.iter().enumerate() {
+            let name = format!("{}_tex_{}", prefix, i);
+            let data = &img.pixels;
+            let w = img.width;
+            let h = img.height;
+            match img.format {
+                gltf::image::Format::R8G8B8A8 => {
+                    renderer.load_texture_rgba(&name, data, w, h)?;
                 }
-                renderer.load_texture_rgba(&name, &rgba, w, h)?;
+                gltf::image::Format::R8G8B8 => {
+                    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                    for px in data.chunks_exact(3) {
+                        rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                    }
+                    renderer.load_texture_rgba(&name, &rgba, w, h)?;
+                }
+                _ => {
+                    log::warn!(
+                        "glTF: unsupported image format {:?} for '{}', skipping",
+                        img.format,
+                        name
+                    );
+                    continue;
+                }
             }
-            _ => continue,
+            texture_name_map.insert(i, name);
         }
-        texture_name_map.insert(i, name);
     }
 
-    // === Материалы ===
-    let mut material_name_map: HashMap<usize, String> = HashMap::new();
+    // === 2. Материалы ===
+    let material_name_map = load_materials(renderer, &doc, prefix, &texture_name_map)?;
+
+    // === 3. Скелеты ===
+    let (skeletons, skeleton_by_skin_index) =
+        load_skeletons(renderer, &doc, &buffers, prefix, opts.max_joints)?;
+
+    // === 4. Дедуплицированные меши ===
+    // Один (mesh_index, prim_index) — один GPU-меш.
+    let mut mesh_name_map: HashMap<(usize, usize), String> = HashMap::new();
+    let mut meshes_info: HashMap<String, usize> = HashMap::new();
+
+    // Собираем все mesh-примитивы, на которые ссылаются ноды.
+    let mut used_primitives: HashSet<(usize, usize)> = HashSet::new();
+    for node in doc.nodes() {
+        let Some(mesh) = node.mesh() else { continue };
+        for (p_idx, _) in mesh.primitives().enumerate() {
+            used_primitives.insert((mesh.index(), p_idx));
+        }
+    }
+
+    for (mesh_idx, p_idx) in &used_primitives {
+        let mesh = doc.meshes().nth(*mesh_idx).expect("mesh index");
+        let primitive = mesh.primitives().nth(*p_idx).expect("prim index");
+        let name = format!("{}_mesh_{}_{}", prefix, mesh_idx, p_idx);
+        let vertex_count = upload_primitive_mesh(renderer, &primitive, &buffers, &name)?;
+        meshes_info.insert(name.clone(), vertex_count);
+        mesh_name_map.insert((*mesh_idx, *p_idx), name);
+    }
+
+    // === 5. World-матрицы нод (иерархия) ===
+    let world_matrices = collect_world_transforms(&doc);
+
+    // === 6. Инстансы ===
+    let default_animation_name: Option<String> = if opts.load_animations {
+        doc.animations()
+            .next()
+            .and_then(|a| a.name().map(|s| s.to_string()))
+            .or_else(|| {
+                if doc.animations().next().is_some() {
+                    Some(format!("{}_anim_0", prefix))
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
+    let mut instances = Vec::new();
+    for node in doc.nodes() {
+        let Some(mesh) = node.mesh() else { continue };
+        let world = world_matrices
+            .get(&node.index())
+            .copied()
+            .unwrap_or_else(|| Mat4::from_cols_array_2d(&node.transform().matrix()));
+
+        let node_skeleton_name: Option<String> = node
+            .skin()
+            .and_then(|skin| skeleton_by_skin_index.get(&skin.index()).cloned());
+
+        for (p_idx, primitive) in mesh.primitives().enumerate() {
+            let Some(mesh_name) = mesh_name_map.get(&(mesh.index(), p_idx)).cloned() else {
+                continue;
+            };
+
+            // Material name (raw, без skeleton-suffix).
+            let raw_material = primitive
+                .material()
+                .index()
+                .and_then(|idx| material_name_map.get(&idx).cloned())
+                .unwrap_or_else(|| format!("{}_mat_default", prefix));
+
+            // Если меш скиннится — создаём skinned-копию материала с тем же
+            // набором текстур, но отдельной bind group (чтобы skeleton был свой).
+            let material_name = if let Some(skel_name) = &node_skeleton_name {
+                let skinned_mat = format!("{}__skinned", raw_material);
+                if !renderer.has_material(&skinned_mat) {
+                    let base = renderer
+                        .materials
+                        .get(&raw_material)
+                        .cloned()
+                        .unwrap_or_default();
+                    renderer.add_material_with_skeleton(&skinned_mat, base, skel_name);
+                }
+                skinned_mat
+            } else {
+                raw_material
+            };
+
+            instances.push(GltfInstance {
+                mesh_name,
+                material_name,
+                model: world,
+                skeleton_name: node_skeleton_name.clone(),
+                default_animation: default_animation_name.clone(),
+                node_name: node.name().map(|s| s.to_string()),
+            });
+        }
+    }
+
+    // === 7. Анимации ===
+    let animations = if opts.load_animations {
+        load_animations(&doc, &buffers, &skeletons, prefix)?
+    } else {
+        HashMap::new()
+    };
+
+    log::info!(
+        "glTF '{}': {} meshes, {} textures, {} materials, {} skeletons, {} animations, {} instances",
+        path.display(),
+        meshes_info.len(),
+        texture_name_map.len(),
+        material_name_map.len(),
+        skeletons.len(),
+        animations.len(),
+        instances.len()
+    );
+
+    Ok(LoadedGltf {
+        instances,
+        skeletons,
+        animations,
+        meshes: meshes_info,
+    })
+}
+
+// ============================================================
+// Шаг 2: материалы
+// ============================================================
+
+fn load_materials(
+    renderer: &mut Renderer,
+    doc: &gltf::Document,
+    prefix: &str,
+    texture_name_map: &HashMap<usize, String>,
+) -> Result<HashMap<usize, String>> {
+    let mut map: HashMap<usize, String> = HashMap::new();
+
     for (i, mat) in doc.materials().enumerate() {
         let pbr = mat.pbr_metallic_roughness();
         let base = pbr.base_color_factor();
@@ -66,7 +290,7 @@ pub fn load_gltf_into(
             }
         }
 
-        // Metallic-roughness texture
+        // Metallic-roughness texture (R=occlusion, G=roughness, B=metallic)
         if let Some(tex_info) = pbr.metallic_roughness_texture() {
             let img_idx = tex_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -83,7 +307,7 @@ pub fn load_gltf_into(
             }
         }
 
-        // Emissive
+        // Emissive factor + texture
         let em = mat.emissive_factor();
         material.emissive = [em[0], em[1], em[2]];
         if let Some(tex_info) = mat.emissive_texture() {
@@ -95,76 +319,356 @@ pub fn load_gltf_into(
 
         let name = format!("{}_mat_{}", prefix, i);
         renderer.add_material(&name, material);
-        material_name_map.insert(i, name);
+        map.insert(i, name);
     }
 
-    if material_name_map.is_empty() {
+    if map.is_empty() {
         let name = format!("{}_mat_default", prefix);
         renderer.add_material(&name, Material::default());
-        material_name_map.insert(usize::MAX, name);
+        map.insert(usize::MAX, name);
     }
 
-    // === Меши + инстансы ===
-    let mut instances = Vec::new();
+    Ok(map)
+}
 
-    for node in doc.nodes() {
-        let Some(mesh) = node.mesh() else { continue };
-        let node_transform = Mat4::from_cols_array_2d(&node.transform().matrix());
+// ============================================================
+// Шаг 3: скелеты
+// ============================================================
 
-        for (p_idx, primitive) in mesh.primitives().enumerate() {
-            let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+#[allow(clippy::type_complexity)]
+fn load_skeletons(
+    renderer: &mut Renderer,
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    prefix: &str,
+    max_joints: usize,
+) -> Result<(HashMap<String, Skeleton>, HashMap<usize, String>)> {
+    let mut skeletons: HashMap<String, Skeleton> = HashMap::new();
+    let mut by_index: HashMap<usize, String> = HashMap::new();
 
-            let positions: Vec<[f32; 3]> = match reader.read_positions() {
-                Some(iter) => iter.collect(),
-                None => continue,
-            };
-            if positions.is_empty() {
-                continue;
+    for (skin_idx, skin) in doc.skins().enumerate() {
+        let skeleton_name = format!("{}_skel_{}", prefix, skin_idx);
+
+        let joints: Vec<_> = skin.joints().collect();
+        if joints.len() > max_joints {
+            log::warn!(
+                "Skeleton '{}' has {} joints > max {} — truncating",
+                skeleton_name,
+                joints.len(),
+                max_joints
+            );
+        }
+        let joints = &joints[..joints.len().min(max_joints)];
+
+        // Маппинг node_index → joint_index.
+        let mut node_to_joint: HashMap<usize, usize> = HashMap::new();
+        let mut names = Vec::with_capacity(joints.len());
+        let mut node_indices = Vec::with_capacity(joints.len());
+        for (joint_idx, node) in joints.iter().enumerate() {
+            let node_index = node.index();
+            names.push(node.name().unwrap_or("bone").to_string());
+            node_indices.push(node_index);
+            node_to_joint.insert(node_index, joint_idx);
+        }
+
+        // Родители костей — обход всего дерева, чтобы найти parent-child среди узлов.
+        let mut parents = vec![PARENT_NONE; joints.len()];
+        for node in doc.nodes() {
+            let parent_idx = node.index();
+            for child in node.children() {
+                let child_idx = child.index();
+                if let (Some(&pj), Some(&cj)) = (
+                    node_to_joint.get(&parent_idx),
+                    node_to_joint.get(&child_idx),
+                ) {
+                    parents[cj] = pj;
+                }
             }
+        }
 
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|iter| iter.collect())
-                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+        // Inverse bind matrices.
+        let inverse_bind: Vec<Mat4> = match skin.inverse_bind_matrices() {
+            Some(accessor) => read_mat4_accessor(&accessor, buffers, joints.len()),
+            None => vec![Mat4::IDENTITY; joints.len()],
+        };
 
-            let uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(|tc| tc.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+        // Bind pose (локальные матрицы из иерархии узлов).
+        let local_bind: Vec<Mat4> = joints
+            .iter()
+            .map(|n| Mat4::from_cols_array_2d(&n.transform().matrix()))
+            .collect();
 
-            let indices: Vec<u32> = reader
-                .read_indices()
-                .map(|i| i.into_u32().collect())
-                .unwrap_or_else(|| (0..positions.len() as u32).collect());
+        let skel = Skeleton {
+            names,
+            node_indices,
+            parents,
+            inverse_bind,
+            local_bind,
+        };
 
-            let mut vertices = Vec::with_capacity(positions.len());
-            for i in 0..positions.len() {
-                vertices.push(Vertex3D {
-                    position: positions[i],
-                    normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-                    uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-                    color: [1.0, 1.0, 1.0, 1.0],
-                });
+        renderer.add_skeleton(&skeleton_name, &skel.bind_pose());
+        skeletons.insert(skeleton_name.clone(), skel);
+        by_index.insert(skin_idx, skeleton_name);
+    }
+
+    Ok((skeletons, by_index))
+}
+
+// ============================================================
+// Шаг 4: меши (дедупликация)
+// ============================================================
+
+/// Загружает один primitive, создаёт GPU-буфер, возвращает количество вершин.
+fn upload_primitive_mesh(
+    renderer: &mut Renderer,
+    primitive: &gltf::Primitive,
+    buffers: &[gltf::buffer::Data],
+    name: &str,
+) -> Result<usize> {
+    let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+
+    let positions: Vec<[f32; 3]> = reader
+        .read_positions()
+        .map(|iter| iter.collect())
+        .unwrap_or_default();
+
+    if positions.is_empty() {
+        bail!("primitive '{}' has no positions", name);
+    }
+
+    let vertex_count = positions.len();
+
+    let normals: Vec<[f32; 3]> = reader
+        .read_normals()
+        .map(|iter| iter.collect())
+        .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; vertex_count]);
+
+    let uvs: Vec<[f32; 2]> = reader
+        .read_tex_coords(0)
+        .map(|tc| tc.into_f32().collect())
+        .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
+
+    let indices: Vec<u32> = reader
+        .read_indices()
+        .map(|i| i.into_u32().collect())
+        .unwrap_or_else(|| (0..vertex_count as u32).collect());
+
+    // Skin: joints + weights (может отсутствовать).
+    let joints_u16: Vec<[u16; 4]> = reader
+        .read_joints(0)
+        .map(|iter| {
+            iter.into_u16()
+                .map(|j| [j[0], j[1], j[2], j[3]])
+                .collect()
+        })
+        .unwrap_or_else(|| vec![[0, 0, 0, 0]; vertex_count]);
+
+    let weights: Vec<[f32; 4]> = reader
+        .read_weights(0)
+        .map(|iter| iter.into_f32().collect())
+        .unwrap_or_else(|| vec![[0.0; 4]; vertex_count]);
+
+    // Собираем Vertex3D и нормализуем веса.
+    let mut vertices = Vec::with_capacity(vertex_count);
+    for i in 0..vertex_count {
+        let j = joints_u16.get(i).copied().unwrap_or([0, 0, 0, 0]);
+        let mut w = weights.get(i).copied().unwrap_or([0.0; 4]);
+
+        // Нормализация весов.
+        let sum = w[0] + w[1] + w[2] + w[3];
+        if sum > 1e-6 && (sum - 1.0).abs() > 1e-4 {
+            let inv = 1.0 / sum;
+            w = [w[0] * inv, w[1] * inv, w[2] * inv, w[3] * inv];
+        }
+
+        vertices.push(Vertex3D {
+            position: positions[i],
+            normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+            uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            color: [1.0, 1.0, 1.0, 1.0],
+            joints: [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32],
+            weights: w,
+        });
+    }
+
+    let mesh = Mesh::new(&renderer.device, &vertices, &indices, name);
+    renderer.add_mesh(name, mesh);
+
+    Ok(vertex_count)
+}
+
+// ============================================================
+// Шаг 5: world-матрицы нод (иерархия)
+// ============================================================
+
+/// Обходит дерево узлов и накапливает world-матрицы: `node.index() → Mat4`.
+/// Приоритет — default_scene, fallback — все сцены.
+fn collect_world_transforms(doc: &gltf::Document) -> HashMap<usize, Mat4> {
+    let mut out: HashMap<usize, Mat4> = HashMap::new();
+
+    if let Some(scene) = doc.default_scene() {
+        for node in scene.nodes() {
+            walk_node(&node, Mat4::IDENTITY, &mut out);
+        }
+    } else {
+        for scene in doc.scenes() {
+            for node in scene.nodes() {
+                walk_node(&node, Mat4::IDENTITY, &mut out);
             }
-
-            let mesh_name = format!("{}_mesh_{}_{}", prefix, mesh.index(), p_idx);
-            let mesh_obj = Mesh::new(&renderer.device, &vertices, &indices, &mesh_name);
-            renderer.add_mesh(&mesh_name, mesh_obj);
-
-            let material_name = primitive
-                .material()
-                .index()
-                .and_then(|idx| material_name_map.get(&idx).cloned())
-                .or_else(|| material_name_map.get(&usize::MAX).cloned())
-                .unwrap_or_else(|| format!("{}_mat_default", prefix));
-
-            instances.push(GltfInstance {
-                mesh_name,
-                material_name,
-                model: node_transform,
-            });
         }
     }
 
-    Ok(instances)
+    out
+}
+
+fn walk_node(node: &gltf::Node, parent: Mat4, out: &mut HashMap<usize, Mat4>) {
+    let local = Mat4::from_cols_array_2d(&node.transform().matrix());
+    let world = parent * local;
+    out.insert(node.index(), world);
+
+    for child in node.children() {
+        walk_node(&child, world, out);
+    }
+}
+
+// ============================================================
+// Шаг 7: анимации
+// ============================================================
+
+fn load_animations(
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    skeletons: &HashMap<String, Skeleton>,
+    prefix: &str,
+) -> Result<HashMap<String, AnimationClip>> {
+    let mut animations: HashMap<String, AnimationClip> = HashMap::new();
+
+    for (anim_idx, animation) in doc.animations().enumerate() {
+        let name = animation
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}_anim_{}", prefix, anim_idx));
+
+        // Определяем, к какому скелету относится анимация.
+        let mut target_skeleton: Option<&Skeleton> = None;
+        for channel in animation.channels() {
+            let node_idx = channel.target().node().index();
+            for skel in skeletons.values() {
+                if skel.node_indices.contains(&node_idx) {
+                    target_skeleton = Some(skel);
+                    break;
+                }
+            }
+            if target_skeleton.is_some() {
+                break;
+            }
+        }
+
+        let Some(skel) = target_skeleton else {
+            log::debug!(
+                "Animation '{}' has no matching skeleton — skipping",
+                name
+            );
+            continue;
+        };
+
+        let joint_count = skel.len();
+        let mut clip = AnimationClip {
+            name: name.clone(),
+            duration: 0.0,
+            translations: vec![None; joint_count],
+            rotations: vec![None; joint_count],
+            scales: vec![None; joint_count],
+        };
+
+        for channel in animation.channels() {
+            let target = channel.target();
+            let node_idx = target.node().index();
+
+            let Some(&joint_idx) = skel.node_indices.iter().position(|&n| n == node_idx).as_ref()
+            else {
+                continue;
+            };
+
+            let reader = channel.reader(|b| Some(&buffers[b.index()]));
+            let times: Vec<f32> = match reader.read_inputs() {
+                Some(iter) => iter.collect(),
+                None => continue,
+            };
+            if times.is_empty() {
+                continue;
+            }
+            let last_time = *times.last().unwrap();
+            if last_time > clip.duration {
+                clip.duration = last_time;
+            }
+
+            let Some(outputs) = reader.read_outputs() else {
+                continue;
+            };
+
+            match outputs {
+                gltf::animation::util::ReadOutputs::Translations(iter) => {
+                    let values: Vec<[f32; 4]> =
+                        iter.map(|v| [v[0], v[1], v[2], 0.0]).collect();
+                    clip.translations[joint_idx] = Some(Track { times, values });
+                }
+                gltf::animation::util::ReadOutputs::Rotations(iter) => {
+                    let values: Vec<[f32; 4]> = iter
+                        .into_f32()
+                        .map(|q| [q[0], q[1], q[2], q[3]])
+                        .collect();
+                    clip.rotations[joint_idx] = Some(Track { times, values });
+                }
+                gltf::animation::util::ReadOutputs::Scales(iter) => {
+                    let values: Vec<[f32; 4]> =
+                        iter.map(|v| [v[0], v[1], v[2], 0.0]).collect();
+                    clip.scales[joint_idx] = Some(Track { times, values });
+                }
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
+                    // TODO: morph targets
+                }
+            }
+        }
+
+        animations.insert(name, clip);
+    }
+
+    Ok(animations)
+}
+
+// ============================================================
+// Утилиты
+// ============================================================
+
+/// Читает `Mat4`-accessor из glTF вручную.
+///
+/// В gltf 1.4 нет `Accessor::reader` для произвольных accessor'ов —
+/// работает только через `primitive.reader()` для вершинных атрибутов.
+/// Inverse bind — не вершинный атрибут, поэтому идём через `view()`.
+fn read_mat4_accessor(
+    accessor: &gltf::Accessor,
+    buffers: &[gltf::buffer::Data],
+    fallback_count: usize,
+) -> Vec<Mat4> {
+    let count = accessor.count();
+    let Some(view) = accessor.view() else {
+        return vec![Mat4::IDENTITY; fallback_count];
+    };
+    let data = &buffers[view.buffer().index()];
+    let base = view.offset() + accessor.offset();
+    // Mat4 = 16 floats = 64 байта. Stride по умолчанию = 64 (плотная упаковка).
+    let stride = view.stride().unwrap_or(64);
+
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = base + i * stride;
+        if offset + 64 > data.len() {
+            result.push(Mat4::IDENTITY);
+            continue;
+        }
+        let vals: [f32; 16] = bytemuck::pod_read_unaligned(&data[offset..offset + 64]);
+        result.push(Mat4::from_cols_array(&vals));
+    }
+    result
 }

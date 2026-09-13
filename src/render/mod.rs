@@ -8,12 +8,13 @@ pub mod material;
 pub mod mesh;
 pub mod renderer;
 pub mod shadow_cube;
+pub mod skinning;
 pub mod texture;
 
 pub use camera::Camera3D;
 pub use csm::{CASCADE_COUNT, CASCADE_SIZE};
 pub use debug::DebugView;
-pub use gltf_loader::{load_gltf_into, GltfInstance};
+pub use gltf_loader::{load_gltf_into, GltfInstance, LoadedGltf};
 pub use ibl::IblResources;
 pub use line::{LineBatch, LineVertex};
 pub use material::Material;
@@ -22,3 +23,4 @@ pub use renderer::{
     GpuLight, GpuPointLight, MeshDraw, PostFx, Renderer, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
 };
 pub use shadow_cube::CUBE_SIZE as POINT_SHADOW_SIZE;
+pub use skinning::{AnimationClip, Skeleton, MAX_JOINTS};

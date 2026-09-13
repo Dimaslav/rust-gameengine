@@ -7,6 +7,7 @@ use crate::render::csm::CASCADE_COUNT;
 use crate::render::debug::DebugView;
 use crate::render::material::Material;
 use crate::render::mesh::InstanceData;
+use crate::render::skinning::MAX_JOINTS;
 use crate::render::texture::Texture;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -36,8 +37,6 @@ pub struct GpuPointLight {
     pub color: [f32; 4],
 }
 
-/// Uniform камеры. Структура должна **побайтово** совпадать с WGSL-структурой
-/// `Camera` в шейдерах mesh/gbuffer/sky/deferred_lighting/lines.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct CameraUniform {
@@ -78,6 +77,29 @@ pub struct MaterialUniform {
     pub params: [f32; 4],
 }
 
+/// Uniform скелета: до 64 матриц костей. Identity для статичных мешей.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct SkeletonUniform {
+    pub joints: [[[f32; 4]; 4]; MAX_JOINTS],
+}
+
+impl SkeletonUniform {
+    pub fn identity() -> Self {
+        Self {
+            joints: [glam::Mat4::IDENTITY.to_cols_array_2d(); MAX_JOINTS],
+        }
+    }
+
+    pub fn from_matrices(mats: &[glam::Mat4]) -> Self {
+        let mut joints = [glam::Mat4::IDENTITY.to_cols_array_2d(); MAX_JOINTS];
+        for (i, m) in mats.iter().take(MAX_JOINTS).enumerate() {
+            joints[i] = m.to_cols_array_2d();
+        }
+        Self { joints }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct SsaoUniform {
@@ -98,7 +120,6 @@ pub struct DebugParams {
 pub struct MeshDraw {
     pub mesh: String,
     pub instances: Vec<InstanceData>,
-    /// Имя материала из `Renderer.materials`.
     pub texture: Option<String>,
 }
 
@@ -127,11 +148,12 @@ impl Default for PostFx {
 
 pub struct MaterialGpu {
     pub bind_group: wgpu::BindGroup,
-    pub _uniform: wgpu::Buffer,
+    pub _material_uniform: wgpu::Buffer,
+    pub _skeleton_uniform: wgpu::Buffer,
 }
 
 // ============================================================
-// Вспомогательные функции создания ресурсов
+// Хелперы создания ресурсов
 // ============================================================
 
 pub fn create_depth_view(
@@ -256,7 +278,8 @@ pub fn create_noise_texture(
     (texture, view)
 }
 
-pub fn build_material_bind_group(
+/// Создаёт object bind group: material (6 bindings) + skeleton (1 binding).
+pub fn build_object_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     material: &Material,
@@ -264,6 +287,7 @@ pub fn build_material_bind_group(
     mr_tex: &Texture,
     normal_tex: &Texture,
     emissive_tex: &Texture,
+    skeleton_matrices: &[glam::Mat4],
 ) -> MaterialGpu {
     let uniform = MaterialUniform {
         base_color: material.base_color,
@@ -281,14 +305,26 @@ pub fn build_material_bind_group(
         ],
     };
 
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let material_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("material_uniform"),
         contents: bytemuck::bytes_of(&uniform),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
+    let skeleton_uniform_data = if skeleton_matrices.is_empty() {
+        SkeletonUniform::identity()
+    } else {
+        SkeletonUniform::from_matrices(skeleton_matrices)
+    };
+
+    let skeleton_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("skeleton_uniform"),
+        contents: bytemuck::bytes_of(&skeleton_uniform_data),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("material_bind_group"),
+        label: Some("object_bind_group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -313,13 +349,18 @@ pub fn build_material_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: uniform_buffer.as_entire_binding(),
+                resource: material_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: skeleton_uniform.as_entire_binding(),
             },
         ],
     });
 
     MaterialGpu {
         bind_group,
-        _uniform: uniform_buffer,
+        _material_uniform: material_uniform,
+        _skeleton_uniform: skeleton_uniform,
     }
 }

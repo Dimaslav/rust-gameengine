@@ -44,15 +44,36 @@ impl Transform {
     }
 }
 
-/// Ссылка на меш в реестре Renderer.
 #[derive(Debug, Clone)]
 pub struct MeshHandle(pub String);
 
-/// Ссылка на материал в реестре Renderer.
 #[derive(Debug, Clone)]
 pub struct MaterialHandle(pub String);
 
-/// Вращение вокруг оси.
+/// Ссылка на скелет в реестре Renderer.
+#[derive(Debug, Clone)]
+pub struct SkeletonHandle(pub String);
+
+/// Проигрыватель анимации для сущности со скелетом.
+#[derive(Debug, Clone)]
+pub struct AnimationPlayer {
+    pub clip: String,
+    pub time: f32,
+    pub speed: f32,
+    pub looping: bool,
+}
+
+impl AnimationPlayer {
+    pub fn new(clip: impl Into<String>) -> Self {
+        Self {
+            clip: clip.into(),
+            time: 0.0,
+            speed: 1.0,
+            looping: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Spinner {
     pub axis: Vec3,

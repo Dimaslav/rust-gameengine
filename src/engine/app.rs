@@ -13,7 +13,7 @@ use super::time::Time;
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
-    fn update(&mut self, _world: &mut World, _input: &Input, _dt: f32) {}
+    fn update(&mut self, _world: &mut World, _input: &Input, _renderer: &mut Renderer, _dt: f32) {}
 
     fn collect_draws(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<MeshDraw> {
         Vec::new()
@@ -112,7 +112,10 @@ impl<G: Game> ApplicationHandler for App<G> {
 
                 self.world.update_events();
 
-                self.game.update(&mut self.world, &self.input, dt);
+                // Игровая логика (получает &mut Renderer для обновления skeleton).
+                if let Some(renderer) = &mut self.renderer {
+                    self.game.update(&mut self.world, &self.input, renderer, dt);
+                }
                 for sys in self.systems.iter_mut() {
                     sys.update(&mut self.world, dt);
                 }

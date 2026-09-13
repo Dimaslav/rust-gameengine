@@ -1,3 +1,5 @@
+// SSAO: читает normal из .rgb и depth_norm из .a текстуры gbuffer_normal.
+
 struct SsaoUniform {
     proj_scale: vec4<f32>,
     params: vec4<f32>,
@@ -51,25 +53,18 @@ fn sample_occlusion(
     let clip = vec4<f32>(sp.x * params.proj_scale.x, sp.y * params.proj_scale.y, -sp.z - bias, 1.0);
     let ndc = clip.xy / clip.w;
     let suv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
-        return 0.0;
-    }
-    // .r — depth_norm (R16Float gbuffer)
-    let sd = textureSample(t_gbuffer, s_lin, suv).r * params.proj_scale.z;
+    if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) { return 0.0; }
+    let sd = textureSample(t_gbuffer, s_lin, suv).a * params.proj_scale.z;
     let sample_z = -sd;
-    if (sample_z >= sp.z + bias) {
-        return 1.0;
-    }
+    if (sample_z >= sp.z + bias) { return 1.0; }
     return 0.0;
 }
 
 fn compute_occlusion(view_pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>) -> f32 {
     let radius = params.proj_scale.w;
     let bias = params.params.x;
-
     let noise_uv = uv * params.params.zw;
     let noise = textureSample(t_noise, s_lin, noise_uv).xyz;
-
     var tangent = normalize(noise - normal * dot(noise, normal));
     if (length(tangent) < 0.001) {
         tangent = normalize(cross(normal, vec3<f32>(0.0, 1.0, 0.0)));
@@ -86,20 +81,17 @@ fn compute_occlusion(view_pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>) -> f
     occlusion += sample_occlusion(view_pos, tbn, radius, bias, vec3<f32>( 0.0560,  0.0069,  0.1843));
     occlusion += sample_occlusion(view_pos, tbn, radius, bias, vec3<f32>(-0.0146,  0.1402,  0.0762));
     occlusion += sample_occlusion(view_pos, tbn, radius, bias, vec3<f32>( 0.0100, -0.1924,  0.0344));
-
     return occlusion / 8.0;
 }
 
 @fragment
 fn fs_ssao(in: VertexOutput) -> @location(0) vec4<f32> {
     let g = textureSample(t_gbuffer, s_lin, in.uv);
-    // FIX: depth_norm в .r (R16Float), а не .a
-    let depth_norm = g.r;
-
+    let depth_norm = g.a;    // depth в .a от gbuffer_normal
     if (depth_norm >= 0.9999) {
         return vec4<f32>(1.0, 0.0, 0.0, 1.0);
     }
-    let normal = normalize(g.xyz);
+    let normal = normalize(g.rgb);
     let view_pos = reconstruct_view_pos(in.uv, depth_norm);
     let ao = compute_occlusion(view_pos, normal, in.uv);
     return vec4<f32>(1.0 - ao, 0.0, 0.0, 1.0);

@@ -1,13 +1,13 @@
 //! Рендерер: публичный API, управление ресурсами, диспетчер проходов.
 //!
-//! Deferred pipeline (14B):
-//!   1. CSM (3 pass)
-//!   2. Cube shadow (6 pass)
-//!   3. G-buffer (3 MRT + depth_gray + depth)
-//!   4. SSAO + blur
-//!   5. Lighting (fullscreen, читает G-buffer)
-//!   6. Forward (sky + lines)
-//!   7. Bloom / Tonemap / Debug
+//! Deferred pipeline (14B + 14C):
+//!   1. Shadow (3 CSM + 6 cube)      — encode_csm_all / encode_cube_shadow_all
+//!   2. G-buffer (3 MRT + depth)     — encode_gbuffer_pass
+//!   3. SSAO + blur                  — encode_ssao_pass / encode_ssao_blur_pass
+//!   4. Lighting (fullscreen)        — encode_lighting_pass
+//!   5. Forward (sky + lines)        — encode_forward_pass
+//!   6. Post-processing              — encode_post_processing
+//!   7. Debug (F1–F6)                — encode_debug_pass
 
 mod gpu_types;
 mod passes;
@@ -39,31 +39,42 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
 
+    // Camera
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
+    // Lights (main pass)
     lights_buffer: wgpu::Buffer,
     lights_bind_group: wgpu::BindGroup,
 
+    // Shadow pass: 9 слотов (3 CSM + 6 cube faces)
     shadow_pass_buffer: wgpu::Buffer,
     shadow_pass_bind_group: wgpu::BindGroup,
     shadow_pass_stride: u64,
 
+    // CSM
     csm_array_view: wgpu::TextureView,
     csm_cascade_views: [wgpu::TextureView; CASCADE_COUNT],
     csm_sampler: wgpu::Sampler,
 
+    // Cube shadow (для первого point-light)
     cube_shadow_cube_view: wgpu::TextureView,
     cube_shadow_face_views: [wgpu::TextureView; 6],
     cube_shadow_sampler: wgpu::Sampler,
 
+    // Group 2: CSM + cube + SSAO + IBL (11 bindings)
     shadow2_layout: wgpu::BindGroupLayout,
 
+    // Textures / materials
     texture_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     material_bind_groups: HashMap<String, MaterialGpu>,
     default_material_bind_group: MaterialGpu,
 
+    /// Буферы скелетов: имя → GPU-буфер с 64 матрицами (14C).
+    pub skeleton_buffers: HashMap<String, wgpu::Buffer>,
+
+    // Fallback-текстуры
     fallback_texture: Texture,
     fallback_mr: Texture,
     fallback_normal: Texture,
@@ -101,17 +112,22 @@ pub struct Renderer {
     tonemap_uniform: wgpu::Buffer,
     ssao_uniform: wgpu::Buffer,
 
+    // Noise (для SSAO)
     _ssao_noise_tex: wgpu::Texture,
     ssao_noise_view: wgpu::TextureView,
 
+    // IBL
     ibl: Option<ibl::IblResources>,
 
+    // Size-dependent
     sd: SizeDependent,
 
+    // Instancing / lines
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     pub line_buffer: LineBuffer,
 
+    // Реестры
     pub meshes: HashMap<String, Mesh>,
     pub materials: MaterialRegistry,
     pub textures: HashMap<String, Texture>,
@@ -214,6 +230,7 @@ impl Renderer {
             }],
         });
 
+        // Group 2: CSM + cube + SSAO + IBL (11 bindings)
         let shadow2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow2_layout"),
             entries: &[
@@ -336,6 +353,7 @@ impl Renderer {
             ],
         });
 
+        // 7 bindings: 4 textures + sampler + material uniform + skeleton uniform
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material_layout"),
             entries: &[
@@ -395,6 +413,18 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<SkeletonUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -444,7 +474,6 @@ impl Renderer {
         let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lighting_layout"),
             entries: &[
-                // 0: albedo
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -455,7 +484,6 @@ impl Renderer {
                     },
                     count: None,
                 },
-                // 1: normal
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -466,7 +494,6 @@ impl Renderer {
                     },
                     count: None,
                 },
-                // 2: emissive
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -477,7 +504,6 @@ impl Renderer {
                     },
                     count: None,
                 },
-                // 3: depth
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -488,14 +514,12 @@ impl Renderer {
                     },
                     count: None,
                 },
-                // 4: sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // 5: camera uniform
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -840,7 +864,6 @@ impl Renderer {
 
         let lighting_pipeline = make_lighting_pipeline(
             &device,
-            &config,
             &lighting_layout,
             &lights_layout,
             &shadow2_layout,
@@ -927,7 +950,7 @@ impl Renderer {
         ).unwrap();
 
         let default_material = Material::default();
-        let default_material_bind_group = build_material_bind_group(
+        let default_material_bind_group = build_object_bind_group(
             &device,
             &material_layout,
             &default_material,
@@ -935,6 +958,7 @@ impl Renderer {
             &fallback_mr,
             &fallback_normal,
             &fallback_emissive,
+            &[],
         );
 
         let line_buffer = LineBuffer::new(&device, 4096);
@@ -963,6 +987,7 @@ impl Renderer {
             material_layout,
             material_bind_groups: HashMap::new(),
             default_material_bind_group,
+            skeleton_buffers: HashMap::new(),
             fallback_texture,
             fallback_mr,
             fallback_normal,
@@ -1061,7 +1086,8 @@ impl Renderer {
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
-        let gpu = build_material_bind_group(
+        // Статичный материал — identity-скелет.
+        let gpu = build_object_bind_group(
             &self.device,
             &self.material_layout,
             &mat,
@@ -1069,14 +1095,85 @@ impl Renderer {
             mr_tex,
             normal_tex,
             emissive_tex,
+            &[],
         );
 
         self.materials.insert(name.clone(), mat);
         self.material_bind_groups.insert(name, gpu);
     }
 
+    pub fn has_material(&self, name: &str) -> bool {
+        self.material_bind_groups.contains_key(name)
+    }
+
+    /// Создать материал с привязкой к скелету (14C).
+    /// Пока использует identity-матрицы; актуальная поза приходит через
+    /// `update_skeleton` каждый кадр.
+    pub fn add_material_with_skeleton(
+        &mut self,
+        name: &str,
+        mat: Material,
+        _skeleton_name: &str,
+    ) {
+        let base_tex = mat.base_color_texture.as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_texture);
+        let mr_tex = mat.metallic_roughness_texture.as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_mr);
+        let normal_tex = mat.normal_texture.as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_normal);
+        let emissive_tex = mat.emissive_texture.as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_emissive);
+
+        let gpu = build_object_bind_group(
+            &self.device,
+            &self.material_layout,
+            &mat,
+            base_tex,
+            mr_tex,
+            normal_tex,
+            emissive_tex,
+            &[],
+        );
+
+        self.materials.insert(name.to_string(), mat);
+        self.material_bind_groups.insert(name.to_string(), gpu);
+    }
+
     pub fn materials_default(&self) -> &Material {
         &self.default_material
+    }
+
+    pub fn add_skeleton(&mut self, name: impl Into<String>, matrices: &[Mat4]) {
+        let name = name.into();
+        let data = if matrices.is_empty() {
+            SkeletonUniform::identity()
+        } else {
+            SkeletonUniform::from_matrices(matrices)
+        };
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skeleton_buffer"),
+            size: std::mem::size_of::<SkeletonUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&data));
+        self.skeleton_buffers.insert(name, buffer);
+    }
+
+    pub fn update_skeleton(&mut self, name: &str, matrices: &[Mat4]) {
+        let Some(buffer) = self.skeleton_buffers.get(name) else {
+            return;
+        };
+        let data = if matrices.is_empty() {
+            SkeletonUniform::identity()
+        } else {
+            SkeletonUniform::from_matrices(matrices)
+        };
+        self.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&data));
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -1232,7 +1329,7 @@ impl Renderer {
         self.queue
             .write_buffer(&self.lights_buffer, 0, bytemuck::bytes_of(&lights_uniform));
 
-        // Shadow pass uniforms (9 слотов)
+        // Shadow pass uniforms — 9 слотов
         {
             let stride = self.shadow_pass_stride as usize;
             let light_size = std::mem::size_of::<LightsUniform>();
@@ -1316,7 +1413,9 @@ impl Renderer {
             let stride = std::mem::size_of::<InstanceData>() as u64;
             let mut offset_bytes: u64 = 0;
             for d in draws {
-                if d.instances.is_empty() { continue; }
+                if d.instances.is_empty() {
+                    continue;
+                }
                 self.queue.write_buffer(
                     &self.instance_buffer,
                     offset_bytes,
@@ -1327,7 +1426,8 @@ impl Renderer {
         }
 
         // === Lines ===
-        self.line_buffer.upload(&self.device, &self.queue, line_vertices);
+        self.line_buffer
+            .upload(&self.device, &self.queue, line_vertices);
 
         // === Frame ===
         let frame = self.surface.get_current_texture()?;
@@ -1340,18 +1440,12 @@ impl Renderer {
                 label: Some("encoder"),
             });
 
-        // 1. CSM
-        for cascade in 0..CASCADE_COUNT {
-            let slot_offset = (cascade as u64 * self.shadow_pass_stride) as u32;
-            passes::encode_csm_pass(self, &mut encoder, draws, cascade, slot_offset);
-        }
+        // 1. CSM (3 каскада)
+        passes::encode_csm_all(self, &mut encoder, draws);
 
-        // 2. Cube shadow
+        // 2. Cube shadow (6 граней)
         if cube_count > 0 {
-            for face in 0..6u64 {
-                let slot_offset = ((3 + face) as u64 * self.shadow_pass_stride) as u32;
-                passes::encode_cube_shadow_pass(self, &mut encoder, draws, face as usize, slot_offset);
-            }
+            passes::encode_cube_shadow_all(self, &mut encoder, draws);
         }
 
         // 3. G-buffer
@@ -1361,20 +1455,17 @@ impl Renderer {
         passes::encode_ssao_pass(self, &mut encoder);
         passes::encode_ssao_blur_pass(self, &mut encoder);
 
-        // 5. Lighting
+        // 5. Lighting (включая sky на фоне)
         passes::encode_lighting_pass(self, &mut encoder);
 
-        // 6. Forward (sky + lines)
-        passes::encode_forward_pass(self, &mut encoder);
+        // 6. Forward (lines)
+        passes::encode_forward_pass(self, &mut encoder, line_vertices);
 
-        // 7. Post
+        // 7. Post-processing или debug view
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);
         } else {
-            passes::encode_bright_pass(self, &mut encoder);
-            passes::encode_blur_h_pass(self, &mut encoder);
-            passes::encode_blur_v_pass(self, &mut encoder);
-            passes::encode_composite_pass(self, &mut encoder, &swap_view);
+            passes::encode_post_processing(self, &mut encoder, &swap_view);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -1426,11 +1517,6 @@ fn make_gbuffer_pipeline(
                 }),
                 Some(wgpu::ColorTargetState {
                     format: GBUFFER_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: SSAO_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
@@ -1493,7 +1579,7 @@ fn make_sky_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::LessEqual,   // <-- было Always
+            depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -1598,7 +1684,6 @@ fn make_line_pipeline(
 
 fn make_lighting_pipeline(
     device: &wgpu::Device,
-    config: &wgpu::SurfaceConfiguration,
     lighting_layout: &wgpu::BindGroupLayout,
     lights_layout: &wgpu::BindGroupLayout,
     shadow2_layout: &wgpu::BindGroupLayout,

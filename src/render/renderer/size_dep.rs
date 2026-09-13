@@ -1,7 +1,7 @@
 //! Ресурсы, зависящие от размера окна.
 //!
-//! После перехода на deferred (14B) MSAA временно отключён — все таргеты
-//! single-sample. MSAA вернётся в 14B-3 через FXAA.
+//! 14C-2: убран `gbuffer_depth_gray` — depth упакован в `gbuffer_normal.a`.
+//! SSAO читает normal из `.rgb` и depth из `.a` одной текстуры.
 
 use crate::render::ibl::IblResources;
 
@@ -19,26 +19,20 @@ pub struct SizeDependent {
     pub blur_v_bind_group: wgpu::BindGroup,
     pub composite_bind_group: wgpu::BindGroup,
 
-    // G-buffer: 3 MRT + depth_gray + depth
+    // G-buffer: 3 MRT + depth
     pub gbuffer_albedo_view: wgpu::TextureView,
     pub gbuffer_normal_view: wgpu::TextureView,
     pub gbuffer_emissive_view: wgpu::TextureView,
-    pub gbuffer_depth_gray_view: wgpu::TextureView,
     pub gbuffer_depth_view: wgpu::TextureView,
 
-    // SSAO
     pub ssao_view: wgpu::TextureView,
     pub ssao_blur_view: wgpu::TextureView,
     pub ssao_bind_group: wgpu::BindGroup,
     pub ssao_blur_bind_group: wgpu::BindGroup,
 
-    // Shadow2 (CSM + cube + SSAO + IBL)
     pub shadow2_bind_group: wgpu::BindGroup,
-
-    // Lighting (group 0: G-buffer + camera)
     pub lighting_bind_group: wgpu::BindGroup,
 
-    // Debug
     pub debug_uniform: wgpu::Buffer,
     pub debug_bind_ssao: wgpu::BindGroup,
     pub debug_bind_gbuffer: wgpu::BindGroup,
@@ -74,35 +68,32 @@ pub fn build_size_dependent(
     let bw = (w / 2).max(1);
     let bh = (h / 2).max(1);
 
-    // HDR — единственный target для lighting + forward
     let hdr_view = create_color_target(device, "hdr", w, h, HDR_FORMAT, 1, true);
-
     let bloom_a_view = create_color_target(device, "bloom_a", bw, bh, HDR_FORMAT, 1, true);
     let bloom_b_view = create_color_target(device, "bloom_b", bw, bh, HDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
 
-    // G-buffer: 3 MRT + depth_gray + depth
+    // G-buffer: 3 MRT + depth
     let gbuffer_albedo_view =
         create_color_target(device, "gbuffer_albedo", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_normal_view =
         create_color_target(device, "gbuffer_normal", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_emissive_view =
         create_color_target(device, "gbuffer_emissive", w, h, GBUFFER_FORMAT, 1, true);
-    let gbuffer_depth_gray_view =
-        create_color_target(device, "gbuffer_depth_gray", w, h, SSAO_FORMAT, 1, true);
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
 
     // SSAO
     let ssao_view = create_color_target(device, "ssao", w, h, SSAO_FORMAT, 1, true);
     let ssao_blur_view = create_color_target(device, "ssao_blur", w, h, SSAO_FORMAT, 1, true);
 
+    // SSAO читает normal+depth из gbuffer_normal (rgb=normal, a=depth_norm).
     let ssao_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao_bind_group"),
         layout: ssao_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&gbuffer_depth_gray_view),
+                resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -142,7 +133,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // Group 2: CSM + cube + SSAO + IBL (11 bindings)
     let shadow2_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shadow2_bind_group"),
         layout: shadow2_layout,
@@ -194,7 +184,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // Lighting bind group (group 0 для deferred_lighting.wgsl)
     let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("lighting_bind_group"),
         layout: lighting_layout,
@@ -226,7 +215,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // Bloom/tonemap
     let bright_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("bright_bind_group"),
         layout: bloom_layout,
@@ -307,7 +295,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // === Debug ===
     let debug_uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("debug_uniform"),
         size: std::mem::size_of::<DebugParams>() as u64,
@@ -337,34 +324,17 @@ pub fn build_size_dependent(
     };
 
     let debug_bind_ssao = make_debug_bg("debug_bg_ssao", &ssao_blur_view);
-    let debug_bind_gbuffer = make_debug_bg("debug_bg_gbuffer", &gbuffer_albedo_view);
-    let debug_bind_depth = make_debug_bg("debug_bg_depth", &gbuffer_depth_gray_view);
+    let debug_bind_gbuffer = make_debug_bg("debug_bg_gbuffer", &gbuffer_normal_view);
+    let debug_bind_depth = make_debug_bg("debug_bg_depth", &gbuffer_normal_view);
     let debug_bind_hdr = make_debug_bg("debug_bg_hdr", &hdr_view);
 
     SizeDependent {
         hdr_view,
-        bloom_a_view,
-        bloom_b_view,
-        linear_sampler,
-        bright_bind_group,
-        blur_h_bind_group,
-        blur_v_bind_group,
-        composite_bind_group,
-        gbuffer_albedo_view,
-        gbuffer_normal_view,
-        gbuffer_emissive_view,
-        gbuffer_depth_gray_view,
-        gbuffer_depth_view,
-        ssao_view,
-        ssao_blur_view,
-        ssao_bind_group,
-        ssao_blur_bind_group,
-        shadow2_bind_group,
-        lighting_bind_group,
-        debug_uniform,
-        debug_bind_ssao,
-        debug_bind_gbuffer,
-        debug_bind_depth,
-        debug_bind_hdr,
+        bloom_a_view, bloom_b_view, linear_sampler,
+        bright_bind_group, blur_h_bind_group, blur_v_bind_group, composite_bind_group,
+        gbuffer_albedo_view, gbuffer_normal_view, gbuffer_emissive_view, gbuffer_depth_view,
+        ssao_view, ssao_blur_view, ssao_bind_group, ssao_blur_bind_group,
+        shadow2_bind_group, lighting_bind_group,
+        debug_uniform, debug_bind_ssao, debug_bind_gbuffer, debug_bind_depth, debug_bind_hdr,
     }
 }

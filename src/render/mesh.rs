@@ -2,6 +2,11 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+/// Вершина 3D-меша. Поддерживает 4-костный скелетный скиннинг.
+///
+/// Если `weights` все нули — скиннинг не применяется (обычный меш).
+/// Если хотя бы одна weight > 0 — позиция/normal считаются как смесь
+/// `world_bone_matrix * position` по 4 костям.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex3D {
@@ -9,14 +14,37 @@ pub struct Vertex3D {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// Индексы 4 костей, влияющих на вершину.
+    pub joints: [u32; 4],
+    /// Веса 4 костей. Сумма весов = 1.0 для скелетных мешей.
+    pub weights: [f32; 4],
 }
 
 impl Vertex3D {
-    const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    /// Статическая вершина без скелета.
+    pub fn static_vertex(
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        color: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            color,
+            joints: [0; 4],
+            weights: [0.0; 4],
+        }
+    }
+
+    const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
-        3 => Float32x4
+        3 => Float32x4,
+        4 => Uint32x4,
+        5 => Float32x4
     ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -28,10 +56,7 @@ impl Vertex3D {
     }
 }
 
-/// Per-instance данные: матрица модели + обратная транспонированная 3×3
-/// (для нормалей) + цвет. Раскладка: mat4, mat4, vec4.
-///
-/// Считается на CPU один раз при сборке draw call, шейдер только умножает.
+/// Per-instance данные: матрица модели + inverse-transpose 3×3 + цвет.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct InstanceData {
@@ -55,13 +80,11 @@ impl InstanceData {
         }
     }
 
-    // Атрибуты 0-3 — вершинные. Инстансные начинаются с 4.
-    // mat4 = 4 атрибута по vec4 (модель), mat4 = 4 атрибута (нормали),
-    // vec4 = 1 атрибут (цвет).
+    // Вершинные атрибуты теперь занимают 0..5, значит инстансные — с 6.
     const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
-        4  => Float32x4, 5  => Float32x4, 6  => Float32x4, 7  => Float32x4,
-        8  => Float32x4, 9  => Float32x4, 10 => Float32x4, 11 => Float32x4,
-        12 => Float32x4
+        6  => Float32x4, 7  => Float32x4, 8  => Float32x4, 9  => Float32x4,
+        10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
+        14 => Float32x4
     ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -77,8 +100,6 @@ pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
-    /// Bounding sphere в локальном пространстве: (center, radius).
-    /// Используется для frustum culling.
     pub bounds_center: Vec3,
     pub bounds_radius: f32,
 }
@@ -101,8 +122,6 @@ impl Mesh {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Bounding sphere: центр = середина AABB, радиус = расстояние от центра
-        // до самой дальней вершины.
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         for v in vertices {
@@ -126,8 +145,6 @@ impl Mesh {
         }
     }
 
-    /// Мировой bounding sphere для конкретной модели.
-    /// Приближение: масштаб = максимальная длина колонок 3×3.
     pub fn world_bounds(&self, model: &Mat4) -> (Vec3, f32) {
         let center_world = model.transform_point3(self.bounds_center);
         let m3 = Mat3::from_mat4(*model);
@@ -139,7 +156,7 @@ impl Mesh {
     }
 
     // ============================================================
-    // Генераторы
+    // Генераторы (все возвращают меши без скелета — joints=[0;4], weights=0)
     // ============================================================
 
     pub fn cube(device: &wgpu::Device, size: f32) -> Self {
@@ -167,12 +184,12 @@ impl Mesh {
                     (base[1] + right[1] * cr + up[1] * cu) * h,
                     (base[2] + right[2] * cr + up[2] * cu) * h,
                 ];
-                vertices.push(Vertex3D {
-                    position: pos,
-                    normal: *normal,
-                    uv: [uvs[i].0, uvs[i].1],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                });
+                vertices.push(Vertex3D::static_vertex(
+                    pos,
+                    *normal,
+                    [uvs[i].0, uvs[i].1],
+                    [1.0, 1.0, 1.0, 1.0],
+                ));
             }
             indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
         }
@@ -193,12 +210,12 @@ impl Mesh {
             for seg in 0..=segments {
                 let theta = std::f32::consts::TAU * seg as f32 / segments as f32;
                 let (st, ct) = theta.sin_cos();
-                vertices.push(Vertex3D {
-                    position: [ct * r, y, st * r],
-                    normal: [ct * sp, cp, st * sp],
-                    uv: [seg as f32 / segments as f32, ring as f32 / rings as f32],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                });
+                vertices.push(Vertex3D::static_vertex(
+                    [ct * r, y, st * r],
+                    [ct * sp, cp, st * sp],
+                    [seg as f32 / segments as f32, ring as f32 / rings as f32],
+                    [1.0, 1.0, 1.0, 1.0],
+                ));
             }
         }
 
@@ -224,12 +241,12 @@ impl Mesh {
             for x in 0..=n {
                 let fx = x as f32 / n as f32;
                 let fz = z as f32 / n as f32;
-                vertices.push(Vertex3D {
-                    position: [fx * size - h, 0.0, fz * size - h],
-                    normal: [0.0, 1.0, 0.0],
-                    uv: [fx, fz],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                });
+                vertices.push(Vertex3D::static_vertex(
+                    [fx * size - h, 0.0, fz * size - h],
+                    [0.0, 1.0, 0.0],
+                    [fx, fz],
+                    [1.0, 1.0, 1.0, 1.0],
+                ));
             }
         }
 

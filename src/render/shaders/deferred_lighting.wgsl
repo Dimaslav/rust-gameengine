@@ -103,16 +103,13 @@ fn pbr_light(
     let h = normalize(l + v);
     let n_dot_h = max(dot(n, h), 0.0);
     let h_dot_v = max(dot(h, v), 0.0);
-
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
     let f = fresnel_schlick(h_dot_v, f0);
     let d = distribution_ggx(n_dot_h, roughness);
     let g = geometry_smith(n_dot_v, n_dot_l, roughness);
-
     let specular = (d * g) * f / (4.0 * n_dot_v * n_dot_l + 1e-4);
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
-
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
@@ -135,14 +132,11 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
     var cascade = 0i;
     if (view_depth > lights.cascade_splits.x) { cascade = 1i; }
     if (view_depth > lights.cascade_splits.y) { cascade = 2i; }
-
     let light_clip = lights.cascade_vp[cascade] * vec4<f32>(world_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
     if (ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
-
     let bias = 0.002;
     let depth = ndc.z - bias;
     var shadow = 0.0;
@@ -171,8 +165,6 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth = textureSample(t_depth, s_lin, in.uv);
-
-    // === Sky ===
     if (depth >= 0.9999) {
         let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, 1.0, 1.0);
         let world_h = camera.inv_view_proj * ndc;
@@ -181,7 +173,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         return vec4<f32>(textureSampleLevel(t_env, s_env, sky_dir, 0.0).rgb, 1.0);
     }
 
-    // === G-buffer ===
     let g_albedo = textureSample(t_albedo, s_lin, in.uv);
     let g_normal = textureSample(t_normal, s_lin, in.uv);
     let g_emissive = textureSample(t_emissive, s_lin, in.uv);
@@ -189,7 +180,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let albedo = g_albedo.rgb;
     let metallic = g_albedo.a;
     let n = normalize(g_normal.rgb);
-    let roughness = g_normal.a;
+    let roughness = g_emissive.a;    // NEW: roughness из emissive.a
     let emissive = g_emissive.rgb;
 
     let world_pos = reconstruct_world_pos(in.uv, depth);
@@ -198,31 +189,28 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     let ao = textureSample(t_ssao, s_ssao, in.uv).r;
 
-    // IBL приглушён — иначе ambient забивает directional свет и тени.
     var color = emissive;
     color += ibl_diffuse(n, albedo, metallic) * ao * IBL_STRENGTH;
     color += ibl_specular(n, v, albedo, metallic, roughness) * ao * IBL_STRENGTH;
 
-    // === Directional + CSM ===
     let dir_count = lights.counts.x;
     let csm_shadow = compute_csm_shadow(world_pos, view_depth);
     for (var i: u32 = 0u; i < dir_count; i = i + 1u) {
         let idx = i * 2u;
-        let dir_w = lights.dir_lights[idx];        // xyz=direction, w=intensity
-        let col_w = lights.dir_lights[idx + 1u];   // rgb=color
+        let dir_w = lights.dir_lights[idx];
+        let col_w = lights.dir_lights[idx + 1u];
         let l = normalize(dir_w.xyz);
         let radiance = col_w.rgb * dir_w.w;
         let s = select(1.0, csm_shadow, i == 0u);
         color += pbr_light(n, v, l, albedo, metallic, roughness, radiance * s);
     }
 
-    // === Point lights + cube shadow ===
     let pt_count = lights.counts.y;
     let cube_count = lights.counts.z;
     for (var i: u32 = 0u; i < pt_count; i = i + 1u) {
         let idx = i * 2u;
-        let pos_r = lights.point_lights[idx];      // xyz=pos, w=range
-        let col_i = lights.point_lights[idx + 1u]; // rgb=color, a=intensity
+        let pos_r = lights.point_lights[idx];
+        let col_i = lights.point_lights[idx + 1u];
         let to_light = pos_r.xyz - world_pos;
         let dist = length(to_light);
         if (dist < pos_r.w) {

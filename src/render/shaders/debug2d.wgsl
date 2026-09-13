@@ -1,6 +1,3 @@
-// Отладочный вывод texture_2d<f32>.
-// mode: 0 = RGB clamp, 1 = R grayscale, 2 = normal remap, 3 = R grayscale (depth)
-
 struct DebugParams {
     mode: u32,
     _pad0: u32,
@@ -41,7 +38,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     switch (params.mode) {
         case 1u: { return vec4<f32>(vec3<f32>(c.r), 1.0); }
         case 2u: { return vec4<f32>(c.rgb * 0.5 + 0.5, 1.0); }
-        case 3u: { return vec4<f32>(vec3<f32>(c.r), 1.0); }  // .r — depth из R16Float
+        case 3u: { return vec4<f32>(vec3<f32>(c.a), 1.0); }  // depth из .a normal texture
         default: { return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0); }
     }
 }
