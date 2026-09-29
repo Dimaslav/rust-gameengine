@@ -31,6 +31,7 @@ impl Texture {
         Self::from_bytes(device, queue, layout, &bytes, path)
     }
 
+    /// sRGB-текстура (base color, emissive). Аппаратное декодирование в linear.
     pub fn from_rgba(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -40,6 +41,39 @@ impl Texture {
         height: u32,
         label: &str,
     ) -> Result<Self> {
+        Self::from_rgba_with_format(device, queue, layout, data, width, height, label, true)
+    }
+
+    /// Linear-текстура (normal map, metallic-roughness, маски).
+    /// Без sRGB-декодирования — данные приходят в шейдер «как есть».
+    pub fn from_rgba_linear(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        label: &str,
+    ) -> Result<Self> {
+        Self::from_rgba_with_format(device, queue, layout, data, width, height, label, false)
+    }
+
+    pub fn from_rgba_with_format(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        label: &str,
+        srgb: bool,
+    ) -> Result<Self> {
+        let format = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+
         let size = wgpu::Extent3d {
             width,
             height,
@@ -52,7 +86,7 @@ impl Texture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -100,10 +134,15 @@ impl Texture {
             ],
         });
 
-        Ok(Self { texture, view, sampler, bind_group, size: (width, height) })
+        Ok(Self {
+            texture,
+            view,
+            sampler,
+            bind_group,
+            size: (width, height),
+        })
     }
 
-    /// Однопиксельная белая текстура — дефолт для примитивов.
     pub fn white(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -112,9 +151,6 @@ impl Texture {
         Self::from_rgba(device, queue, layout, &[255, 255, 255, 255], 1, 1, "white")
     }
 
-    /// Однопиксельная текстура заданного цвета. Удобно для fallback'ов
-    /// (base_color = white, emissive = black, normal = (128,128,255),
-    ///  metallic_roughness = (255,255,0,255) — AO=1, rough=1, metal=0).
     pub fn from_solid(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -123,5 +159,16 @@ impl Texture {
         label: &str,
     ) -> Result<Self> {
         Self::from_rgba(device, queue, layout, &rgba, 1, 1, label)
+    }
+
+    /// Linear-вариант solid-текстуры (для normal/MR fallback'ов).
+    pub fn from_solid_linear(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        rgba: [u8; 4],
+        label: &str,
+    ) -> Result<Self> {
+        Self::from_rgba_linear(device, queue, layout, &rgba, 1, 1, label)
     }
 }

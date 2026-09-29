@@ -1,13 +1,4 @@
 //! Рендерер: публичный API, управление ресурсами, диспетчер проходов.
-//!
-//! Deferred pipeline (14B + 14C):
-//!   1. Shadow (3 CSM + 6 cube)      — encode_csm_all / encode_cube_shadow_all
-//!   2. G-buffer (3 MRT + depth)     — encode_gbuffer_pass
-//!   3. SSAO + blur                  — encode_ssao_pass / encode_ssao_blur_pass
-//!   4. Lighting (fullscreen)        — encode_lighting_pass
-//!   5. Forward (sky + lines)        — encode_forward_pass
-//!   6. Post-processing              — encode_post_processing
-//!   7. Debug (F1–F6)                — encode_debug_pass
 
 mod gpu_types;
 mod passes;
@@ -57,12 +48,12 @@ pub struct Renderer {
     csm_cascade_views: [wgpu::TextureView; CASCADE_COUNT],
     csm_sampler: wgpu::Sampler,
 
-    // Cube shadow (для первого point-light)
+    // Cube shadow
     cube_shadow_cube_view: wgpu::TextureView,
     cube_shadow_face_views: [wgpu::TextureView; 6],
     cube_shadow_sampler: wgpu::Sampler,
 
-    // Group 2: CSM + cube + SSAO + IBL (11 bindings)
+    // Group 2
     shadow2_layout: wgpu::BindGroupLayout,
 
     // Textures / materials
@@ -71,8 +62,10 @@ pub struct Renderer {
     material_bind_groups: HashMap<String, MaterialGpu>,
     default_material_bind_group: MaterialGpu,
 
-    /// Буферы скелетов: имя → GPU-буфер с 64 матрицами (14C).
-    pub skeleton_buffers: HashMap<String, wgpu::Buffer>,
+    /// Буферы скелетов: имя → Arc<GPU-буфер с 64 матрицами>.
+    /// Общий Arc между материалами позволяет одному update_skeleton
+    /// обновить все skinned-копии одного скелета.
+    pub skeleton_buffers: HashMap<String, Arc<wgpu::Buffer>>,
 
     // Fallback-текстуры
     fallback_texture: Texture,
@@ -92,7 +85,7 @@ pub struct Renderer {
     blur_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
 
-    // Debug pipelines
+    // Debug
     debug_layout: wgpu::BindGroupLayout,
     debug_depth_layout: wgpu::BindGroupLayout,
     debug2d_pipeline: wgpu::RenderPipeline,
@@ -112,7 +105,7 @@ pub struct Renderer {
     tonemap_uniform: wgpu::Buffer,
     ssao_uniform: wgpu::Buffer,
 
-    // Noise (для SSAO)
+    // Noise
     _ssao_noise_tex: wgpu::Texture,
     ssao_noise_view: wgpu::TextureView,
 
@@ -230,7 +223,6 @@ impl Renderer {
             }],
         });
 
-        // Group 2: CSM + cube + SSAO + IBL (11 bindings)
         let shadow2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow2_layout"),
             entries: &[
@@ -353,7 +345,6 @@ impl Renderer {
             ],
         });
 
-        // 7 bindings: 4 textures + sampler + material uniform + skeleton uniform
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material_layout"),
             entries: &[
@@ -470,7 +461,6 @@ impl Renderer {
             ],
         });
 
-        // Lighting layout (group 0 в deferred_lighting.wgsl)
         let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lighting_layout"),
             entries: &[
@@ -845,42 +835,16 @@ impl Renderer {
         // ============================================================
         // Pipelines
         // ============================================================
-        let sky_pipeline = make_sky_pipeline(
-            &device,
-            &camera_layout,
-            &lights_layout,
-            &shadow2_layout,
-        );
-
-        let gbuffer_pipeline = make_gbuffer_pipeline(
-            &device,
-            &camera_layout,
-            &material_layout,
-        );
-
+        let sky_pipeline = make_sky_pipeline(&device, &camera_layout, &lights_layout, &shadow2_layout);
+        let gbuffer_pipeline = make_gbuffer_pipeline(&device, &camera_layout, &material_layout);
         let shadow_pipeline = make_shadow_pipeline(&device, &shadow_pass_layout);
-
         let line_pipeline = make_line_pipeline(&device, &camera_layout);
-
-        let lighting_pipeline = make_lighting_pipeline(
-            &device,
-            &lighting_layout,
-            &lights_layout,
-            &shadow2_layout,
-        );
-
+        let lighting_pipeline = make_lighting_pipeline(&device, &lighting_layout, &lights_layout, &shadow2_layout);
         let (ssao_pipeline, ssao_blur_pipeline) = make_ssao_pipelines(&device, &ssao_layout);
-
         let (bright_pipeline, blur_pipeline) = make_bloom_pipelines(&device, &bloom_layout);
-
         let tonemap_pipeline = make_tonemap_pipeline(&device, &config, &tonemap_layout);
-
-        let (debug2d_pipeline, debug_depth_pipeline) = make_debug_pipelines(
-            &device,
-            &config,
-            &debug_layout,
-            &debug_depth_layout,
-        );
+        let (debug2d_pipeline, debug_depth_pipeline) =
+            make_debug_pipelines(&device, &config, &debug_layout, &debug_depth_layout);
 
         // ============================================================
         // Noise
@@ -913,7 +877,6 @@ impl Renderer {
             &ibl,
         );
 
-        // CSM debug bind group
         let csm_debug_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("csm_debug_bg"),
             layout: &debug_depth_layout,
@@ -938,16 +901,33 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // sRGB fallback (base color, emissive)
         let fallback_texture = Texture::white(&device, &queue, &texture_layout).unwrap();
-        let fallback_mr = Texture::from_solid(
-            &device, &queue, &texture_layout, [255, 255, 0, 255], "fallback_mr",
-        ).unwrap();
-        let fallback_normal = Texture::from_solid(
-            &device, &queue, &texture_layout, [128, 128, 255, 255], "fallback_normal",
-        ).unwrap();
         let fallback_emissive = Texture::from_solid(
-            &device, &queue, &texture_layout, [0, 0, 0, 255], "fallback_emissive",
-        ).unwrap();
+            &device,
+            &queue,
+            &texture_layout,
+            [0, 0, 0, 255],
+            "fallback_emissive",
+        )
+        .unwrap();
+        // Linear fallback (MR, normal)
+        let fallback_mr = Texture::from_solid_linear(
+            &device,
+            &queue,
+            &texture_layout,
+            [255, 255, 0, 255],
+            "fallback_mr",
+        )
+        .unwrap();
+        let fallback_normal = Texture::from_solid_linear(
+            &device,
+            &queue,
+            &texture_layout,
+            [128, 128, 255, 255],
+            "fallback_normal",
+        )
+        .unwrap();
 
         let default_material = Material::default();
         let default_material_bind_group = build_object_bind_group(
@@ -958,7 +938,7 @@ impl Renderer {
             &fallback_mr,
             &fallback_normal,
             &fallback_emissive,
-            &[],
+            create_identity_skeleton_buffer(&device),
         );
 
         let line_buffer = LineBuffer::new(&device, 4096);
@@ -1038,6 +1018,7 @@ impl Renderer {
         self.meshes.insert(name.into(), mesh);
     }
 
+    /// sRGB-текстура (base color, emissive).
     pub fn load_texture_rgba(
         &mut self,
         name: &str,
@@ -1046,6 +1027,27 @@ impl Renderer {
         height: u32,
     ) -> anyhow::Result<()> {
         let tex = Texture::from_rgba(
+            &self.device,
+            &self.queue,
+            &self.texture_layout,
+            data,
+            width,
+            height,
+            name,
+        )?;
+        self.textures.insert(name.to_string(), tex);
+        Ok(())
+    }
+
+    /// Linear-текстура (normal map, metallic-roughness).
+    pub fn load_texture_rgba_linear(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<()> {
+        let tex = Texture::from_rgba_linear(
             &self.device,
             &self.queue,
             &self.texture_layout,
@@ -1086,7 +1088,7 @@ impl Renderer {
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
-        // Статичный материал — identity-скелет.
+        // Статичный материал — собственный identity-скелет.
         let gpu = build_object_bind_group(
             &self.device,
             &self.material_layout,
@@ -1095,7 +1097,7 @@ impl Renderer {
             mr_tex,
             normal_tex,
             emissive_tex,
-            &[],
+            create_identity_skeleton_buffer(&self.device),
         );
 
         self.materials.insert(name.clone(), mat);
@@ -1106,14 +1108,15 @@ impl Renderer {
         self.material_bind_groups.contains_key(name)
     }
 
-    /// Создать материал с привязкой к скелету (14C).
-    /// Пока использует identity-матрицы; актуальная поза приходит через
-    /// `update_skeleton` каждый кадр.
+    /// Создать материал, разделяющий буфер скелета `skeleton_name`.
+    /// Если скелет ещё не зарегистрирован, используется identity-буфер;
+    /// позднее можно связать пересозданием материала, но типично скелет
+    /// уже создан в `add_skeleton` до материалов.
     pub fn add_material_with_skeleton(
         &mut self,
         name: &str,
         mat: Material,
-        _skeleton_name: &str,
+        skeleton_name: &str,
     ) {
         let base_tex = mat.base_color_texture.as_deref()
             .and_then(|n| self.textures.get(n))
@@ -1128,6 +1131,12 @@ impl Renderer {
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
+        let skeleton_uniform = self
+            .skeleton_buffers
+            .get(skeleton_name)
+            .cloned()
+            .unwrap_or_else(|| create_identity_skeleton_buffer(&self.device));
+
         let gpu = build_object_bind_group(
             &self.device,
             &self.material_layout,
@@ -1136,7 +1145,7 @@ impl Renderer {
             mr_tex,
             normal_tex,
             emissive_tex,
-            &[],
+            skeleton_uniform,
         );
 
         self.materials.insert(name.to_string(), mat);
@@ -1147,6 +1156,10 @@ impl Renderer {
         &self.default_material
     }
 
+    /// Регистрирует скелет: создаёт GPU-буфер с матрицами и запоминает его
+    /// как `Arc`. Все материалы, вызвавшие `add_material_with_skeleton` с
+    /// этим именем, будут автоматически получать обновления через
+    /// `update_skeleton`.
     pub fn add_skeleton(&mut self, name: impl Into<String>, matrices: &[Mat4]) {
         let name = name.into();
         let data = if matrices.is_empty() {
@@ -1154,16 +1167,18 @@ impl Renderer {
         } else {
             SkeletonUniform::from_matrices(matrices)
         };
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skeleton_buffer"),
             size: std::mem::size_of::<SkeletonUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
         self.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&data));
         self.skeleton_buffers.insert(name, buffer);
     }
 
+    /// Обновляет матрицы скелета. Так как все материалы ссылаются на тот
+    /// же `Arc<Buffer>`, запись видна всем сразу.
     pub fn update_skeleton(&mut self, name: &str, matrices: &[Mat4]) {
         let Some(buffer) = self.skeleton_buffers.get(name) else {
             return;
@@ -1212,7 +1227,6 @@ impl Renderer {
 
         self.ibl = Some(ibl_owned);
 
-        // Пересоздаём CSM debug bind group с новым linear_sampler
         self.csm_debug_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("csm_debug_bg"),
             layout: &self.debug_depth_layout,
@@ -1254,10 +1268,9 @@ impl Renderer {
         line_vertices: &[LineVertex],
         dir_lights: &[GpuLight],
         point_lights: &[GpuPointLight],
-        _ambient: [f32; 3],
+        ambient: [f32; 3],
         postfx: PostFx,
     ) -> Result<(), wgpu::SurfaceError> {
-        // === Camera ===
         let view = camera.view_matrix();
         let proj = camera.proj_matrix();
         let vp = proj * view;
@@ -1272,7 +1285,6 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
-        // === Lights ===
         let dir_light_dir = dir_lights
             .first()
             .map(|l| Vec3::new(l.direction[0], l.direction[1], l.direction[2]))
@@ -1312,12 +1324,13 @@ impl Renderer {
             csm_packed[i] = cascade_vp[i].to_cols_array_2d();
         }
 
-        let ambient_dummy = [0.0f32, 0.0, 0.0, 1.0];
+        // === Ambient теперь реально уходит на GPU ===
+        let ambient_color = [ambient[0], ambient[1], ambient[2], 1.0];
 
         let lights_uniform = LightsUniform {
             cascade_vp: csm_packed,
             cascade_splits: [splits[1], splits[2], splits[3], 0.0],
-            ambient_color: ambient_dummy,
+            ambient_color,
             counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
             light_view_proj: cascade_vp[0].to_cols_array_2d(),
             _pad0: [0.0; 4],
@@ -1339,7 +1352,7 @@ impl Renderer {
                 let u = LightsUniform {
                     cascade_vp: csm_packed,
                     cascade_splits: [splits[1], splits[2], splits[3], 0.0],
-                    ambient_color: ambient_dummy,
+                    ambient_color,
                     counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
                     light_view_proj: mat.to_cols_array_2d(),
                     _pad0: [0.0; 4],
@@ -1440,28 +1453,16 @@ impl Renderer {
                 label: Some("encoder"),
             });
 
-        // 1. CSM (3 каскада)
         passes::encode_csm_all(self, &mut encoder, draws);
-
-        // 2. Cube shadow (6 граней)
         if cube_count > 0 {
             passes::encode_cube_shadow_all(self, &mut encoder, draws);
         }
-
-        // 3. G-buffer
         passes::encode_gbuffer_pass(self, &mut encoder, draws);
-
-        // 4. SSAO
         passes::encode_ssao_pass(self, &mut encoder);
         passes::encode_ssao_blur_pass(self, &mut encoder);
-
-        // 5. Lighting (включая sky на фоне)
         passes::encode_lighting_pass(self, &mut encoder);
-
-        // 6. Forward (lines)
         passes::encode_forward_pass(self, &mut encoder, line_vertices);
 
-        // 7. Post-processing или debug view
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);
         } else {

@@ -1,5 +1,7 @@
 //! GPU-структуры, константы и вспомогательные функции.
 
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -77,7 +79,6 @@ pub struct MaterialUniform {
     pub params: [f32; 4],
 }
 
-/// Uniform скелета: до 64 матриц костей. Identity для статичных мешей.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct SkeletonUniform {
@@ -146,10 +147,15 @@ impl Default for PostFx {
     }
 }
 
+/// GPU-представление материала.
+///
+/// `skeleton_uniform` — **Arc**, чтобы один и тот же буфер скелета
+/// мог быть привязан к нескольким материалам (skinned-копии) и
+/// обновлялся из `Renderer::update_skeleton` через общий Arc.
 pub struct MaterialGpu {
     pub bind_group: wgpu::BindGroup,
     pub _material_uniform: wgpu::Buffer,
-    pub _skeleton_uniform: wgpu::Buffer,
+    pub skeleton_uniform: Arc<wgpu::Buffer>,
 }
 
 // ============================================================
@@ -164,7 +170,11 @@ pub fn create_depth_view(
 ) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
@@ -190,7 +200,11 @@ pub fn create_color_target(
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
@@ -224,8 +238,12 @@ pub fn create_noise_texture(
         let sign = ((bits >> 31) & 0x1) as u16;
         let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
         let mant = (bits >> 13) & 0x3FF;
-        if exp <= 0 { return sign << 15; }
-        if exp >= 31 { return (sign << 15) | 0x7C00; }
+        if exp <= 0 {
+            return sign << 15;
+        }
+        if exp >= 31 {
+            return (sign << 15) | 0x7C00;
+        }
         (sign << 15) | ((exp as u16) << 10) | (mant as u16)
     }
 
@@ -249,7 +267,11 @@ pub fn create_noise_texture(
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_noise"),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -271,14 +293,33 @@ pub fn create_noise_texture(
             bytes_per_row: Some(size * 8),
             rows_per_image: Some(size),
         },
-        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
     );
 
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
 
+/// Создаёт identity-буфер скелета (для статичных материалов).
+pub fn create_identity_skeleton_buffer(device: &wgpu::Device) -> Arc<wgpu::Buffer> {
+    let data = SkeletonUniform::identity();
+    Arc::new(
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("skeleton_uniform_identity"),
+            contents: bytemuck::bytes_of(&data),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        }),
+    )
+}
+
 /// Создаёт object bind group: material (6 bindings) + skeleton (1 binding).
+/// Скелетный буфер передаётся снаружи как `Arc` — так один и тот же
+/// скелет может быть привязан к нескольким skinned-материалам и
+/// обновляться одним write_buffer'ом.
 pub fn build_object_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -287,7 +328,7 @@ pub fn build_object_bind_group(
     mr_tex: &Texture,
     normal_tex: &Texture,
     emissive_tex: &Texture,
-    skeleton_matrices: &[glam::Mat4],
+    skeleton_uniform: Arc<wgpu::Buffer>,
 ) -> MaterialGpu {
     let uniform = MaterialUniform {
         base_color: material.base_color,
@@ -308,18 +349,6 @@ pub fn build_object_bind_group(
     let material_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("material_uniform"),
         contents: bytemuck::bytes_of(&uniform),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-
-    let skeleton_uniform_data = if skeleton_matrices.is_empty() {
-        SkeletonUniform::identity()
-    } else {
-        SkeletonUniform::from_matrices(skeleton_matrices)
-    };
-
-    let skeleton_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("skeleton_uniform"),
-        contents: bytemuck::bytes_of(&skeleton_uniform_data),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -361,6 +390,6 @@ pub fn build_object_bind_group(
     MaterialGpu {
         bind_group,
         _material_uniform: material_uniform,
-        _skeleton_uniform: skeleton_uniform,
+        skeleton_uniform,
     }
 }

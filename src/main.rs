@@ -25,7 +25,9 @@ use render::{
 fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> bool {
     for p in planes {
         let dist = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
-        if dist < -radius { return false; }
+        if dist < -radius {
+            return false;
+        }
     }
     true
 }
@@ -81,19 +83,35 @@ struct DemoGame {
 impl DemoGame {
     fn new() -> Self {
         let dir_lights = vec![
-            GpuLight { direction: [0.4, 1.0, 0.3, 2.5], color: [1.0, 0.98, 0.9, 0.0] },
-            GpuLight { direction: [-0.6, 0.3, -0.7, 0.4], color: [1.0, 0.5, 0.3, 0.0] },
+            GpuLight {
+                direction: [0.4, 1.0, 0.3, 2.5],
+                color: [1.0, 0.98, 0.9, 0.0],
+            },
+            GpuLight {
+                direction: [-0.6, 0.3, -0.7, 0.4],
+                color: [1.0, 0.5, 0.3, 0.0],
+            },
         ];
         let point_lights = vec![
-            GpuPointLight { position: [0.0, 3.0, 0.0, 18.0], color: [1.0, 0.4, 0.2, 12.0] },
-            GpuPointLight { position: [10.0, 4.0, 10.0, 14.0], color: [0.2, 0.6, 1.0, 10.0] },
-            GpuPointLight { position: [-10.0, 4.0, -10.0, 14.0], color: [0.4, 1.0, 0.4, 10.0] },
+            GpuPointLight {
+                position: [0.0, 3.0, 0.0, 18.0],
+                color: [1.0, 0.4, 0.2, 12.0],
+            },
+            GpuPointLight {
+                position: [10.0, 4.0, 10.0, 14.0],
+                color: [0.2, 0.6, 1.0, 10.0],
+            },
+            GpuPointLight {
+                position: [-10.0, 4.0, -10.0, 14.0],
+                color: [0.4, 1.0, 0.4, 10.0],
+            },
         ];
 
         Self {
             camera: Camera3D::new(16.0 / 9.0),
             systems: vec![Box::new(RotationSystem), Box::new(MovementSystem)],
-            dir_lights, point_lights,
+            dir_lights,
+            point_lights,
             postfx: PostFx {
                 bloom_threshold: 1.5,
                 bloom_strength: 0.4,
@@ -102,8 +120,10 @@ impl DemoGame {
                 ssao_radius: 0.6,
                 debug_view: DebugView::Final,
             },
-            spawned: false, dragging: false,
-            show_grid: true, show_culling: true,
+            spawned: false,
+            dragging: false,
+            show_grid: true,
+            show_culling: true,
             orbit_phase: 0.0,
             gltf_instances: Vec::new(),
             skeletons: HashMap::new(),
@@ -124,27 +144,52 @@ impl Game for DemoGame {
             for x in 0..64 {
                 let idx = (y * 64 + x) * 4;
                 let c = if ((x / 8) + (y / 8)) % 2 == 0 { 220 } else { 60 };
-                data[idx] = c; data[idx + 1] = c; data[idx + 2] = c; data[idx + 3] = 255;
+                data[idx] = c;
+                data[idx + 1] = c;
+                data[idx + 2] = c;
+                data[idx + 3] = 255;
             }
         }
-        renderer.load_texture_rgba("checker", &data, 64, 64).expect("checker");
+        renderer
+            .load_texture_rgba("checker", &data, 64, 64)
+            .expect("checker");
 
-        renderer.add_material("ground",
-            Material::new([0.55, 0.60, 0.55, 1.0]).with_metallic_roughness(0.0, 0.85));
-        renderer.add_material("checker_red",
-            Material::new([1.0, 0.35, 0.35, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
-        renderer.add_material("checker_blue",
-            Material::new([0.35, 0.55, 1.0, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
-        renderer.add_material("gold",
-            Material::new([1.0, 0.85, 0.3, 1.0]).with_metallic_roughness(1.0, 0.25));
-        renderer.add_material("emissive",
-            Material::new([1.0, 1.0, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5).with_emissive([2.5, 2.2, 0.6]));
+        renderer.add_material(
+            "ground",
+            Material::new([0.55, 0.60, 0.55, 1.0]).with_metallic_roughness(0.0, 0.85),
+        );
+        renderer.add_material(
+            "checker_red",
+            Material::new([1.0, 0.35, 0.35, 1.0])
+                .with_texture("checker")
+                .with_metallic_roughness(0.0, 0.5),
+        );
+        renderer.add_material(
+            "checker_blue",
+            Material::new([0.35, 0.55, 1.0, 1.0])
+                .with_texture("checker")
+                .with_metallic_roughness(0.0, 0.5),
+        );
+        renderer.add_material(
+            "gold",
+            Material::new([1.0, 0.85, 0.3, 1.0]).with_metallic_roughness(1.0, 0.25),
+        );
+        renderer.add_material(
+            "emissive",
+            Material::new([1.0, 1.0, 1.0, 1.0])
+                .with_metallic_roughness(0.0, 0.5)
+                .with_emissive([2.5, 2.2, 0.6]),
+        );
 
         // === glTF с skin/animation ===
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             Ok(loaded) => {
-                println!("Loaded glTF: {} instances, {} skeletons, {} animations",
-                    loaded.instances.len(), loaded.skeletons.len(), loaded.animations.len());
+                println!(
+                    "Loaded glTF: {} instances, {} skeletons, {} animations",
+                    loaded.instances.len(),
+                    loaded.skeletons.len(),
+                    loaded.animations.len()
+                );
                 self.gltf_instances = loaded.instances;
                 self.skeletons = loaded.skeletons;
                 self.animations = loaded.animations;
@@ -155,19 +200,45 @@ impl Game for DemoGame {
         }
     }
 
-    fn update(&mut self, world: &mut World, input: &Input, renderer: &mut Renderer, dt: f32) {
+    /// Возвращает `false`, если игра хочет завершить приложение.
+    fn update(
+        &mut self,
+        world: &mut World,
+        input: &Input,
+        renderer: &mut Renderer,
+        dt: f32,
+    ) -> bool {
         use winit::keyboard::KeyCode;
 
-        if input.key_pressed(KeyCode::Escape) { std::process::exit(0); }
-        if input.key_pressed(KeyCode::KeyG) { self.show_grid = !self.show_grid; }
-        if input.key_pressed(KeyCode::KeyC) { self.show_culling = !self.show_culling; }
+        if input.key_pressed(KeyCode::Escape) {
+            return false;
+        }
 
-        if input.key_pressed(KeyCode::F1) { self.postfx.debug_view = DebugView::Final; }
-        if input.key_pressed(KeyCode::F2) { self.postfx.debug_view = DebugView::Ssao; }
-        if input.key_pressed(KeyCode::F3) { self.postfx.debug_view = DebugView::GbufferNormal; }
-        if input.key_pressed(KeyCode::F4) { self.postfx.debug_view = DebugView::GbufferDepth; }
-        if input.key_pressed(KeyCode::F5) { self.postfx.debug_view = DebugView::HdrPreBloom; }
-        if input.key_pressed(KeyCode::F6) { self.postfx.debug_view = DebugView::CsmCascade0; }
+        if input.key_pressed(KeyCode::KeyG) {
+            self.show_grid = !self.show_grid;
+        }
+        if input.key_pressed(KeyCode::KeyC) {
+            self.show_culling = !self.show_culling;
+        }
+
+        if input.key_pressed(KeyCode::F1) {
+            self.postfx.debug_view = DebugView::Final;
+        }
+        if input.key_pressed(KeyCode::F2) {
+            self.postfx.debug_view = DebugView::Ssao;
+        }
+        if input.key_pressed(KeyCode::F3) {
+            self.postfx.debug_view = DebugView::GbufferNormal;
+        }
+        if input.key_pressed(KeyCode::F4) {
+            self.postfx.debug_view = DebugView::GbufferDepth;
+        }
+        if input.key_pressed(KeyCode::F5) {
+            self.postfx.debug_view = DebugView::HdrPreBloom;
+        }
+        if input.key_pressed(KeyCode::F6) {
+            self.postfx.debug_view = DebugView::CsmCascade0;
+        }
 
         if input.key_down(KeyCode::BracketLeft) {
             self.postfx.bloom_threshold = (self.postfx.bloom_threshold - dt * 0.5).max(0.1);
@@ -198,7 +269,9 @@ impl Game for DemoGame {
         let lmb = input.mouse_down(winit::event::MouseButton::Left);
         if lmb {
             let (dx, dy) = input.mouse_delta;
-            if self.dragging { self.camera.orbit(dx * 0.005, dy * 0.005); }
+            if self.dragging {
+                self.camera.orbit(dx * 0.005, dy * 0.005);
+            }
             self.dragging = true;
         } else {
             self.dragging = false;
@@ -208,11 +281,21 @@ impl Game for DemoGame {
         }
         let speed = 8.0 * dt;
         let mut pan = (0.0, 0.0);
-        if input.key_down(KeyCode::KeyW) { pan.1 -= speed; }
-        if input.key_down(KeyCode::KeyS) { pan.1 += speed; }
-        if input.key_down(KeyCode::KeyA) { pan.0 -= speed; }
-        if input.key_down(KeyCode::KeyD) { pan.0 += speed; }
-        if pan != (0.0, 0.0) { self.camera.pan(pan.0, pan.1); }
+        if input.key_down(KeyCode::KeyW) {
+            pan.1 -= speed;
+        }
+        if input.key_down(KeyCode::KeyS) {
+            pan.1 += speed;
+        }
+        if input.key_down(KeyCode::KeyA) {
+            pan.0 -= speed;
+        }
+        if input.key_down(KeyCode::KeyD) {
+            pan.0 += speed;
+        }
+        if pan != (0.0, 0.0) {
+            self.camera.pan(pan.0, pan.1);
+        }
 
         // Point-lights анимация
         self.orbit_phase += dt * 0.5;
@@ -237,11 +320,18 @@ impl Game for DemoGame {
                 let radius = 3.0 + t * 30.0;
                 let y = (t * 8.0).sin() * 2.0;
                 let e = world.spawn();
-                world.insert(e, Transform::new(angle.cos() * radius, y + 1.0, angle.sin() * radius)
-                    .with_rotation(Quat::from_axis_angle(Vec3::Y, angle))
-                    .with_scale(0.6 + t * 0.4));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * radius, y + 1.0, angle.sin() * radius)
+                        .with_rotation(Quat::from_axis_angle(Vec3::Y, angle))
+                        .with_scale(0.6 + t * 0.4),
+                );
                 world.insert(e, MeshHandle("cube".into()));
-                let mat = match i % 3 { 0 => "checker_red", 1 => "checker_blue", _ => "gold" };
+                let mat = match i % 3 {
+                    0 => "checker_red",
+                    1 => "checker_blue",
+                    _ => "gold",
+                };
                 world.insert(e, MaterialHandle(mat.into()));
                 if i % 10 == 0 {
                     world.insert(e, Spinner::new(Vec3::new(0.2, 1.0, 0.3), 1.0 + t * 3.0));
@@ -251,22 +341,36 @@ impl Game for DemoGame {
             for i in 0..20 {
                 let angle = i as f32 / 20.0 * std::f32::consts::TAU;
                 let e = world.spawn();
-                world.insert(e, Transform::new(angle.cos() * 12.0, 6.0 + (i as f32 * 0.3).sin(), angle.sin() * 12.0));
+                world.insert(
+                    e,
+                    Transform::new(
+                        angle.cos() * 12.0,
+                        6.0 + (i as f32 * 0.3).sin(),
+                        angle.sin() * 12.0,
+                    ),
+                );
                 world.insert(e, MeshHandle("sphere".into()));
                 let mat = if i % 2 == 0 { "emissive" } else { "gold" };
                 world.insert(e, MaterialHandle(mat.into()));
-                world.insert(e, Velocity::new(angle.cos() * 0.4, 0.2, angle.sin() * 0.4));
+                world.insert(
+                    e,
+                    Velocity::new(angle.cos() * 0.4, 0.2, angle.sin() * 0.4),
+                );
             }
 
             // glTF инстансы — спавним в центре, каждый со своим скелетом + анимацией
-            let mut first_anim_entity: Option<ecs::Entity> = None;
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
                 let (scale, rot, trans) = inst.model.to_scale_rotation_translation();
                 // Сместим в сторону, чтобы не пересекалось с лампочками
                 let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 0.0);
-                world.insert(e, Transform::at(trans + offset).with_rotation(rot).with_scale(scale.x));
+                world.insert(
+                    e,
+                    Transform::at(trans + offset)
+                        .with_rotation(rot)
+                        .with_scale(scale.x),
+                );
                 world.insert(e, MeshHandle(inst.mesh_name.clone()));
                 world.insert(e, MaterialHandle(inst.material_name.clone()));
                 if let Some(skel_name) = &inst.skeleton_name {
@@ -274,13 +378,9 @@ impl Game for DemoGame {
                 }
                 if let Some(clip) = &inst.default_animation {
                     world.insert(e, AnimationPlayer::new(clip.clone()));
-                    if first_anim_entity.is_none() {
-                        first_anim_entity = Some(e);
-                    }
                 }
                 index += 1;
             }
-            let _ = first_anim_entity;
 
             println!("Spawned demo scene: 2000 cubes + 20 spheres + glTF");
         }
@@ -293,18 +393,25 @@ impl Game for DemoGame {
         // === Анимация: продвигаем время, пересчитываем матрицы, шлём в renderer ===
         let anim_entities: Vec<_> = world.query::<AnimationPlayer>().map(|(e, _)| e).collect();
         for e in anim_entities {
-            // Обновляем время.
-            let (clip_name, time, _speed, looping) = {
-                let Some(player) = world.get::<AnimationPlayer>(e) else { continue };
-                (player.clip.clone(), player.time, player.speed, player.looping)
+            // Читаем плеер.
+            let Some(player) = world.get::<AnimationPlayer>(e) else {
+                continue;
+            };
+            let clip_name = player.clip.clone();
+            let speed = player.speed;
+            let looping = player.looping;
+
+            // Продвигаем время.
+            let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
+                player.time += dt * speed;
+                player.time
+            } else {
+                continue;
             };
 
-            let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
-                player.time += dt * player.speed;
-                player.time
-            } else { time };
-
-            let Some(clip) = self.animations.get(&clip_name) else { continue };
+            let Some(clip) = self.animations.get(&clip_name) else {
+                continue;
+            };
             let duration = clip.duration;
             let final_time = if looping && duration > 0.0 {
                 new_time % duration
@@ -313,8 +420,12 @@ impl Game for DemoGame {
             };
 
             // Скелет.
-            let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else { continue };
-            let Some(skel) = self.skeletons.get(&skel_handle.0) else { continue };
+            let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else {
+                continue;
+            };
+            let Some(skel) = self.skeletons.get(&skel_handle.0) else {
+                continue;
+            };
 
             // Local pose + joint matrices.
             let local_pose = clip.local_pose(final_time, &skel.local_bind);
@@ -322,6 +433,9 @@ impl Game for DemoGame {
 
             renderer.update_skeleton(&skel_handle.0, &joint_matrices);
         }
+
+        // Продолжаем цикл.
+        true
     }
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
@@ -335,17 +449,23 @@ impl Game for DemoGame {
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
                 world.get::<MaterialHandle>(e),
-            ) else { continue };
+            ) else {
+                continue;
+            };
 
             if self.show_culling {
                 if let Some(mesh) = renderer.meshes.get(&m.0) {
                     let model = t.matrix();
                     let (center, radius) = mesh.world_bounds(&model);
-                    if !sphere_in_frustum(center, radius, &planes) { continue; }
+                    if !sphere_in_frustum(center, radius, &planes) {
+                        continue;
+                    }
                 }
             }
 
-            let material = renderer.materials.get(&mat.0)
+            let material = renderer
+                .materials
+                .get(&mat.0)
                 .unwrap_or_else(|| renderer.materials_default());
 
             let key = (m.0.clone(), mat.0.clone(), material.base_color.map(f32::to_bits));
@@ -353,28 +473,55 @@ impl Game for DemoGame {
             buckets.entry(key).or_default().push(inst);
         }
 
-        buckets.into_iter()
+        buckets
+            .into_iter()
             .map(|((mesh, material_name, _), instances)| MeshDraw {
-                mesh, instances, texture: Some(material_name),
+                mesh,
+                instances,
+                texture: Some(material_name),
             })
             .collect()
     }
 
     fn collect_lines(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<LineVertex> {
-        if !self.show_grid { return Vec::new(); }
+        if !self.show_grid {
+            return Vec::new();
+        }
         let mut batch = LineBatch::new();
-        batch.grid(100.0, 2.0, [0.15, 0.18, 0.22, 1.0], [0.35, 0.40, 0.48, 1.0], 5);
+        batch.grid(
+            100.0,
+            2.0,
+            [0.15, 0.18, 0.22, 1.0],
+            [0.35, 0.40, 0.48, 1.0],
+            5,
+        );
         batch.axes(5.0);
         batch.vertices().to_vec()
     }
 
-    fn dir_lights(&self) -> Vec<GpuLight> { self.dir_lights.clone() }
-    fn point_lights(&self) -> Vec<GpuPointLight> { self.point_lights.clone() }
-    fn ambient(&self) -> [f32; 3] { [0.15, 0.17, 0.22] }
-    fn postfx(&self) -> PostFx { self.postfx }
+    fn dir_lights(&self) -> Vec<GpuLight> {
+        self.dir_lights.clone()
+    }
 
-    fn camera(&self) -> &Camera3D { &self.camera }
-    fn camera_mut(&mut self) -> &mut Camera3D { &mut self.camera }
+    fn point_lights(&self) -> Vec<GpuPointLight> {
+        self.point_lights.clone()
+    }
+
+    fn ambient(&self) -> [f32; 3] {
+        [0.15, 0.17, 0.22]
+    }
+
+    fn postfx(&self) -> PostFx {
+        self.postfx
+    }
+
+    fn camera(&self) -> &Camera3D {
+        &self.camera
+    }
+
+    fn camera_mut(&mut self) -> &mut Camera3D {
+        &mut self.camera
+    }
 }
 
 fn main() {

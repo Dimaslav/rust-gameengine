@@ -7,6 +7,7 @@
 //! - **Скелетный skinning** — 4-костный blending, MAX_JOINTS = 64.
 //! - **Animation** — translation/rotation/scale, linear + slerp интерполяция.
 //! - **PBR materials** — base_color, metallic, roughness, normal, emissive.
+//! - **Корректный colorspace** — baseColor/emissive → sRGB, normal/MR → linear.
 //!
 //! Что НЕ реализовано (задел на будущее):
 //! - texture samplers из glTF (сейчас всегда LINEAR + CLAMP)
@@ -103,7 +104,38 @@ pub fn load_gltf_into_with(
 
     let prefix = &opts.prefix;
 
-    // === 1. Текстуры ===
+    // ============================================================
+    // Шаг 0: категоризация изображений — sRGB vs linear
+    // ============================================================
+    //
+    // По спецификации glTF 2.0:
+    //   baseColorTexture, emissiveTexture       → sRGB
+    //   metallicRoughnessTexture, normalTexture → linear
+    //
+    // Если одно и то же изображение используется и как sRGB, и как linear —
+    // отдаём приоритет sRGB (baseColor важнее визуально). В реальных
+    // экспортерах такое встречается крайне редко.
+    let mut srgb_used: HashSet<usize> = HashSet::new();
+    let mut linear_used: HashSet<usize> = HashSet::new();
+    for mat in doc.materials() {
+        let pbr = mat.pbr_metallic_roughness();
+        if let Some(t) = pbr.base_color_texture() {
+            srgb_used.insert(t.texture().source().index());
+        }
+        if let Some(t) = pbr.metallic_roughness_texture() {
+            linear_used.insert(t.texture().source().index());
+        }
+        if let Some(t) = mat.normal_texture() {
+            linear_used.insert(t.texture().source().index());
+        }
+        if let Some(t) = mat.emissive_texture() {
+            srgb_used.insert(t.texture().source().index());
+        }
+    }
+
+    // ============================================================
+    // Шаг 1: текстуры
+    // ============================================================
     let mut texture_name_map: HashMap<usize, String> = HashMap::new();
     if opts.load_textures {
         for (i, img) in images.iter().enumerate() {
@@ -111,16 +143,29 @@ pub fn load_gltf_into_with(
             let data = &img.pixels;
             let w = img.width;
             let h = img.height;
+
+            // linear только если изображение реально используется в
+            // linear-слоте и не используется в sRGB.
+            let is_linear = linear_used.contains(&i) && !srgb_used.contains(&i);
+
             match img.format {
                 gltf::image::Format::R8G8B8A8 => {
-                    renderer.load_texture_rgba(&name, data, w, h)?;
+                    if is_linear {
+                        renderer.load_texture_rgba_linear(&name, data, w, h)?;
+                    } else {
+                        renderer.load_texture_rgba(&name, data, w, h)?;
+                    }
                 }
                 gltf::image::Format::R8G8B8 => {
                     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
                     for px in data.chunks_exact(3) {
                         rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
                     }
-                    renderer.load_texture_rgba(&name, &rgba, w, h)?;
+                    if is_linear {
+                        renderer.load_texture_rgba_linear(&name, &rgba, w, h)?;
+                    } else {
+                        renderer.load_texture_rgba(&name, &rgba, w, h)?;
+                    }
                 }
                 _ => {
                     log::warn!(
@@ -135,15 +180,20 @@ pub fn load_gltf_into_with(
         }
     }
 
-    // === 2. Материалы ===
+    // ============================================================
+    // Шаг 2: материалы
+    // ============================================================
     let material_name_map = load_materials(renderer, &doc, prefix, &texture_name_map)?;
 
-    // === 3. Скелеты ===
+    // ============================================================
+    // Шаг 3: скелеты
+    // ============================================================
     let (skeletons, skeleton_by_skin_index) =
         load_skeletons(renderer, &doc, &buffers, prefix, opts.max_joints)?;
 
-    // === 4. Дедуплицированные меши ===
-    // Один (mesh_index, prim_index) — один GPU-меш.
+    // ============================================================
+    // Шаг 4: дедуплицированные меши
+    // ============================================================
     let mut mesh_name_map: HashMap<(usize, usize), String> = HashMap::new();
     let mut meshes_info: HashMap<String, usize> = HashMap::new();
 
@@ -165,10 +215,14 @@ pub fn load_gltf_into_with(
         mesh_name_map.insert((*mesh_idx, *p_idx), name);
     }
 
-    // === 5. World-матрицы нод (иерархия) ===
+    // ============================================================
+    // Шаг 5: world-матрицы нод (иерархия)
+    // ============================================================
     let world_matrices = collect_world_transforms(&doc);
 
-    // === 6. Инстансы ===
+    // ============================================================
+    // Шаг 6: инстансы
+    // ============================================================
     let default_animation_name: Option<String> = if opts.load_animations {
         doc.animations()
             .next()
@@ -201,7 +255,6 @@ pub fn load_gltf_into_with(
                 continue;
             };
 
-            // Material name (raw, без skeleton-suffix).
             let raw_material = primitive
                 .material()
                 .index()
@@ -209,7 +262,8 @@ pub fn load_gltf_into_with(
                 .unwrap_or_else(|| format!("{}_mat_default", prefix));
 
             // Если меш скиннится — создаём skinned-копию материала с тем же
-            // набором текстур, но отдельной bind group (чтобы skeleton был свой).
+            // набором текстур, но отдельной bind group (skeleton привязан
+            // через общий Arc<Buffer>, см. Renderer::add_material_with_skeleton).
             let material_name = if let Some(skel_name) = &node_skeleton_name {
                 let skinned_mat = format!("{}__skinned", raw_material);
                 if !renderer.has_material(&skinned_mat) {
@@ -236,7 +290,9 @@ pub fn load_gltf_into_with(
         }
     }
 
-    // === 7. Анимации ===
+    // ============================================================
+    // Шаг 7: анимации
+    // ============================================================
     let animations = if opts.load_animations {
         load_animations(&doc, &buffers, &skeletons, prefix)?
     } else {
@@ -282,7 +338,7 @@ fn load_materials(
         material.metallic = pbr.metallic_factor();
         material.roughness = pbr.roughness_factor();
 
-        // Base color texture
+        // Base color texture (sRGB)
         if let Some(tex_info) = pbr.base_color_texture() {
             let img_idx = tex_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -290,7 +346,7 @@ fn load_materials(
             }
         }
 
-        // Metallic-roughness texture (R=occlusion, G=roughness, B=metallic)
+        // Metallic-roughness texture (linear, R=AO, G=roughness, B=metallic)
         if let Some(tex_info) = pbr.metallic_roughness_texture() {
             let img_idx = tex_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -298,7 +354,7 @@ fn load_materials(
             }
         }
 
-        // Normal texture
+        // Normal texture (linear)
         if let Some(normal_info) = mat.normal_texture() {
             let img_idx = normal_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -307,7 +363,7 @@ fn load_materials(
             }
         }
 
-        // Emissive factor + texture
+        // Emissive factor + texture (sRGB)
         let em = mat.emissive_factor();
         material.emissive = [em[0], em[1], em[2]];
         if let Some(tex_info) = mat.emissive_texture() {
@@ -325,7 +381,8 @@ fn load_materials(
     if map.is_empty() {
         let name = format!("{}_mat_default", prefix);
         renderer.add_material(&name, Material::default());
-        map.insert(usize::MAX, name);
+        // Ключ usize::MAX не читается — оставлен для симметрии с
+        // fallback-веткой `unwrap_or_else` выше.
     }
 
     Ok(map)
@@ -360,7 +417,6 @@ fn load_skeletons(
         }
         let joints = &joints[..joints.len().min(max_joints)];
 
-        // Маппинг node_index → joint_index.
         let mut node_to_joint: HashMap<usize, usize> = HashMap::new();
         let mut names = Vec::with_capacity(joints.len());
         let mut node_indices = Vec::with_capacity(joints.len());
@@ -371,7 +427,7 @@ fn load_skeletons(
             node_to_joint.insert(node_index, joint_idx);
         }
 
-        // Родители костей — обход всего дерева, чтобы найти parent-child среди узлов.
+        // Родители костей — обход всего дерева.
         let mut parents = vec![PARENT_NONE; joints.len()];
         for node in doc.nodes() {
             let parent_idx = node.index();
@@ -392,7 +448,7 @@ fn load_skeletons(
             None => vec![Mat4::IDENTITY; joints.len()],
         };
 
-        // Bind pose (локальные матрицы из иерархии узлов).
+        // Bind pose.
         let local_bind: Vec<Mat4> = joints
             .iter()
             .map(|n| Mat4::from_cols_array_2d(&n.transform().matrix()))
@@ -415,10 +471,9 @@ fn load_skeletons(
 }
 
 // ============================================================
-// Шаг 4: меши (дедупликация)
+// Шаг 4: меши
 // ============================================================
 
-/// Загружает один primitive, создаёт GPU-буфер, возвращает количество вершин.
 fn upload_primitive_mesh(
     renderer: &mut Renderer,
     primitive: &gltf::Primitive,
@@ -453,7 +508,6 @@ fn upload_primitive_mesh(
         .map(|i| i.into_u32().collect())
         .unwrap_or_else(|| (0..vertex_count as u32).collect());
 
-    // Skin: joints + weights (может отсутствовать).
     let joints_u16: Vec<[u16; 4]> = reader
         .read_joints(0)
         .map(|iter| {
@@ -468,13 +522,11 @@ fn upload_primitive_mesh(
         .map(|iter| iter.into_f32().collect())
         .unwrap_or_else(|| vec![[0.0; 4]; vertex_count]);
 
-    // Собираем Vertex3D и нормализуем веса.
     let mut vertices = Vec::with_capacity(vertex_count);
     for i in 0..vertex_count {
         let j = joints_u16.get(i).copied().unwrap_or([0, 0, 0, 0]);
         let mut w = weights.get(i).copied().unwrap_or([0.0; 4]);
 
-        // Нормализация весов.
         let sum = w[0] + w[1] + w[2] + w[3];
         if sum > 1e-6 && (sum - 1.0).abs() > 1e-4 {
             let inv = 1.0 / sum;
@@ -498,11 +550,9 @@ fn upload_primitive_mesh(
 }
 
 // ============================================================
-// Шаг 5: world-матрицы нод (иерархия)
+// Шаг 5: world-матрицы нод
 // ============================================================
 
-/// Обходит дерево узлов и накапливает world-матрицы: `node.index() → Mat4`.
-/// Приоритет — default_scene, fallback — все сцены.
 fn collect_world_transforms(doc: &gltf::Document) -> HashMap<usize, Mat4> {
     let mut out: HashMap<usize, Mat4> = HashMap::new();
 
@@ -549,7 +599,7 @@ fn load_animations(
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}_anim_{}", prefix, anim_idx));
 
-        // Определяем, к какому скелету относится анимация.
+        // Ищем скелет, к которому относится анимация.
         let mut target_skeleton: Option<&Skeleton> = None;
         for channel in animation.channels() {
             let node_idx = channel.target().node().index();
@@ -642,10 +692,6 @@ fn load_animations(
 // ============================================================
 
 /// Читает `Mat4`-accessor из glTF вручную.
-///
-/// В gltf 1.4 нет `Accessor::reader` для произвольных accessor'ов —
-/// работает только через `primitive.reader()` для вершинных атрибутов.
-/// Inverse bind — не вершинный атрибут, поэтому идём через `view()`.
 fn read_mat4_accessor(
     accessor: &gltf::Accessor,
     buffers: &[gltf::buffer::Data],
@@ -657,7 +703,7 @@ fn read_mat4_accessor(
     };
     let data = &buffers[view.buffer().index()];
     let base = view.offset() + accessor.offset();
-    // Mat4 = 16 floats = 64 байта. Stride по умолчанию = 64 (плотная упаковка).
+    // Mat4 = 16 floats = 64 байта.
     let stride = view.stride().unwrap_or(64);
 
     let mut result = Vec::with_capacity(count);

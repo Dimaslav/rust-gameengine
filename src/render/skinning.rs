@@ -1,27 +1,21 @@
 //! Скелетная анимация: скелет, клипы, интерполяция.
-//!
-//! Skeleton хранит иерархию костей. `local_pose[i]` = локальная трансформация
-//! кости в текущем кадре. `joint_matrices` = world_pose × inverse_bind —
-//! то, что шейдер применяет к вершинам.
 
 use glam::{Mat4, Quat, Vec3};
 
 pub const MAX_JOINTS: usize = 64;
 pub const PARENT_NONE: usize = usize::MAX;
 
-/// Трек одного свойства кости (translation / rotation / scale).
 #[derive(Debug, Clone)]
 pub struct Track {
-    /// Ключевые кадры по времени.
     pub times: Vec<f32>,
-    /// Значения. Translation/Scale — xyz, Rotation — xyzw.
     pub values: Vec<[f32; 4]>,
 }
 
 impl Track {
     /// Линейная интерполяция (для rotation — slerp).
+    /// Защита от дублирующихся timestamps: если `t1 == t0`, возвращаем a.
     pub fn sample(&self, time: f32, is_rotation: bool) -> [f32; 4] {
-        if self.times.is_empty() {
+        if self.times.is_empty() || self.values.is_empty() {
             return [0.0, 0.0, 0.0, 1.0];
         }
         if time <= self.times[0] {
@@ -41,11 +35,21 @@ impl Track {
                 hi = mid;
             }
         }
+        // values может быть короче times — клампим.
+        let lo_v = lo.min(self.values.len() - 1);
+        let hi_v = hi.min(self.values.len() - 1);
+
         let t0 = self.times[lo];
         let t1 = self.times[hi];
-        let alpha = ((time - t0) / (t1 - t0)).clamp(0.0, 1.0);
-        let a = self.values[lo];
-        let b = self.values[hi];
+        let dt = t1 - t0;
+        let alpha = if dt.abs() < 1e-6 {
+            0.0
+        } else {
+            ((time - t0) / dt).clamp(0.0, 1.0)
+        };
+
+        let a = self.values[lo_v];
+        let b = self.values[hi_v];
 
         if is_rotation {
             let qa = Quat::from_xyzw(a[0], a[1], a[2], a[3]);
@@ -63,7 +67,6 @@ impl Track {
     }
 }
 
-/// Анимационный клип. `bones[i]` — треки для кости i.
 #[derive(Debug, Clone, Default)]
 pub struct AnimationClip {
     pub name: String,
@@ -74,13 +77,10 @@ pub struct AnimationClip {
 }
 
 impl AnimationClip {
-    /// Считает локальные позы костей для момента времени `time`.
-    /// Для костей без треков берёт bind-pose.
     pub fn local_pose(&self, time: f32, base_local: &[Mat4]) -> Vec<Mat4> {
         let n = base_local.len();
         let mut result = base_local.to_vec();
 
-        // Разбираем bind-pose на компоненты для смешивания с треками.
         for i in 0..n {
             let (base_scale, base_rot, base_pos) =
                 base_local[i].to_scale_rotation_translation();
@@ -125,7 +125,6 @@ impl AnimationClip {
 #[derive(Debug, Clone)]
 pub struct Skeleton {
     pub names: Vec<String>,
-    /// Индекс узла glTF для каждой кости — нужен для маппинга animation channels.
     pub node_indices: Vec<usize>,
     pub parents: Vec<usize>,
     pub inverse_bind: Vec<Mat4>,
@@ -145,23 +144,47 @@ impl Skeleton {
         self.local_bind.clone()
     }
 
+    /// World-матрицы костей. Устойчиво к произвольному порядку костей
+    /// (glTF не требует топологического порядка joints).
+    /// Защита от циклов и out-of-range parents.
     pub fn world_matrices(&self, local_pose: &[Mat4]) -> Vec<Mat4> {
         let n = self.names.len();
         let mut world = vec![Mat4::IDENTITY; n];
+        let mut computed = vec![false; n];
         for i in 0..n {
-            let parent = self.parents[i];
-            let local = if i < local_pose.len() {
-                local_pose[i]
-            } else {
-                Mat4::IDENTITY
-            };
-            world[i] = if parent == PARENT_NONE {
-                local
-            } else {
-                world[parent] * local
-            };
+            Self::compute_world(i, local_pose, &self.parents, &mut world, &mut computed);
         }
         world
+    }
+
+    fn compute_world(
+        i: usize,
+        local_pose: &[Mat4],
+        parents: &[usize],
+        world: &mut [Mat4],
+        computed: &mut [bool],
+    ) {
+        if computed[i] {
+            return;
+        }
+        // Помечаем «в процессе» — если цикл, дальше не пойдём.
+        computed[i] = true;
+
+        let local = if i < local_pose.len() {
+            local_pose[i]
+        } else {
+            Mat4::IDENTITY
+        };
+
+        let parent = parents.get(i).copied().unwrap_or(PARENT_NONE);
+        let valid_parent = parent != PARENT_NONE && parent < world.len() && parent != i;
+
+        if valid_parent {
+            Self::compute_world(parent, local_pose, parents, world, computed);
+            world[i] = world[parent] * local;
+        } else {
+            world[i] = local;
+        }
     }
 
     pub fn joint_matrices(&self, local_pose: &[Mat4]) -> Vec<Mat4> {

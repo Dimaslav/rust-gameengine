@@ -13,11 +13,18 @@ pub struct Input {
     pub mouse_delta: (f32, f32),
     /// Колесо прокрутки за кадр.
     pub scroll_delta: f32,
+    /// Первое событие CursorMoved после входа/выхода курсора.
+    /// Пока true — не добавляем в delta (иначе первый кадр даст скачок
+    /// от старой позиции к текущей).
+    first_move: bool,
 }
 
 impl Input {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            first_move: true,
+            ..Default::default()
+        }
     }
 
     pub fn on_key(&mut self, event: &KeyEvent) {
@@ -51,9 +58,20 @@ impl Input {
     }
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) {
-        self.mouse_delta.0 += x - self.mouse_pos.0;
-        self.mouse_delta.1 += y - self.mouse_pos.1;
+        if self.first_move {
+            // Просто запоминаем позицию, delta = 0.
+            self.first_move = false;
+        } else {
+            self.mouse_delta.0 += x - self.mouse_pos.0;
+            self.mouse_delta.1 += y - self.mouse_pos.1;
+        }
         self.mouse_pos = (x, y);
+    }
+
+    /// Вызывать на `CursorEntered`/`CursorLeft`, чтобы следующий move
+    /// не дал скачок относительно «старой» позиции.
+    pub fn on_cursor_enter(&mut self) {
+        self.first_move = true;
     }
 
     pub fn on_scroll(&mut self, delta: f32) {

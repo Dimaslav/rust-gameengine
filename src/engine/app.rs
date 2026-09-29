@@ -13,7 +13,18 @@ use super::time::Time;
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
-    fn update(&mut self, _world: &mut World, _input: &Input, _renderer: &mut Renderer, _dt: f32) {}
+
+    /// Возвращает `false`, если игра хочет завершить приложение.
+    /// `true` — продолжать цикл.
+    fn update(
+        &mut self,
+        _world: &mut World,
+        _input: &Input,
+        _renderer: &mut Renderer,
+        _dt: f32,
+    ) -> bool {
+        true
+    }
 
     fn collect_draws(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<MeshDraw> {
         Vec::new()
@@ -35,7 +46,6 @@ pub trait Game: 'static {
         [0.18, 0.20, 0.26]
     }
 
-    /// Настройки постобработки (bloom + exposure).
     fn postfx(&self) -> PostFx {
         PostFx::default()
     }
@@ -52,10 +62,16 @@ struct App<G: Game> {
     systems: Vec<Box<dyn System>>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    /// Защита от повторного `init` при возврате фокуса.
+    initialized: bool,
 }
 
 impl<G: Game> ApplicationHandler for App<G> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.initialized {
+            return;
+        }
+
         let attrs = Window::default_attributes()
             .with_title("Rust Engine 3D")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
@@ -69,6 +85,7 @@ impl<G: Game> ApplicationHandler for App<G> {
         self.game.init(&mut self.world, &mut renderer);
         self.renderer = Some(renderer);
         self.window = Some(window);
+        self.initialized = true;
     }
 
     fn window_event(
@@ -98,6 +115,14 @@ impl<G: Game> ApplicationHandler for App<G> {
                     .on_mouse_move(position.x as f32, position.y as f32);
             }
 
+            WindowEvent::CursorEntered { .. } => {
+                self.input.on_cursor_enter();
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                self.input.on_cursor_enter();
+            }
+
             WindowEvent::MouseWheel { delta, .. } => {
                 let d = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -112,10 +137,18 @@ impl<G: Game> ApplicationHandler for App<G> {
 
                 self.world.update_events();
 
-                // Игровая логика (получает &mut Renderer для обновления skeleton).
-                if let Some(renderer) = &mut self.renderer {
-                    self.game.update(&mut self.world, &self.input, renderer, dt);
+                // Игровая логика. Если `update` вернул false — выходим.
+                let continue_running = if let Some(renderer) = &mut self.renderer {
+                    self.game
+                        .update(&mut self.world, &self.input, renderer, dt)
+                } else {
+                    true
+                };
+                if !continue_running {
+                    event_loop.exit();
+                    return;
                 }
+
                 for sys in self.systems.iter_mut() {
                     sys.update(&mut self.world, dt);
                 }
@@ -203,6 +236,7 @@ pub fn run<G: Game>(game: G) {
         systems: Vec::new(),
         window: None,
         renderer: None,
+        initialized: false,
     };
     event_loop.run_app(&mut app).unwrap();
 }

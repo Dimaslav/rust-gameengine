@@ -69,6 +69,7 @@ impl Camera3D {
 
     pub fn pan(&mut self, dx: f32, dy: f32) {
         // Панорама в плоскости, перпендикулярной взгляду.
+        // Строки view-матрицы: row0 = right, row1 = up.
         let view = self.view_matrix();
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
@@ -77,17 +78,26 @@ impl Camera3D {
 
     /// Возвращает 6 плоскостей frustum: [left, right, bottom, top, near, far],
     /// каждая — Vec4(a,b,c,d), где a·x+b·y+c·z+d >= 0 внутри.
+    ///
+    /// ВАЖНО: нормализуем на длину `(a,b,c)`, а не на длину 4D-вектора.
+    /// Только тогда `dot(n, p) + d` — метрическое расстояние до плоскости.
     pub fn frustum_planes(&self) -> [Vec4; 6] {
         let m = self.view_projection();
-        // Извлечение плоскостей из матрицы (метод Gribb/Hartmann)
         [
             m.row(3) + m.row(0), // left
             m.row(3) - m.row(0), // right
             m.row(3) + m.row(1), // bottom
             m.row(3) - m.row(1), // top
-            m.row(2),            // near (для RH с [0,1] depth)
+            m.row(2),            // near (RH + [0,1] depth)
             m.row(3) - m.row(2), // far
         ]
-        .map(|p| p.normalize())
+        .map(|p| {
+            let n = Vec3::new(p.x, p.y, p.z).length();
+            if n > 1e-8 {
+                p / n
+            } else {
+                p
+            }
+        })
     }
 }
