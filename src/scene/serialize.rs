@@ -1,4 +1,5 @@
-//! Сцена: снимок всех сущностей в RON.
+//! Сцена: снимок всех сущностей в RON. Также используется для
+//! Ctrl+C/V в редакторе.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,8 @@ use std::path::Path;
 
 use crate::ecs::{Entity, World};
 use crate::game::components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
-    Velocity,
+    AnimationPlayer, MaterialHandle, MeshHandle, Name, Parent, SkeletonHandle, Spinner,
+    Transform, Velocity,
 };
 
 #[derive(Serialize, Deserialize, Default)]
@@ -16,12 +17,14 @@ pub struct SceneFile {
     pub entities: Vec<EntitySnapshot>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub transform: Option<TransformSnapshot>,
+    #[serde(default)]
+    pub parent: Option<u32>,
     #[serde(default)]
     pub mesh: Option<String>,
     #[serde(default)]
@@ -82,7 +85,7 @@ pub fn save_scene_to_file(world: &World, path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
+pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     let mut s = EntitySnapshot::default();
     let mut any = false;
 
@@ -96,6 +99,10 @@ fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
             rotation: t.rotation.to_array(),
             scale: t.scale.to_array(),
         });
+        any = true;
+    }
+    if let Some(Parent(p)) = world.get::<Parent>(e).copied() {
+        s.parent = Some(p);
         any = true;
     }
     if let Some(m) = world.get::<MeshHandle>(e) {
@@ -133,11 +140,7 @@ fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
 
-    if any {
-        Some(s)
-    } else {
-        None
-    }
+    if any { Some(s) } else { None }
 }
 
 pub fn load_scene_from_str(text: &str) -> Result<World> {
@@ -155,7 +158,9 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<World> {
     load_scene_from_str(&text)
 }
 
-fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) {
+/// Публичная обёртка: спавн одной сущности в мир. Используется
+/// и для Load, и для Ctrl+V в редакторе.
+pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
     if let Some(n) = snap.name {
@@ -170,6 +175,9 @@ fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) {
                 scale: glam::Vec3::from_array(t.scale),
             },
         );
+    }
+    if let Some(p) = snap.parent {
+        world.insert(e, Parent(p));
     }
     if let Some(m) = snap.mesh {
         world.insert(e, MeshHandle(m));
@@ -208,4 +216,6 @@ fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) {
             },
         );
     }
+
+    e
 }

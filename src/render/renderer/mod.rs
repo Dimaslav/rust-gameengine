@@ -39,7 +39,6 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
 
-    // === Layouts (хранятся для hot-reload) ===
     camera_layout: wgpu::BindGroupLayout,
     lights_layout: wgpu::BindGroupLayout,
     shadow_pass_layout: wgpu::BindGroupLayout,
@@ -161,15 +160,18 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // FIFO — жёсткий vsync, ровные интервалы кадров.
+        // AutoVsync на Windows часто даёт jitter из-за драйверных
+        // подвыборок — это видно как «дёрганье» камеры.
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 
@@ -1160,14 +1162,12 @@ impl Renderer {
         self.meshes.insert(name.into(), mesh);
     }
 
-    /// Отсортированный список имён зарегистрированных мешей.
     pub fn mesh_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.meshes.keys().cloned().collect();
         v.sort();
         v
     }
 
-    /// Отсортированный список имён зарегистрированных материалов.
     pub fn material_names(&self) -> Vec<String> {
         self.materials.names()
     }
@@ -1330,10 +1330,6 @@ impl Renderer {
         self.material_bind_groups.insert(name.to_string(), gpu);
     }
 
-    /// Обновляет существующий материал: заменяет данные в реестре
-    /// и пересобирает bind group. Сохраняет скелет, если он был привязан.
-    ///
-    /// Влияет на **все** объекты, использующие этот материал.
     pub fn update_material(&mut self, name: &str, mat: Material) {
         if self.materials.get(name).is_none() {
             return;
@@ -1362,7 +1358,6 @@ impl Renderer {
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
-        // Сохраняем скелет из старого MaterialGpu, если он есть.
         let skeleton_uniform = self
             .material_bind_groups
             .get(name)
@@ -1711,7 +1706,7 @@ impl Renderer {
             passes::encode_post_processing(self, &mut encoder, &swap_view);
         }
 
-        // === egui-оверлей: отдельный проход поверх swapchain ===
+        // === egui-оверлей ===
         if let Some(egui_data) = egui_data {
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],

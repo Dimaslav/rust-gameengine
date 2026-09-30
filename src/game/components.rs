@@ -1,4 +1,4 @@
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
@@ -39,13 +39,16 @@ impl Transform {
         self
     }
 
-    pub fn matrix(&self) -> glam::Mat4 {
-        glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
+    pub fn matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 }
 
-/// Человекочитаемое имя сущности. Обычно `Cube_42`, `Ground`,
-/// `Player`, `Enemy_Spawn_01`. Используется в Hierarchy и для отладки.
+/// Ссылка на родительскую сущность. Если компонента нет — сущность
+/// находится в корне иерархии.
+#[derive(Debug, Clone, Copy)]
+pub struct Parent(pub u32);
+
 #[derive(Debug, Clone)]
 pub struct Name(pub String);
 

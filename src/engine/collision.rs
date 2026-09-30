@@ -1,12 +1,13 @@
 //! Простые AABB-коллизии между игроком и мешами сцены.
 //!
-//! Каждый меш представляется кубом вокруг его bounding-сферы
-//! (`Mesh::world_bounds` возвращает центр и радиус). Игрок — AABB
-//! `radius × height` от точки ног.
+//! Каждый меш представляется кубом вокруг его bounding-сферы.
+//! Очень большие объекты (plane 200×200) пропускаются — их куб
+//! покрыл бы всю сцену, и игрок всегда был бы «внутри».
+//! Вместо них землю задаёт явный пол (`floor_y`).
 //!
-//! Движение разрешается по осям: сначала X, потом Z, потом Y.
-//! Если по оси коллизия — эта компонента отменяется, остальные едут.
-//! По Y используется субшаг ≤ 0.1, чтобы не проскочить сквозь пол.
+//! Если игрок по какой-то причине оказался внутри коллайдера
+//! (неудачный спавн, телепорт, undo) — движение разрешается
+//! без проверки. Это даёт возможность выбраться.
 
 use glam::Vec3;
 
@@ -14,7 +15,9 @@ use crate::ecs::World;
 use crate::game::components::{MeshHandle, Transform};
 use crate::render::Renderer;
 
-/// Параметры AABB игрока.
+/// Порог радиуса, выше которого меш считается «фоном» и не коллизится.
+const MAX_COLLIDABLE_RADIUS: f32 = 20.0;
+
 #[derive(Clone, Copy)]
 pub struct PlayerBox {
     pub radius: f32,
@@ -30,8 +33,6 @@ impl Default for PlayerBox {
     }
 }
 
-/// Проверка пересечения AABB игрока (в позиции `feet_pos` — низ бокса)
-/// с AABB любого меша в мире.
 fn collides(
     world: &World,
     renderer: &Renderer,
@@ -54,9 +55,11 @@ fn collides(
         let model = t.matrix();
         let (center, radius) = mesh.world_bounds(&model);
 
-        // Грубо: AABB меша = куб вокруг bounding-сферы.
-        // Для ground plane радиус огромный — плоскость тоже станет кубом,
-        // но это работает: игрок стоит на ней.
+        // Пропускаем «фоновые» меши (ground, skybox и т.п.).
+        if radius > MAX_COLLIDABLE_RADIUS {
+            continue;
+        }
+
         let mm = Vec3::splat(radius);
         let mmin = center - mm;
         let mmax = center + mm;
@@ -77,13 +80,35 @@ fn collides(
 
 /// Разрешает движение `delta` из `start_feet` с учётом коллизий.
 /// Возвращает `(new_feet, on_ground)`.
+///
+/// `floor_y` — минимальный Y для ног игрока.
+///
+/// Если в стартовой позиции уже коллизия (застряли) — движение
+/// разрешается без проверок, чтобы игрок мог выбраться. Это
+/// стандартный приём; иначе при неудачном спавне игрок навсегда
+/// остаётся в стене.
 pub fn resolve_movement(
     world: &World,
     renderer: &Renderer,
     start_feet: Vec3,
     delta: Vec3,
     pbox: &PlayerBox,
+    floor_y: f32,
 ) -> (Vec3, bool) {
+    let stuck = collides(world, renderer, start_feet, pbox);
+
+    // Если уже внутри — просто двигаемся, не проверяя коллизии.
+    // Так игрок постепенно выберется наружу.
+    if stuck {
+        let mut pos = start_feet + delta;
+        if pos.y < floor_y {
+            pos.y = floor_y;
+        }
+        let on_ground = (start_feet.y + delta.y) <= floor_y + 1e-4;
+        return (pos, on_ground);
+    }
+
+    // Обычный случай: разделяем движение по осям.
     let mut pos = start_feet;
 
     // X
@@ -102,7 +127,7 @@ pub fn resolve_movement(
         }
     }
 
-    // Y — субшагами, чтобы не провалиться сквозь пол на высокой скорости.
+    // Y — субшагами.
     let mut on_ground = false;
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
@@ -120,6 +145,12 @@ pub fn resolve_movement(
                 break;
             }
         }
+    }
+
+    // Пол — отдельная проверка после коллизий.
+    if pos.y <= floor_y {
+        pos.y = floor_y;
+        on_ground = true;
     }
 
     (pos, on_ground)

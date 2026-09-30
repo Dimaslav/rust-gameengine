@@ -1,9 +1,6 @@
 //! Gizmo: 3D-манипулятор для translate / rotate / scale.
 //!
-//! Поддерживает single- и multi-select. Для группы:
-//! - gizmò рисуется в центре bounding box всех выделенных;
-//! - translate/rotate применяются ко всем (rotate — вокруг общего центра);
-//! - scale меняет масштаб каждой сущности по выбранной оси.
+//! Поддерживает single- и multi-select, а также Ctrl-snap.
 
 use glam::{Quat, Vec3};
 
@@ -69,9 +66,7 @@ pub struct GizmoState {
 #[derive(Debug, Clone)]
 pub struct GizmoDrag {
     pub axis: Axis,
-    /// Стартовые трансформы всех выделенных сущностей (Entity + copy).
     pub start_states: Vec<(Entity, Transform)>,
-    /// Центр группы в момент старта drag.
     pub start_center: Vec3,
     pub start_ray_t: f32,
     pub start_point: Vec3,
@@ -79,49 +74,33 @@ pub struct GizmoDrag {
 }
 
 // ============================================================
-// Центр группы
+// Центр группы — учитывает Parent.
 // ============================================================
 
-/// Средний центр всех выделенных. `None`, если список пуст или ни у кого
-/// нет `Transform`.
 pub fn group_center(world: &World, selected: &[Entity]) -> Option<Vec3> {
     let mut sum = Vec3::ZERO;
     let mut n = 0;
     for &e in selected {
-        if let Some(t) = world.get::<Transform>(e) {
-            sum += t.position;
+        if let Some(p) = crate::game::world_position(world, e) {
+            sum += p;
             n += 1;
         }
     }
-    if n == 0 {
-        None
-    } else {
-        Some(sum / n as f32)
-    }
+    if n == 0 { None } else { Some(sum / n as f32) }
 }
 
-/// Радиус bounding-сферы группы (для `focus_on`).
 pub fn group_radius(world: &World, selected: &[Entity], renderer: &Renderer) -> f32 {
     let Some(center) = group_center(world, selected) else {
         return 1.0;
     };
     let mut r: f32 = 0.5;
     for &e in selected {
-        let (Some(t), Some(mh)) = (
-            world.get::<Transform>(e),
-            world.get::<MeshHandle>(e),
-        ) else {
-            continue;
-        };
-        let Some(mesh) = renderer.meshes.get(&mh.0) else {
-            continue;
-        };
-        let model = t.matrix();
+        let Some(mh) = world.get::<MeshHandle>(e) else { continue };
+        let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
+        let model = crate::game::world_matrix(world, e);
         let (c, mr) = mesh.world_bounds(&model);
         let d = (c - center).length() + mr;
-        if d > r {
-            r = d;
-        }
+        if d > r { r = d; }
     }
     r
 }
@@ -132,7 +111,7 @@ fn gizmo_scale(camera: &Camera3D, center: Vec3) -> f32 {
 }
 
 // ============================================================
-// Проекция world → screen
+// Проекция
 // ============================================================
 
 fn project_to_screen(
@@ -224,16 +203,11 @@ pub fn pick_axis(
                     let world_p = center + (t1 * ang.cos() + t2 * ang.sin()) * scale;
                     let p = match project_to_screen(&view_proj, screen_w, screen_h, world_p) {
                         Some(p) => p,
-                        None => {
-                            prev = None;
-                            continue;
-                        }
+                        None => { prev = None; continue; }
                     };
                     if let Some(prev_p) = prev {
                         let d = dist_point_segment_px(m, prev_p, p);
-                        if d < best_d {
-                            best_d = d;
-                        }
+                        if d < best_d { best_d = d; }
                     }
                     prev = Some(p);
                 }
@@ -257,15 +231,10 @@ fn ring_basis(normal: Vec3) -> (Vec3, Vec3) {
 }
 
 // ============================================================
-// Математика для drag
+// Математика
 // ============================================================
 
-fn closest_point_on_axis(
-    ro: Vec3,
-    rd: Vec3,
-    center: Vec3,
-    axis: Vec3,
-) -> Option<(Vec3, f32)> {
+fn closest_point_on_axis(ro: Vec3, rd: Vec3, center: Vec3, axis: Vec3) -> Option<(Vec3, f32)> {
     let rd = rd.normalize_or_zero();
     let axis = axis.normalize_or_zero();
 
@@ -277,34 +246,21 @@ fn closest_point_on_axis(
     let e = axis.dot(w0);
 
     let denom = a * c - b * b;
-    if denom.abs() < 1e-6 {
-        return None;
-    }
+    if denom.abs() < 1e-6 { return None; }
 
     let ray_t = (b * e - c * d) / denom;
     let axis_t = (a * e - b * d) / denom;
-    if ray_t < 0.0 {
-        return None;
-    }
+    if ray_t < 0.0 { return None; }
 
     Some((center + axis * axis_t, axis_t))
 }
 
-fn intersect_plane(
-    ro: Vec3,
-    rd: Vec3,
-    center: Vec3,
-    normal: Vec3,
-) -> Option<(Vec3, f32)> {
+fn intersect_plane(ro: Vec3, rd: Vec3, center: Vec3, normal: Vec3) -> Option<(Vec3, f32)> {
     let n = normal.normalize_or_zero();
     let denom = n.dot(rd);
-    if denom.abs() < 1e-6 {
-        return None;
-    }
+    if denom.abs() < 1e-6 { return None; }
     let t = (center - ro).dot(n) / denom;
-    if t < 0.0 {
-        return None;
-    }
+    if t < 0.0 { return None; }
     Some((ro + rd * t, t))
 }
 
@@ -319,9 +275,7 @@ pub fn draw_gizmo(
     camera: &Camera3D,
     state: &GizmoState,
 ) {
-    let Some(center) = group_center(world, selected) else {
-        return;
-    };
+    let Some(center) = group_center(world, selected) else { return; };
     let scale = gizmo_scale(camera, center);
 
     for axis in [Axis::X, Axis::Y, Axis::Z] {
@@ -340,9 +294,7 @@ pub fn draw_gizmo(
                 batch.line(tip - side, end, color);
                 batch.line(tip + side, end, color);
             }
-            GizmoMode::Rotate => {
-                draw_ring(batch, center, a, scale, color);
-            }
+            GizmoMode::Rotate => draw_ring(batch, center, a, scale, color),
             GizmoMode::Scale => {
                 let end = center + a * scale;
                 batch.line(center, end, color);
@@ -368,27 +320,18 @@ fn draw_box(batch: &mut LineBatch, center: Vec3, half: f32, color: [f32; 4]) {
     let h = Vec3::splat(half);
     let corners = [
         center + Vec3::new(-h.x, -h.y, -h.z),
-        center + Vec3::new(h.x, -h.y, -h.z),
-        center + Vec3::new(h.x, h.y, -h.z),
-        center + Vec3::new(-h.x, h.y, -h.z),
-        center + Vec3::new(-h.x, -h.y, h.z),
-        center + Vec3::new(h.x, -h.y, h.z),
-        center + Vec3::new(h.x, h.y, h.z),
-        center + Vec3::new(-h.x, h.y, h.z),
+        center + Vec3::new( h.x, -h.y, -h.z),
+        center + Vec3::new( h.x,  h.y, -h.z),
+        center + Vec3::new(-h.x,  h.y, -h.z),
+        center + Vec3::new(-h.x, -h.y,  h.z),
+        center + Vec3::new( h.x, -h.y,  h.z),
+        center + Vec3::new( h.x,  h.y,  h.z),
+        center + Vec3::new(-h.x,  h.y,  h.z),
     ];
     let edges = [
-        (0, 1),
-        (1, 2),
-        (2, 3),
-        (3, 0),
-        (4, 5),
-        (5, 6),
-        (6, 7),
-        (7, 4),
-        (0, 4),
-        (1, 5),
-        (2, 6),
-        (3, 7),
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
     ];
     for (a, b) in edges {
         batch.line(corners[a], corners[b], color);
@@ -434,7 +377,6 @@ pub fn begin_drag(
         return None;
     }
 
-    // Средний scale по оси среди выделенных.
     let mut scale_along = 0.0_f32;
     let mut n = 0;
     for (_, t) in &start_states {
@@ -461,6 +403,7 @@ pub fn apply_drag_with_mode(
     world: &mut World,
     drag: &GizmoDrag,
     mode: GizmoMode,
+    snap: bool,
     camera: &Camera3D,
     renderer: &Renderer,
     sx: f32,
@@ -481,7 +424,11 @@ pub fn apply_drag_with_mode(
             let Some((point, _)) = closest_point_on_axis(origin, dir, center, axis) else {
                 return;
             };
-            let delta = (point - drag.start_point).dot(axis);
+            let mut delta = (point - drag.start_point).dot(axis);
+            if snap {
+                // Шаг 0.5 м.
+                delta = (delta * 2.0).round() * 0.5;
+            }
             let offset = axis * delta;
 
             for (e, start_t) in &drag.start_states {
@@ -497,7 +444,12 @@ pub fn apply_drag_with_mode(
             };
             let delta = (point - drag.start_point).dot(axis);
             let sensitivity = gizmo_scale(camera, center).max(0.001);
-            let mul = (1.0 + delta / sensitivity).clamp(0.01, 100.0);
+            let mut mul = 1.0 + delta / sensitivity;
+            if snap {
+                // Шаг 0.1.
+                mul = (mul * 10.0).round() / 10.0;
+            }
+            mul = mul.clamp(0.01, 100.0);
 
             for (e, start_t) in &drag.start_states {
                 let mut t = *start_t;
@@ -523,7 +475,12 @@ pub fn apply_drag_with_mode(
 
             let sin = axis.dot(v0.cross(v1));
             let cos = v0.dot(v1);
-            let angle = sin.atan2(cos);
+            let mut angle = sin.atan2(cos);
+            if snap {
+                // Шаг 15° = π/12.
+                let step = std::f32::consts::PI / 12.0;
+                angle = (angle / step).round() * step;
+            }
             let q = Quat::from_axis_angle(axis, angle);
 
             for (e, start_t) in &drag.start_states {

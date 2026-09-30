@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
-    Velocity,
+    AnimationPlayer, MaterialHandle, MeshHandle, Name, Parent, SkeletonHandle, Spinner,
+    Transform, Velocity,
 };
 use glam::{Quat, Vec3};
 use render::{
@@ -21,10 +21,6 @@ use render::{
     GpuPointLight, InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx,
     Renderer, Skeleton,
 };
-
-// ============================================================
-// Frustum culling
-// ============================================================
 
 fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> bool {
     for p in planes {
@@ -264,7 +260,6 @@ impl Game for DemoGame {
             }
         }
 
-        // ===== Камера: только Orbit, и только если не в Play и не летим =====
         if !input.play_mode && !input.editor_flying {
             let lmb = input.mouse_down(winit::event::MouseButton::Left)
                 && !input.editor_captured;
@@ -284,24 +279,15 @@ impl Game for DemoGame {
 
             let speed = 8.0 * dt;
             let mut pan = (0.0, 0.0);
-            if input.key_down(KeyCode::KeyW) {
-                pan.1 -= speed;
-            }
-            if input.key_down(KeyCode::KeyS) {
-                pan.1 += speed;
-            }
-            if input.key_down(KeyCode::KeyA) {
-                pan.0 -= speed;
-            }
-            if input.key_down(KeyCode::KeyD) {
-                pan.0 += speed;
-            }
+            if input.key_down(KeyCode::KeyW) { pan.1 -= speed; }
+            if input.key_down(KeyCode::KeyS) { pan.1 += speed; }
+            if input.key_down(KeyCode::KeyA) { pan.0 -= speed; }
+            if input.key_down(KeyCode::KeyD) { pan.0 += speed; }
             if pan != (0.0, 0.0) {
                 self.camera.pan(pan.0, pan.1);
             }
         }
 
-        // Анимация point-light.
         self.orbit_phase += dt * 0.5;
         let (sp, cp) = self.orbit_phase.sin_cos();
         self.point_lights[1].position[0] = cp * 12.0;
@@ -487,9 +473,10 @@ impl Game for DemoGame {
                 continue;
             };
 
+            let model = crate::game::world_matrix(world, e);
+
             if self.show_culling {
                 if let Some(mesh) = renderer.meshes.get(&m.0) {
-                    let model = t.matrix();
                     let (center, radius) = mesh.world_bounds(&model);
                     if !sphere_in_frustum(center, radius, &planes) {
                         continue;
@@ -512,7 +499,7 @@ impl Game for DemoGame {
                 blend,
                 double_sided,
             );
-            let inst = InstanceData::new(t.matrix(), material.base_color);
+            let inst = InstanceData::new(model, material.base_color);
             buckets.entry(key).or_default().push(inst);
         }
 
@@ -548,12 +535,12 @@ impl Game for DemoGame {
         }
 
         for &e in selected {
-            if let (Some(t), Some(mh)) = (
+            if let (Some(_t), Some(mh)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
             ) {
                 if let Some(mesh) = renderer.meshes.get(&mh.0) {
-                    let model = t.matrix();
+                    let model = crate::game::world_matrix(world, e);
                     let (center, radius) = mesh.world_bounds(&model);
                     batch.sphere_wireframe(
                         center,

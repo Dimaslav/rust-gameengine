@@ -5,8 +5,8 @@ use crate::editor::gizmo::GizmoMode;
 use crate::editor::play::PlayState;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
-    Velocity,
+    AnimationPlayer, MaterialHandle, MeshHandle, Name, Parent, SkeletonHandle, Spinner,
+    Transform, Velocity,
 };
 use crate::render::{AlphaMode, Material, PostFx};
 use glam::Vec3;
@@ -32,6 +32,8 @@ impl UiState {
 
 pub struct Stats {
     pub fps: f32,
+    pub frame_time_max_ms: f32,
+    pub hitches: u64,
     pub entities: usize,
     pub draws: usize,
     pub instances: usize,
@@ -56,7 +58,6 @@ pub fn draw(
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
 
-    // HUD в Play-режиме.
     if editor.play.active {
         draw_play_hud(ctx, &editor.play, stats.fps);
     }
@@ -84,6 +85,7 @@ pub fn draw(
 
             ui.separator();
 
+            // Play / Stop
             if editor.play.active {
                 if ui
                     .button("■ Stop")
@@ -101,6 +103,28 @@ pub fn draw(
             }
 
             ui.separator();
+
+            // Copy / Paste
+            if ui
+                .add_enabled(
+                    !editor.selected.is_empty(),
+                    egui::Button::new("Copy (Ctrl+C)"),
+                )
+                .clicked()
+            {
+                action = Some(EditorAction::CopyEntity);
+            }
+            if ui
+                .add_enabled(
+                    !editor.clipboard_entities.is_empty(),
+                    egui::Button::new("Paste (Ctrl+V)"),
+                )
+                .clicked()
+            {
+                action = Some(EditorAction::PasteEntity);
+            }
+
+            ui.separator();
             if ui.button("Save").clicked() {
                 action = Some(EditorAction::Save);
             }
@@ -109,7 +133,7 @@ pub fn draw(
             }
             ui.add(
                 egui::TextEdit::singleline(&mut editor.save_path)
-                    .desired_width(180.0)
+                    .desired_width(160.0)
                     .hint_text("scene.ron"),
             );
 
@@ -145,7 +169,6 @@ pub fn draw(
         });
     });
 
-    // Левая/правая панели — только вне Play.
     if !editor.play.active {
         // ===== Левая =====
         if state.show_stats_panel || state.show_hierarchy_panel {
@@ -160,6 +183,8 @@ pub fn draw(
                             "Frame: {:.2} ms",
                             if stats.fps > 0.1 { 1000.0 / stats.fps } else { 0.0 }
                         ));
+                        ui.label(format!("Frame max: {:.2} ms", stats.frame_time_max_ms));
+                        ui.label(format!("Hitches: {}", stats.hitches));
                         ui.separator();
                         ui.label(format!("Entities: {}", stats.entities));
                         ui.label(format!("Draws: {}", stats.draws));
@@ -310,6 +335,8 @@ pub fn draw(
                             if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() {
                                 *m = GizmoMode::Scale;
                             }
+                            ui.separator();
+                            ui.label("Ctrl+drag = snap");
                         });
                         ui.separator();
 
@@ -463,7 +490,7 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
         ));
         let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
         let len = 8.0;
-        let thick = 1.0;
+        let thick = 1.0_f32;
         painter.line_segment(
             [
                 egui::pos2(center.x - len, center.y),
@@ -541,6 +568,7 @@ fn draw_inspector(
     assets: &UiAssets<'_>,
     action: &mut Option<EditorAction>,
 ) {
+    // === Header ===
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("#{}", e))
@@ -548,10 +576,7 @@ fn draw_inspector(
                 .monospace(),
         );
         if let Some(n) = world.get_mut::<Name>(e) {
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut n.0)
-                    .desired_width(160.0),
-            );
+            let r = ui.add(egui::TextEdit::singleline(&mut n.0).desired_width(160.0));
             if r.gained_focus() {
                 editor.undo_requested = true;
             }
@@ -567,6 +592,7 @@ fn draw_inspector(
         }
     });
 
+    // === Component chips ===
     let mut chips: Vec<&str> = Vec::new();
     if world.has::<Transform>(e) { chips.push("Transform"); }
     if world.has::<MeshHandle>(e) { chips.push("Mesh"); }
@@ -575,6 +601,7 @@ fn draw_inspector(
     if world.has::<AnimationPlayer>(e) { chips.push("Animation"); }
     if world.has::<Spinner>(e) { chips.push("Spinner"); }
     if world.has::<Velocity>(e) { chips.push("Velocity"); }
+    if world.has::<Parent>(e) { chips.push("Parent"); }
     if !chips.is_empty() {
         ui.horizontal_wrapped(|ui| {
             for c in chips {
@@ -590,6 +617,7 @@ fn draw_inspector(
 
     ui.separator();
 
+    // === Transform ===
     egui::CollapsingHeader::new("Transform")
         .default_open(true)
         .show(ui, |ui| {
@@ -699,6 +727,62 @@ fn draw_inspector(
             }
         });
 
+    // === Parent / Children ===
+    egui::CollapsingHeader::new("Hierarchy")
+        .default_open(true)
+        .show(ui, |ui| {
+            let parent_opt = world.get::<Parent>(e).copied();
+            match parent_opt {
+                Some(Parent(p)) => {
+                    let pname = world
+                        .get::<Name>(p)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|| format!("#{}", p));
+                    ui.label(format!("Parent: {}", pname));
+                    if ui.button("Clear Parent").clicked() {
+                        editor.undo_requested = true;
+                        world.remove::<Parent>(e);
+                    }
+                }
+                None => {
+                    ui.label("Parent: (none)");
+                }
+            }
+
+            if editor.selected.len() >= 2 {
+                if ui.button("Set parent from last selected").clicked() {
+                    let primary = *editor.selected.last().unwrap();
+                    if primary != e {
+                        editor.undo_requested = true;
+                        world.insert(e, Parent(primary));
+                    }
+                }
+            }
+
+            ui.separator();
+            let children: Vec<Entity> = world
+                .entities()
+                .iter()
+                .copied()
+                .filter(|&c| world.get::<Parent>(c).map(|p| p.0 == e).unwrap_or(false))
+                .collect();
+            if children.is_empty() {
+                ui.label("Children: (none)");
+            } else {
+                ui.label(format!("Children: {}", children.len()));
+                for c in children {
+                    let cname = world
+                        .get::<Name>(c)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|| format!("#{}", c));
+                    if ui.selectable_label(false, cname).clicked() {
+                        editor.select_single(c);
+                    }
+                }
+            }
+        });
+
+    // === Geometry ===
     egui::CollapsingHeader::new("Geometry")
         .default_open(true)
         .show(ui, |ui| {
@@ -741,10 +825,23 @@ fn draw_inspector(
             }
         });
 
+    // === Material editor ===
     if let Some((name, original)) = &assets.selected_material {
-        egui::CollapsingHeader::new(format!("Material: {}", name))
+        let header_label = format!("Material: {}", name);
+        egui::CollapsingHeader::new(header_label)
             .default_open(false)
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Make Unique")
+                        .on_hover_text("Клонирует материал только для этого объекта")
+                        .clicked()
+                    {
+                        *action = Some(EditorAction::MakeMaterialUnique);
+                    }
+                });
+                ui.separator();
+
                 let mut m = original.clone();
                 let mut changed = false;
 
@@ -814,6 +911,7 @@ fn draw_inspector(
             });
     }
 
+    // === Spinner ===
     if world.has::<Spinner>(e) {
         egui::CollapsingHeader::new("Spinner")
             .default_open(false)
@@ -840,6 +938,7 @@ fn draw_inspector(
             });
     }
 
+    // === Velocity ===
     if world.has::<Velocity>(e) {
         egui::CollapsingHeader::new("Velocity")
             .default_open(false)

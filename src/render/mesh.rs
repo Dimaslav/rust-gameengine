@@ -2,11 +2,6 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-/// Вершина 3D-меша. Поддерживает 4-костный скелетный скиннинг.
-///
-/// Если `weights` все нули — скиннинг не применяется (обычный меш).
-/// Если хотя бы одна weight > 0 — позиция/normal считаются как смесь
-/// `world_bone_matrix * position` по 4 костям.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex3D {
@@ -14,14 +9,11 @@ pub struct Vertex3D {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
-    /// Индексы 4 костей, влияющих на вершину.
     pub joints: [u32; 4],
-    /// Веса 4 костей. Сумма весов = 1.0 для скелетных мешей.
     pub weights: [f32; 4],
 }
 
 impl Vertex3D {
-    /// Статическая вершина без скелета.
     pub fn static_vertex(
         position: [f32; 3],
         normal: [f32; 3],
@@ -56,7 +48,6 @@ impl Vertex3D {
     }
 }
 
-/// Per-instance данные: матрица модели + inverse-transpose 3×3 + цвет.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct InstanceData {
@@ -80,7 +71,6 @@ impl InstanceData {
         }
     }
 
-    // Вершинные атрибуты теперь занимают 0..5, значит инстансные — с 6.
     const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
         6  => Float32x4, 7  => Float32x4, 8  => Float32x4, 9  => Float32x4,
         10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
@@ -102,6 +92,9 @@ pub struct Mesh {
     pub index_count: u32,
     pub bounds_center: Vec3,
     pub bounds_radius: f32,
+    /// Треугольники в **локальном** пространстве — для точного picking
+    /// (Möller–Trumbore). Строится из positions + indices при создании.
+    pub triangles: Vec<[Vec3; 3]>,
 }
 
 impl Mesh {
@@ -136,12 +129,22 @@ impl Mesh {
             radius = radius.max((p - center).length());
         }
 
+        // Треугольники для CPU raycast.
+        let mut triangles = Vec::with_capacity(indices.len() / 3);
+        for tri in indices.chunks_exact(3) {
+            let a = Vec3::from(vertices[tri[0] as usize].position);
+            let b = Vec3::from(vertices[tri[1] as usize].position);
+            let c = Vec3::from(vertices[tri[2] as usize].position);
+            triangles.push([a, b, c]);
+        }
+
         Self {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
             bounds_center: center,
             bounds_radius: radius,
+            triangles,
         }
     }
 
@@ -156,7 +159,7 @@ impl Mesh {
     }
 
     // ============================================================
-    // Генераторы (все возвращают меши без скелета — joints=[0;4], weights=0)
+    // Генераторы (без изменений)
     // ============================================================
 
     pub fn cube(device: &wgpu::Device, size: f32) -> Self {

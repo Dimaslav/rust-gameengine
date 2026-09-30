@@ -15,9 +15,16 @@ pub struct Input {
     first_move: bool,
 
     pub play_mode: bool,
-    /// RMB зажат — editor fly.
     pub editor_flying: bool,
     pub editor_captured: bool,
+
+    /// Сколько ещё кадров игнорировать `mouse_motion`.
+    ///
+    /// После `set_cursor_grab(Locked)` Windows генерирует warp-событие —
+    /// курсор телепортируется в центр окна, и один MouseMotion приходит
+    /// с огромным delta. Пропускаем первые N кадров, чтобы камера не
+    /// «прыгала» при захвате мыши.
+    pub skip_motion_frames: u32,
 }
 
 impl Input {
@@ -69,6 +76,9 @@ impl Input {
     }
 
     pub fn on_mouse_motion_device(&mut self, dx: f32, dy: f32) {
+        if self.skip_motion_frames > 0 {
+            return;
+        }
         self.mouse_motion.0 += dx;
         self.mouse_motion.1 += dy;
     }
@@ -92,6 +102,14 @@ impl Input {
     }
     pub fn mouse_down(&self, button: MouseButton) -> bool {
         self.mouse_buttons_down.contains(&button)
+    }
+
+    /// Вызывается движком в начале кадра.
+    pub fn tick_begin_frame(&mut self) {
+        if self.skip_motion_frames > 0 {
+            self.skip_motion_frames -= 1;
+            self.mouse_motion = (0.0, 0.0);
+        }
     }
 
     pub fn end_frame(&mut self) {

@@ -1,4 +1,4 @@
-//! Редактор: egui-оверлей + панели + gizmo + undo/redo + Play + Fly.
+//! Редактор.
 
 pub mod gizmo;
 pub mod picking;
@@ -13,6 +13,7 @@ use winit::window::Window;
 use crate::ecs::{Entity, World};
 use crate::game::components::Transform;
 use crate::render::Material;
+use crate::scene::serialize::EntitySnapshot;
 
 use gizmo::GizmoState;
 use play::PlayState;
@@ -38,12 +39,12 @@ pub struct EditorState {
     pub clipboard_transform: Option<Transform>,
     pub play: PlayState,
 
-    /// Зажат RMB — летим по миру (UE5-подобно).
     pub flying: bool,
-    /// Скорость полёта в м/с (с учётом Shift/Ctrl).
     pub fly_speed: f32,
-    /// Чувствительность мыши в fly-режиме.
     pub fly_sensitivity: f32,
+
+    /// Ctrl+C: снапшоты выделенных сущностей для последующей вставки.
+    pub clipboard_entities: Vec<EntitySnapshot>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +60,9 @@ pub enum EditorAction {
     FocusSelected,
     TogglePlay,
     SpawnPlayerHere,
+    CopyEntity,
+    PasteEntity,
+    MakeMaterialUnique,
 }
 
 impl EditorState {
@@ -77,6 +81,7 @@ impl EditorState {
             flying: false,
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
+            clipboard_entities: Vec::new(),
         }
     }
 
@@ -122,9 +127,7 @@ impl EditorState {
 }
 
 impl Default for EditorState {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Editor {
@@ -144,7 +147,6 @@ impl Editor {
             Some(window.scale_factor() as f32),
             None,
         );
-
         let egui_renderer = EguiRenderer::new(device, surface_format, None, 1);
 
         Self {
@@ -156,15 +158,8 @@ impl Editor {
         }
     }
 
-    pub fn on_window_event(
-        &mut self,
-        window: &Window,
-        event: &winit::event::WindowEvent,
-    ) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        let response = self.egui_state.on_window_event(window, event);
-        response.consumed
+    pub fn on_window_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
+        if !self.enabled { return false; }
+        self.egui_state.on_window_event(window, event).consumed
     }
 }
