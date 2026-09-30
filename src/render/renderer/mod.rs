@@ -4,7 +4,9 @@ mod gpu_types;
 mod passes;
 mod size_dep;
 
-pub use gpu_types::{GpuLight, GpuPointLight, MeshDraw, PostFx, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS};
+pub use gpu_types::{
+    GpuLight, GpuPointLight, MeshDraw, PostFx, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,13 +17,20 @@ use crate::render::camera::Camera3D;
 use crate::render::csm::{self, CASCADE_COUNT};
 use crate::render::ibl;
 use crate::render::line::{LineBuffer, LineVertex};
-use crate::render::material::{Material, MaterialRegistry};
+use crate::render::material::{Material, MaterialRegistry, SamplerDesc};
 use crate::render::mesh::{InstanceData, Mesh, Vertex3D};
 use crate::render::shadow_cube;
 use crate::render::texture::Texture;
 
 use gpu_types::*;
 use size_dep::{build_size_dependent, SizeDependent};
+
+/// Данные для отрисовки egui-оверлея в тот же кадр, что и рендер.
+pub struct EguiFrameData<'a> {
+    pub renderer: &'a mut egui_wgpu::Renderer,
+    pub clipped_primitives: Vec<egui::ClippedPrimitive>,
+    pub pixels_per_point: f32,
+}
 
 pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
@@ -30,54 +39,57 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
 
-    // Camera
+    // === Layouts (хранятся для hot-reload) ===
+    camera_layout: wgpu::BindGroupLayout,
+    lights_layout: wgpu::BindGroupLayout,
+    shadow_pass_layout: wgpu::BindGroupLayout,
+    shadow2_layout: wgpu::BindGroupLayout,
+    texture_layout: wgpu::BindGroupLayout,
+    material_layout: wgpu::BindGroupLayout,
+    ssao_layout: wgpu::BindGroupLayout,
+    lighting_layout: wgpu::BindGroupLayout,
+    bloom_layout: wgpu::BindGroupLayout,
+    tonemap_layout: wgpu::BindGroupLayout,
+    debug_layout: wgpu::BindGroupLayout,
+    debug_depth_layout: wgpu::BindGroupLayout,
+
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
-    // Lights (main pass)
     lights_buffer: wgpu::Buffer,
     lights_bind_group: wgpu::BindGroup,
 
-    // Shadow pass: 9 слотов (3 CSM + 6 cube faces)
     shadow_pass_buffer: wgpu::Buffer,
     shadow_pass_bind_group: wgpu::BindGroup,
     shadow_pass_stride: u64,
 
-    // CSM
     csm_array_view: wgpu::TextureView,
     csm_cascade_views: [wgpu::TextureView; CASCADE_COUNT],
     csm_sampler: wgpu::Sampler,
 
-    // Cube shadow
     cube_shadow_cube_view: wgpu::TextureView,
     cube_shadow_face_views: [wgpu::TextureView; 6],
     cube_shadow_sampler: wgpu::Sampler,
 
-    // Group 2
-    shadow2_layout: wgpu::BindGroupLayout,
-
-    // Textures / materials
-    texture_layout: wgpu::BindGroupLayout,
-    material_layout: wgpu::BindGroupLayout,
     material_bind_groups: HashMap<String, MaterialGpu>,
     default_material_bind_group: MaterialGpu,
 
-    /// Буферы скелетов: имя → Arc<GPU-буфер с 64 матрицами>.
-    /// Общий Arc между материалами позволяет одному update_skeleton
-    /// обновить все skinned-копии одного скелета.
+    sampler_cache: HashMap<SamplerDesc, Arc<wgpu::Sampler>>,
+
     pub skeleton_buffers: HashMap<String, Arc<wgpu::Buffer>>,
 
-    // Fallback-текстуры
     fallback_texture: Texture,
     fallback_mr: Texture,
     fallback_normal: Texture,
     fallback_emissive: Texture,
 
-    // Pipelines
-    sky_pipeline: wgpu::RenderPipeline,
     gbuffer_pipeline: wgpu::RenderPipeline,
+    gbuffer_pipeline_double_sided: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline_double_sided: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline_double_sided: wgpu::RenderPipeline,
     lighting_pipeline: wgpu::RenderPipeline,
     ssao_pipeline: wgpu::RenderPipeline,
     ssao_blur_pipeline: wgpu::RenderPipeline,
@@ -85,42 +97,27 @@ pub struct Renderer {
     blur_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
 
-    // Debug
-    debug_layout: wgpu::BindGroupLayout,
-    debug_depth_layout: wgpu::BindGroupLayout,
     debug2d_pipeline: wgpu::RenderPipeline,
     debug_depth_pipeline: wgpu::RenderPipeline,
     csm_debug_bind_group: wgpu::BindGroup,
 
-    // Layouts
-    lighting_layout: wgpu::BindGroupLayout,
-    bloom_layout: wgpu::BindGroupLayout,
-    tonemap_layout: wgpu::BindGroupLayout,
-    ssao_layout: wgpu::BindGroupLayout,
-
-    // Uniforms
     bloom_uniform_h: wgpu::Buffer,
     bloom_uniform_v: wgpu::Buffer,
     bright_uniform: wgpu::Buffer,
     tonemap_uniform: wgpu::Buffer,
     ssao_uniform: wgpu::Buffer,
 
-    // Noise
     _ssao_noise_tex: wgpu::Texture,
     ssao_noise_view: wgpu::TextureView,
 
-    // IBL
     ibl: Option<ibl::IblResources>,
 
-    // Size-dependent
     sd: SizeDependent,
 
-    // Instancing / lines
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     pub line_buffer: LineBuffer,
 
-    // Реестры
     pub meshes: HashMap<String, Mesh>,
     pub materials: MaterialRegistry,
     pub textures: HashMap<String, Texture>,
@@ -835,16 +832,62 @@ impl Renderer {
         // ============================================================
         // Pipelines
         // ============================================================
-        let sky_pipeline = make_sky_pipeline(&device, &camera_layout, &lights_layout, &shadow2_layout);
-        let gbuffer_pipeline = make_gbuffer_pipeline(&device, &camera_layout, &material_layout);
-        let shadow_pipeline = make_shadow_pipeline(&device, &shadow_pass_layout);
-        let line_pipeline = make_line_pipeline(&device, &camera_layout);
-        let lighting_pipeline = make_lighting_pipeline(&device, &lighting_layout, &lights_layout, &shadow2_layout);
-        let (ssao_pipeline, ssao_blur_pipeline) = make_ssao_pipelines(&device, &ssao_layout);
-        let (bright_pipeline, blur_pipeline) = make_bloom_pipelines(&device, &bloom_layout);
-        let tonemap_pipeline = make_tonemap_pipeline(&device, &config, &tonemap_layout);
+        let gbuffer_pipeline = make_gbuffer_pipeline(
+            &device,
+            &camera_layout,
+            &material_layout,
+            Some(wgpu::Face::Back),
+        )
+        .expect("gbuffer pipeline");
+        let gbuffer_pipeline_double_sided = make_gbuffer_pipeline(
+            &device,
+            &camera_layout,
+            &material_layout,
+            None,
+        )
+        .expect("gbuffer pipeline (double-sided)");
+
+        let shadow_pipeline =
+            make_shadow_pipeline(&device, &shadow_pass_layout, Some(wgpu::Face::Back))
+                .expect("shadow pipeline");
+        let shadow_pipeline_double_sided =
+            make_shadow_pipeline(&device, &shadow_pass_layout, None)
+                .expect("shadow pipeline (double-sided)");
+
+        let line_pipeline =
+            make_line_pipeline(&device, &camera_layout).expect("line pipeline");
+
+        let transparent_pipeline = make_transparent_pipeline(
+            &device,
+            &camera_layout,
+            &lights_layout,
+            &shadow2_layout,
+            &material_layout,
+            Some(wgpu::Face::Back),
+        )
+        .expect("transparent pipeline");
+        let transparent_pipeline_double_sided = make_transparent_pipeline(
+            &device,
+            &camera_layout,
+            &lights_layout,
+            &shadow2_layout,
+            &material_layout,
+            None,
+        )
+        .expect("transparent pipeline (double-sided)");
+
+        let lighting_pipeline =
+            make_lighting_pipeline(&device, &lighting_layout, &lights_layout, &shadow2_layout)
+                .expect("lighting pipeline");
+        let (ssao_pipeline, ssao_blur_pipeline) =
+            make_ssao_pipelines(&device, &ssao_layout).expect("ssao pipelines");
+        let (bright_pipeline, blur_pipeline) =
+            make_bloom_pipelines(&device, &bloom_layout).expect("bloom pipelines");
+        let tonemap_pipeline =
+            make_tonemap_pipeline(&device, &config, &tonemap_layout).expect("tonemap pipeline");
         let (debug2d_pipeline, debug_depth_pipeline) =
-            make_debug_pipelines(&device, &config, &debug_layout, &debug_depth_layout);
+            make_debug_pipelines(&device, &config, &debug_layout, &debug_depth_layout)
+                .expect("debug pipelines");
 
         // ============================================================
         // Noise
@@ -901,7 +944,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // sRGB fallback (base color, emissive)
         let fallback_texture = Texture::white(&device, &queue, &texture_layout).unwrap();
         let fallback_emissive = Texture::from_solid(
             &device,
@@ -911,7 +953,6 @@ impl Renderer {
             "fallback_emissive",
         )
         .unwrap();
-        // Linear fallback (MR, normal)
         let fallback_mr = Texture::from_solid_linear(
             &device,
             &queue,
@@ -930,6 +971,7 @@ impl Renderer {
         .unwrap();
 
         let default_material = Material::default();
+        let default_sampler = device.create_sampler(&SamplerDesc::default().to_wgpu());
         let default_material_bind_group = build_object_bind_group(
             &device,
             &material_layout,
@@ -938,6 +980,7 @@ impl Renderer {
             &fallback_mr,
             &fallback_normal,
             &fallback_emissive,
+            &default_sampler,
             create_identity_skeleton_buffer(&device),
         );
 
@@ -949,6 +992,18 @@ impl Renderer {
             queue,
             config,
             size,
+            camera_layout,
+            lights_layout,
+            shadow_pass_layout,
+            shadow2_layout,
+            texture_layout,
+            material_layout,
+            ssao_layout,
+            lighting_layout,
+            bloom_layout,
+            tonemap_layout,
+            debug_layout,
+            debug_depth_layout,
             camera_buffer,
             camera_bind_group,
             lights_buffer,
@@ -962,35 +1017,30 @@ impl Renderer {
             cube_shadow_cube_view,
             cube_shadow_face_views,
             cube_shadow_sampler,
-            shadow2_layout,
-            texture_layout,
-            material_layout,
             material_bind_groups: HashMap::new(),
             default_material_bind_group,
+            sampler_cache: HashMap::new(),
             skeleton_buffers: HashMap::new(),
             fallback_texture,
             fallback_mr,
             fallback_normal,
             fallback_emissive,
-            sky_pipeline,
             gbuffer_pipeline,
+            gbuffer_pipeline_double_sided,
             shadow_pipeline,
+            shadow_pipeline_double_sided,
             line_pipeline,
+            transparent_pipeline,
+            transparent_pipeline_double_sided,
             lighting_pipeline,
             ssao_pipeline,
             ssao_blur_pipeline,
             bright_pipeline,
             blur_pipeline,
             tonemap_pipeline,
-            debug_layout,
-            debug_depth_layout,
             debug2d_pipeline,
             debug_depth_pipeline,
             csm_debug_bind_group,
-            lighting_layout,
-            bloom_layout,
-            tonemap_layout,
-            ssao_layout,
             bloom_uniform_h,
             bloom_uniform_v,
             bright_uniform,
@@ -1011,6 +1061,98 @@ impl Renderer {
     }
 
     // ============================================================
+    // Hot-reload шейдеров
+    // ============================================================
+
+    #[cfg(debug_assertions)]
+    pub fn reload_shaders(&mut self) -> Result<(), String> {
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let build = || -> Result<BuiltPipelines, String> {
+            Ok(BuiltPipelines {
+                gbuffer: make_gbuffer_pipeline(
+                    &self.device, &self.camera_layout, &self.material_layout,
+                    Some(wgpu::Face::Back),
+                )?,
+                gbuffer_double_sided: make_gbuffer_pipeline(
+                    &self.device, &self.camera_layout, &self.material_layout, None,
+                )?,
+                shadow: make_shadow_pipeline(
+                    &self.device, &self.shadow_pass_layout, Some(wgpu::Face::Back),
+                )?,
+                shadow_double_sided: make_shadow_pipeline(
+                    &self.device, &self.shadow_pass_layout, None,
+                )?,
+                line: make_line_pipeline(&self.device, &self.camera_layout)?,
+                transparent: make_transparent_pipeline(
+                    &self.device,
+                    &self.camera_layout,
+                    &self.lights_layout,
+                    &self.shadow2_layout,
+                    &self.material_layout,
+                    Some(wgpu::Face::Back),
+                )?,
+                transparent_double_sided: make_transparent_pipeline(
+                    &self.device,
+                    &self.camera_layout,
+                    &self.lights_layout,
+                    &self.shadow2_layout,
+                    &self.material_layout,
+                    None,
+                )?,
+                lighting: make_lighting_pipeline(
+                    &self.device, &self.lighting_layout,
+                    &self.lights_layout, &self.shadow2_layout,
+                )?,
+                ssao: make_ssao_pipelines(&self.device, &self.ssao_layout)?,
+                bloom: make_bloom_pipelines(&self.device, &self.bloom_layout)?,
+                tonemap: make_tonemap_pipeline(
+                    &self.device, &self.config, &self.tonemap_layout,
+                )?,
+                debug: make_debug_pipelines(
+                    &self.device, &self.config,
+                    &self.debug_layout, &self.debug_depth_layout,
+                )?,
+            })
+        };
+
+        let built = match build() {
+            Ok(b) => b,
+            Err(msg) => {
+                let _ = pollster::block_on(self.device.pop_error_scope());
+                return Err(msg);
+            }
+        };
+
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            return Err(format!("{}", err));
+        }
+
+        self.gbuffer_pipeline = built.gbuffer;
+        self.gbuffer_pipeline_double_sided = built.gbuffer_double_sided;
+        self.shadow_pipeline = built.shadow;
+        self.shadow_pipeline_double_sided = built.shadow_double_sided;
+        self.line_pipeline = built.line;
+        self.transparent_pipeline = built.transparent;
+        self.transparent_pipeline_double_sided = built.transparent_double_sided;
+        self.lighting_pipeline = built.lighting;
+        self.ssao_pipeline = built.ssao.0;
+        self.ssao_blur_pipeline = built.ssao.1;
+        self.bright_pipeline = built.bloom.0;
+        self.blur_pipeline = built.bloom.1;
+        self.tonemap_pipeline = built.tonemap;
+        self.debug2d_pipeline = built.debug.0;
+        self.debug_depth_pipeline = built.debug.1;
+
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn reload_shaders(&mut self) -> Result<(), String> {
+        Err("hot-reload is only supported in debug builds".into())
+    }
+
+    // ============================================================
     // Публичный API
     // ============================================================
 
@@ -1018,7 +1160,18 @@ impl Renderer {
         self.meshes.insert(name.into(), mesh);
     }
 
-    /// sRGB-текстура (base color, emissive).
+    /// Отсортированный список имён зарегистрированных мешей.
+    pub fn mesh_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.meshes.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Отсортированный список имён зарегистрированных материалов.
+    pub fn material_names(&self) -> Vec<String> {
+        self.materials.names()
+    }
+
     pub fn load_texture_rgba(
         &mut self,
         name: &str,
@@ -1039,7 +1192,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Linear-текстура (normal map, metallic-roughness).
     pub fn load_texture_rgba_linear(
         &mut self,
         name: &str,
@@ -1073,22 +1225,40 @@ impl Renderer {
         Ok(())
     }
 
+    fn get_sampler(&mut self, desc: &SamplerDesc) -> Arc<wgpu::Sampler> {
+        if let Some(s) = self.sampler_cache.get(desc) {
+            return Arc::clone(s);
+        }
+        let s = Arc::new(self.device.create_sampler(&desc.to_wgpu()));
+        self.sampler_cache.insert(*desc, Arc::clone(&s));
+        s
+    }
+
     pub fn add_material(&mut self, name: impl Into<String>, mat: Material) {
         let name = name.into();
-        let base_tex = mat.base_color_texture.as_deref()
+        let sampler = self.get_sampler(&mat.sampler);
+
+        let base_tex = mat
+            .base_color_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_texture);
-        let mr_tex = mat.metallic_roughness_texture.as_deref()
+        let mr_tex = mat
+            .metallic_roughness_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_mr);
-        let normal_tex = mat.normal_texture.as_deref()
+        let normal_tex = mat
+            .normal_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_normal);
-        let emissive_tex = mat.emissive_texture.as_deref()
+        let emissive_tex = mat
+            .emissive_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
-        // Статичный материал — собственный identity-скелет.
         let gpu = build_object_bind_group(
             &self.device,
             &self.material_layout,
@@ -1097,6 +1267,7 @@ impl Renderer {
             mr_tex,
             normal_tex,
             emissive_tex,
+            &sampler,
             create_identity_skeleton_buffer(&self.device),
         );
 
@@ -1108,26 +1279,32 @@ impl Renderer {
         self.material_bind_groups.contains_key(name)
     }
 
-    /// Создать материал, разделяющий буфер скелета `skeleton_name`.
-    /// Если скелет ещё не зарегистрирован, используется identity-буфер;
-    /// позднее можно связать пересозданием материала, но типично скелет
-    /// уже создан в `add_skeleton` до материалов.
     pub fn add_material_with_skeleton(
         &mut self,
         name: &str,
         mat: Material,
         skeleton_name: &str,
     ) {
-        let base_tex = mat.base_color_texture.as_deref()
+        let sampler = self.get_sampler(&mat.sampler);
+
+        let base_tex = mat
+            .base_color_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_texture);
-        let mr_tex = mat.metallic_roughness_texture.as_deref()
+        let mr_tex = mat
+            .metallic_roughness_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_mr);
-        let normal_tex = mat.normal_texture.as_deref()
+        let normal_tex = mat
+            .normal_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_normal);
-        let emissive_tex = mat.emissive_texture.as_deref()
+        let emissive_tex = mat
+            .emissive_texture
+            .as_deref()
             .and_then(|n| self.textures.get(n))
             .unwrap_or(&self.fallback_emissive);
 
@@ -1145,6 +1322,62 @@ impl Renderer {
             mr_tex,
             normal_tex,
             emissive_tex,
+            &sampler,
+            skeleton_uniform,
+        );
+
+        self.materials.insert(name.to_string(), mat);
+        self.material_bind_groups.insert(name.to_string(), gpu);
+    }
+
+    /// Обновляет существующий материал: заменяет данные в реестре
+    /// и пересобирает bind group. Сохраняет скелет, если он был привязан.
+    ///
+    /// Влияет на **все** объекты, использующие этот материал.
+    pub fn update_material(&mut self, name: &str, mat: Material) {
+        if self.materials.get(name).is_none() {
+            return;
+        }
+
+        let sampler = self.get_sampler(&mat.sampler);
+
+        let base_tex = mat
+            .base_color_texture
+            .as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_texture);
+        let mr_tex = mat
+            .metallic_roughness_texture
+            .as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_mr);
+        let normal_tex = mat
+            .normal_texture
+            .as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_normal);
+        let emissive_tex = mat
+            .emissive_texture
+            .as_deref()
+            .and_then(|n| self.textures.get(n))
+            .unwrap_or(&self.fallback_emissive);
+
+        // Сохраняем скелет из старого MaterialGpu, если он есть.
+        let skeleton_uniform = self
+            .material_bind_groups
+            .get(name)
+            .map(|g| g.skeleton_uniform.clone())
+            .unwrap_or_else(|| create_identity_skeleton_buffer(&self.device));
+
+        let gpu = build_object_bind_group(
+            &self.device,
+            &self.material_layout,
+            &mat,
+            base_tex,
+            mr_tex,
+            normal_tex,
+            emissive_tex,
+            &sampler,
             skeleton_uniform,
         );
 
@@ -1156,10 +1389,6 @@ impl Renderer {
         &self.default_material
     }
 
-    /// Регистрирует скелет: создаёт GPU-буфер с матрицами и запоминает его
-    /// как `Arc`. Все материалы, вызвавшие `add_material_with_skeleton` с
-    /// этим именем, будут автоматически получать обновления через
-    /// `update_skeleton`.
     pub fn add_skeleton(&mut self, name: impl Into<String>, matrices: &[Mat4]) {
         let name = name.into();
         let data = if matrices.is_empty() {
@@ -1177,8 +1406,6 @@ impl Renderer {
         self.skeleton_buffers.insert(name, buffer);
     }
 
-    /// Обновляет матрицы скелета. Так как все материалы ссылаются на тот
-    /// же `Arc<Buffer>`, запись видна всем сразу.
     pub fn update_skeleton(&mut self, name: &str, matrices: &[Mat4]) {
         let Some(buffer) = self.skeleton_buffers.get(name) else {
             return;
@@ -1261,6 +1488,7 @@ impl Renderer {
     // Render
     // ============================================================
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         camera: &Camera3D,
@@ -1270,6 +1498,7 @@ impl Renderer {
         point_lights: &[GpuPointLight],
         ambient: [f32; 3],
         postfx: PostFx,
+        egui_data: Option<EguiFrameData<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         let view = camera.view_matrix();
         let proj = camera.proj_matrix();
@@ -1310,22 +1539,16 @@ impl Renderer {
         }
 
         let splits = csm::split_distances(camera.near, camera.far.min(200.0), 0.5);
-        let cascade_vp = csm::build_cascades(
-            view,
-            proj,
-            camera.near,
-            camera.far,
-            dir_light_dir,
-            &splits,
-        );
+        let cascade_vp =
+            csm::build_cascades(view, proj, camera.near, camera.far, dir_light_dir, &splits);
 
         let mut csm_packed = [[[0.0f32; 4]; 4]; CASCADE_COUNT];
         for i in 0..CASCADE_COUNT {
             csm_packed[i] = cascade_vp[i].to_cols_array_2d();
         }
 
-        // === Ambient теперь реально уходит на GPU ===
         let ambient_color = [ambient[0], ambient[1], ambient[2], 1.0];
+        let misc = [postfx.ibl_strength, 0.0, 0.0, 0.0];
 
         let lights_uniform = LightsUniform {
             cascade_vp: csm_packed,
@@ -1333,7 +1556,7 @@ impl Renderer {
             ambient_color,
             counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
             light_view_proj: cascade_vp[0].to_cols_array_2d(),
-            _pad0: [0.0; 4],
+            misc,
             _pad1: [0.0; 4],
             dir_lights: dir_packed,
             point_lights: pt_packed,
@@ -1355,7 +1578,7 @@ impl Renderer {
                     ambient_color,
                     counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
                     light_view_proj: mat.to_cols_array_2d(),
-                    _pad0: [0.0; 4],
+                    misc,
                     _pad1: [0.0; 4],
                     dir_lights: dir_packed,
                     point_lights: pt_packed,
@@ -1395,27 +1618,45 @@ impl Renderer {
         let bloom_h = self.config.height / 2;
         let texel = [1.0 / bloom_w as f32, 1.0 / bloom_h as f32];
 
-        let bright_params = PostParams { values: [postfx.bloom_threshold, 0.0, 0.0, 0.0] };
-        self.queue.write_buffer(&self.bright_uniform, 0, bytemuck::bytes_of(&bright_params));
+        let bright_params = PostParams {
+            values: [postfx.bloom_threshold, 0.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.bright_uniform, 0, bytemuck::bytes_of(&bright_params));
 
-        let blur_h_params = PostParams { values: [1.0, 0.0, texel[0], texel[1]] };
-        self.queue.write_buffer(&self.bloom_uniform_h, 0, bytemuck::bytes_of(&blur_h_params));
+        let blur_h_params = PostParams {
+            values: [1.0, 0.0, texel[0], texel[1]],
+        };
+        self.queue
+            .write_buffer(&self.bloom_uniform_h, 0, bytemuck::bytes_of(&blur_h_params));
 
-        let blur_v_params = PostParams { values: [0.0, 1.0, texel[0], texel[1]] };
-        self.queue.write_buffer(&self.bloom_uniform_v, 0, bytemuck::bytes_of(&blur_v_params));
+        let blur_v_params = PostParams {
+            values: [0.0, 1.0, texel[0], texel[1]],
+        };
+        self.queue
+            .write_buffer(&self.bloom_uniform_v, 0, bytemuck::bytes_of(&blur_v_params));
 
         let tonemap_params = PostParams {
             values: [postfx.bloom_strength, postfx.exposure, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.tonemap_uniform, 0, bytemuck::bytes_of(&tonemap_params));
+        self.queue
+            .write_buffer(&self.tonemap_uniform, 0, bytemuck::bytes_of(&tonemap_params));
 
         let ssao_data = SsaoUniform {
-            proj_scale: [proj.x_axis.x, proj.y_axis.y, camera.far, postfx.ssao_radius],
+            proj_scale: [
+                proj.x_axis.x,
+                proj.y_axis.y,
+                camera.far,
+                postfx.ssao_radius,
+            ],
             params: [0.025, postfx.ssao_strength, 1.0 / 4.0, 1.0 / 4.0],
         };
-        self.queue.write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
+        self.queue
+            .write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
 
-        let debug_params = DebugParams { mode: [postfx.debug_view as u32, 0, 0, 0] };
+        let debug_params = DebugParams {
+            mode: [postfx.debug_view as u32, 0, 0, 0],
+        };
         self.queue
             .write_buffer(&self.sd.debug_uniform, 0, bytemuck::bytes_of(&debug_params));
 
@@ -1462,6 +1703,7 @@ impl Renderer {
         passes::encode_ssao_blur_pass(self, &mut encoder);
         passes::encode_lighting_pass(self, &mut encoder);
         passes::encode_forward_pass(self, &mut encoder, line_vertices);
+        passes::encode_transparent_pass(self, &mut encoder, draws);
 
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);
@@ -1469,10 +1711,64 @@ impl Renderer {
             passes::encode_post_processing(self, &mut encoder, &swap_view);
         }
 
+        // === egui-оверлей: отдельный проход поверх swapchain ===
+        if let Some(egui_data) = egui_data {
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: egui_data.pixels_per_point,
+            };
+
+            egui_data.renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &egui_data.clipped_primitives,
+                &screen_descriptor,
+            );
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("egui_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                egui_data.renderer.render(
+                    &mut pass,
+                    &egui_data.clipped_primitives,
+                    &screen_descriptor,
+                );
+            }
+        }
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         Ok(())
     }
+}
+
+/// Все собранные пайплайны — временный контейнер для `reload_shaders`.
+struct BuiltPipelines {
+    gbuffer: wgpu::RenderPipeline,
+    gbuffer_double_sided: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    shadow_double_sided: wgpu::RenderPipeline,
+    line: wgpu::RenderPipeline,
+    transparent: wgpu::RenderPipeline,
+    transparent_double_sided: wgpu::RenderPipeline,
+    lighting: wgpu::RenderPipeline,
+    ssao: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    bloom: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    tonemap: wgpu::RenderPipeline,
+    debug: (wgpu::RenderPipeline, wgpu::RenderPipeline),
 }
 
 // ============================================================
@@ -1483,17 +1779,19 @@ fn make_gbuffer_pipeline(
     device: &wgpu::Device,
     camera_layout: &wgpu::BindGroupLayout,
     material_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+    cull: Option<wgpu::Face>,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shaders/gbuffer.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gbuffer_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/gbuffer.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("gbuffer_pipeline_layout"),
         bind_group_layouts: &[camera_layout, material_layout],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("gbuffer_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -1527,7 +1825,7 @@ fn make_gbuffer_pipeline(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode: cull,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -1539,70 +1837,25 @@ fn make_gbuffer_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    })
-}
-
-fn make_sky_pipeline(
-    device: &wgpu::Device,
-    camera_layout: &wgpu::BindGroupLayout,
-    lights_layout: &wgpu::BindGroupLayout,
-    shadow2_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("sky_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sky.wgsl").into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("sky_pipeline_layout"),
-        bind_group_layouts: &[camera_layout, lights_layout, shadow2_layout],
-        push_constant_ranges: &[],
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("sky_pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_FORMAT,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::LessEqual,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    })
+    }))
 }
 
 fn make_shadow_pipeline(
     device: &wgpu::Device,
     shadow_pass_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+    cull: Option<wgpu::Face>,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shadow.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shadow_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shadow.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("shadow_pipeline_layout"),
         bind_group_layouts: &[shadow_pass_layout],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shadow_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -1615,7 +1868,7 @@ fn make_shadow_pipeline(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode: cull,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -1631,23 +1884,24 @@ fn make_shadow_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    })
+    }))
 }
 
 fn make_line_pipeline(
     device: &wgpu::Device,
     camera_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shaders/lines.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("line_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/lines.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("line_pipeline_layout"),
         bind_group_layouts: &[camera_layout],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("line_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -1680,7 +1934,62 @@ fn make_line_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    })
+    }))
+}
+
+fn make_transparent_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    lights_layout: &wgpu::BindGroupLayout,
+    shadow2_layout: &wgpu::BindGroupLayout,
+    material_layout: &wgpu::BindGroupLayout,
+    cull: Option<wgpu::Face>,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shaders/forward_transparent.wgsl")?;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("transparent_shader"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("transparent_pipeline_layout"),
+        bind_group_layouts: &[camera_layout, lights_layout, shadow2_layout, material_layout],
+        push_constant_ranges: &[],
+    });
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("transparent_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[Vertex3D::layout(), InstanceData::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: cull,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    }))
 }
 
 fn make_lighting_pipeline(
@@ -1688,17 +1997,18 @@ fn make_lighting_pipeline(
     lighting_layout: &wgpu::BindGroupLayout,
     lights_layout: &wgpu::BindGroupLayout,
     shadow2_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shaders/deferred_lighting.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lighting_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/deferred_lighting.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("lighting_pipeline_layout"),
         bind_group_layouts: &[lighting_layout, lights_layout, shadow2_layout],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("lighting_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -1721,16 +2031,17 @@ fn make_lighting_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    })
+    }))
 }
 
 fn make_ssao_pipelines(
     device: &wgpu::Device,
     ssao_layout: &wgpu::BindGroupLayout,
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
+    let src = crate::shader_source!("src/render/ssao.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ssao_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../ssao.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ssao_pipeline_layout"),
@@ -1785,16 +2096,17 @@ fn make_ssao_pipelines(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     });
-    (main, blur)
+    Ok((main, blur))
 }
 
 fn make_bloom_pipelines(
     device: &wgpu::Device,
     bloom_layout: &wgpu::BindGroupLayout,
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
+    let src = crate::shader_source!("src/render/bloom.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bloom_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../bloom.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bloom_pipeline_layout"),
@@ -1849,24 +2161,25 @@ fn make_bloom_pipelines(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     });
-    (bright, blur)
+    Ok((bright, blur))
 }
 
 fn make_tonemap_pipeline(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     tonemap_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/tonemap.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("tonemap_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../tonemap.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("tonemap_pipeline_layout"),
         bind_group_layouts: &[tonemap_layout],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("tonemap_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -1889,7 +2202,7 @@ fn make_tonemap_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    })
+    }))
 }
 
 fn make_debug_pipelines(
@@ -1897,14 +2210,16 @@ fn make_debug_pipelines(
     config: &wgpu::SurfaceConfiguration,
     debug_layout: &wgpu::BindGroupLayout,
     debug_depth_layout: &wgpu::BindGroupLayout,
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
+    let src2d = crate::shader_source!("src/render/shaders/debug2d.wgsl")?;
+    let src_depth = crate::shader_source!("src/render/shaders/debug_depth.wgsl")?;
     let shader2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("debug2d_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/debug2d.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src2d.into()),
     });
     let shader_depth = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("debug_depth_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/debug_depth.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src_depth.into()),
     });
 
     let layout2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1968,5 +2283,5 @@ fn make_debug_pipelines(
         multiview: None,
     });
 
-    (pipeline2d, pipeline_depth)
+    Ok((pipeline2d, pipeline_depth))
 }

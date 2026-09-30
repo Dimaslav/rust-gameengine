@@ -21,7 +21,6 @@ impl LineVertex {
     }
 }
 
-/// Пул линий. Все линии рендерятся одним draw call (LineList topology).
 pub struct LineBatch {
     vertices: Vec<LineVertex>,
 }
@@ -58,7 +57,6 @@ impl LineBatch {
         self.vertices.is_empty()
     }
 
-    /// Сетка на плоскости XZ.
     pub fn grid(
         &mut self,
         half_extent: f32,
@@ -73,13 +71,11 @@ impl LineBatch {
             let major = i % (major_every as i32) == 0;
             let c = if major { color_major } else { color_minor };
 
-            // Линия вдоль X
             self.line(
                 Vec3::new(-half_extent, 0.0, t),
                 Vec3::new(half_extent, 0.0, t),
                 c,
             );
-            // Линия вдоль Z
             self.line(
                 Vec3::new(t, 0.0, -half_extent),
                 Vec3::new(t, 0.0, half_extent),
@@ -88,7 +84,6 @@ impl LineBatch {
         }
     }
 
-    /// Оси X (красная), Y (зелёная), Z (синяя) из начала координат.
     pub fn axes(&mut self, length: f32) {
         self.line(
             Vec3::ZERO,
@@ -107,7 +102,6 @@ impl LineBatch {
         );
     }
 
-    /// Wireframe параллелепипеда.
     pub fn box_wireframe(&mut self, min: Vec3, max: Vec3, color: [f32; 4]) {
         let c = [
             Vec3::new(min.x, min.y, min.z),
@@ -128,6 +122,43 @@ impl LineBatch {
             self.line(c[a], c[b], color);
         }
     }
+
+    /// Wireframe-сфера: три ортогональных круга.
+    pub fn sphere_wireframe(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        let n = segments.max(8);
+        for i in 0..n {
+            let a1 = i as f32 / n as f32 * std::f32::consts::TAU;
+            let a2 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+
+            let (c1, s1) = a1.sin_cos();
+            let (c2, s2) = a2.sin_cos();
+
+            // XZ
+            self.line(
+                center + Vec3::new(c1 * radius, 0.0, s1 * radius),
+                center + Vec3::new(c2 * radius, 0.0, s2 * radius),
+                color,
+            );
+            // XY
+            self.line(
+                center + Vec3::new(c1 * radius, s1 * radius, 0.0),
+                center + Vec3::new(c2 * radius, s2 * radius, 0.0),
+                color,
+            );
+            // YZ
+            self.line(
+                center + Vec3::new(0.0, c1 * radius, s1 * radius),
+                center + Vec3::new(0.0, c2 * radius, s2 * radius),
+                color,
+            );
+        }
+    }
 }
 
 impl Default for LineBatch {
@@ -136,7 +167,6 @@ impl Default for LineBatch {
     }
 }
 
-/// GPU-буфер для линий. Растёт по необходимости.
 pub struct LineBuffer {
     pub buffer: wgpu::Buffer,
     pub capacity: u64,

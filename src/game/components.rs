@@ -44,17 +44,26 @@ impl Transform {
     }
 }
 
+/// Человекочитаемое имя сущности. Обычно `Cube_42`, `Ground`,
+/// `Player`, `Enemy_Spawn_01`. Используется в Hierarchy и для отладки.
+#[derive(Debug, Clone)]
+pub struct Name(pub String);
+
+impl Name {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MeshHandle(pub String);
 
 #[derive(Debug, Clone)]
 pub struct MaterialHandle(pub String);
 
-/// Ссылка на скелет в реестре Renderer.
 #[derive(Debug, Clone)]
 pub struct SkeletonHandle(pub String);
 
-/// Проигрыватель анимации для сущности со скелетом.
 #[derive(Debug, Clone)]
 pub struct AnimationPlayer {
     pub clip: String,
@@ -93,6 +102,8 @@ pub struct Velocity {
 
 impl Velocity {
     pub fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { value: Vec3::new(x, y, z) }
+        Self {
+            value: Vec3::new(x, y, z),
+        }
     }
 }

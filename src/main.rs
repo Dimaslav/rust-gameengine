@@ -1,21 +1,25 @@
 #![allow(dead_code, unused_imports)]
 
 mod ecs;
+mod editor;
 mod engine;
 mod game;
 mod render;
+mod scene;
 
 use std::collections::HashMap;
 
-use ecs::{System, World};
+use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, SkeletonHandle, Spinner, Transform, Velocity,
+    AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
+    Velocity,
 };
 use glam::{Quat, Vec3};
 use render::{
-    Camera3D, DebugView, GltfInstance, GpuLight, GpuPointLight, InstanceData, LineBatch,
-    LineVertex, Material, Mesh, MeshDraw, PostFx, Renderer, Skeleton, skinning::AnimationClip,
+    skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GltfInstance, GpuLight,
+    GpuPointLight, InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx,
+    Renderer, Skeleton,
 };
 
 // ============================================================
@@ -118,6 +122,7 @@ impl DemoGame {
                 exposure: 1.1,
                 ssao_strength: 0.8,
                 ssao_radius: 0.6,
+                ibl_strength: 0.35,
                 debug_view: DebugView::Final,
             },
             spawned: false,
@@ -137,8 +142,8 @@ impl Game for DemoGame {
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
+        renderer.add_mesh("quad", Mesh::plane(&renderer.device, 2.0, 1));
 
-        // Шахматка
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
             for x in 0..64 {
@@ -180,8 +185,19 @@ impl Game for DemoGame {
                 .with_metallic_roughness(0.0, 0.5)
                 .with_emissive([2.5, 2.2, 0.6]),
         );
+        renderer.add_material(
+            "glass",
+            Material::new([0.7, 0.85, 1.0, 0.35])
+                .with_metallic_roughness(0.2, 0.05)
+                .with_alpha_mode(AlphaMode::Blend),
+        );
+        renderer.add_material(
+            "foliage",
+            Material::new([0.25, 0.75, 0.3, 1.0])
+                .with_metallic_roughness(0.0, 0.7)
+                .with_double_sided(true),
+        );
 
-        // === glTF с skin/animation ===
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             Ok(loaded) => {
                 println!(
@@ -200,7 +216,6 @@ impl Game for DemoGame {
         }
     }
 
-    /// Возвращает `false`, если игра хочет завершить приложение.
     fn update(
         &mut self,
         world: &mut World,
@@ -212,6 +227,13 @@ impl Game for DemoGame {
 
         if input.key_pressed(KeyCode::Escape) {
             return false;
+        }
+
+        if input.key_pressed(KeyCode::F12) {
+            match renderer.reload_shaders() {
+                Ok(()) => log::info!("Shaders reloaded"),
+                Err(e) => log::error!("Shader reload failed: {}", e),
+            }
         }
 
         if input.key_pressed(KeyCode::KeyG) {
@@ -240,33 +262,10 @@ impl Game for DemoGame {
             self.postfx.debug_view = DebugView::CsmCascade0;
         }
 
-        if input.key_down(KeyCode::BracketLeft) {
-            self.postfx.bloom_threshold = (self.postfx.bloom_threshold - dt * 0.5).max(0.1);
-        }
-        if input.key_down(KeyCode::BracketRight) {
-            self.postfx.bloom_threshold += dt * 0.5;
-        }
-        if input.key_down(KeyCode::Comma) {
-            self.postfx.bloom_strength = (self.postfx.bloom_strength - dt * 0.5).max(0.0);
-        }
-        if input.key_down(KeyCode::Period) {
-            self.postfx.bloom_strength = (self.postfx.bloom_strength + dt * 0.5).min(3.0);
-        }
-        if input.key_down(KeyCode::Semicolon) {
-            self.postfx.exposure = (self.postfx.exposure - dt * 0.5).max(0.1);
-        }
-        if input.key_down(KeyCode::Quote) {
-            self.postfx.exposure = (self.postfx.exposure + dt * 0.5).min(3.0);
-        }
-        if input.key_down(KeyCode::KeyZ) {
-            self.postfx.ssao_strength = (self.postfx.ssao_strength - dt * 0.5).max(0.0);
-        }
-        if input.key_down(KeyCode::KeyX) {
-            self.postfx.ssao_strength = (self.postfx.ssao_strength + dt * 0.5).min(2.0);
-        }
-
-        // Камера
-        let lmb = input.mouse_down(winit::event::MouseButton::Left);
+        // Камера вращается ЛКМ, но НЕ во время работы gizmo/UI.
+        // `editor_captured` выставляется движком в начале кадра.
+        let lmb = input.mouse_down(winit::event::MouseButton::Left)
+            && !input.editor_captured;
         if lmb {
             let (dx, dy) = input.mouse_delta;
             if self.dragging {
@@ -276,6 +275,7 @@ impl Game for DemoGame {
         } else {
             self.dragging = false;
         }
+
         if input.scroll_delta.abs() > 0.01 {
             self.camera.zoom(input.scroll_delta * 0.05);
         }
@@ -297,7 +297,6 @@ impl Game for DemoGame {
             self.camera.pan(pan.0, pan.1);
         }
 
-        // Point-lights анимация
         self.orbit_phase += dt * 0.5;
         let (sp, cp) = self.orbit_phase.sin_cos();
         self.point_lights[1].position[0] = cp * 12.0;
@@ -305,11 +304,11 @@ impl Game for DemoGame {
         self.point_lights[2].position[0] = -cp * 12.0;
         self.point_lights[2].position[2] = -sp * 12.0;
 
-        // === Спавн (один раз) ===
         if !self.spawned {
             self.spawned = true;
 
             let ground = world.spawn();
+            world.insert(ground, Name("Ground".into()));
             world.insert(ground, Transform::new(0.0, -1.0, 0.0));
             world.insert(ground, MeshHandle("ground".into()));
             world.insert(ground, MaterialHandle("ground".into()));
@@ -320,6 +319,7 @@ impl Game for DemoGame {
                 let radius = 3.0 + t * 30.0;
                 let y = (t * 8.0).sin() * 2.0;
                 let e = world.spawn();
+                world.insert(e, Name(format!("Cube_{:04}", i)));
                 world.insert(
                     e,
                     Transform::new(angle.cos() * radius, y + 1.0, angle.sin() * radius)
@@ -341,6 +341,7 @@ impl Game for DemoGame {
             for i in 0..20 {
                 let angle = i as f32 / 20.0 * std::f32::consts::TAU;
                 let e = world.spawn();
+                world.insert(e, Name(format!("Sphere_{:02}", i)));
                 world.insert(
                     e,
                     Transform::new(
@@ -358,12 +359,41 @@ impl Game for DemoGame {
                 );
             }
 
-            // glTF инстансы — спавним в центре, каждый со своим скелетом + анимацией
+            for i in 0..6 {
+                let angle = i as f32 / 6.0 * std::f32::consts::TAU;
+                let e = world.spawn();
+                world.insert(e, Name(format!("Glass_{}", i)));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * 4.0, 2.5, angle.sin() * 4.0).with_scale(1.6),
+                );
+                world.insert(e, MeshHandle("sphere".into()));
+                world.insert(e, MaterialHandle("glass".into()));
+            }
+
+            for i in 0..4 {
+                let angle = i as f32 / 4.0 * std::f32::consts::TAU;
+                let e = world.spawn();
+                world.insert(e, Name(format!("Foliage_{}", i)));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * 8.0, 2.0, angle.sin() * 8.0)
+                        .with_rotation(Quat::from_axis_angle(Vec3::Y, angle)),
+                );
+                world.insert(e, MeshHandle("quad".into()));
+                world.insert(e, MaterialHandle("foliage".into()));
+                world.insert(e, Spinner::new(Vec3::Y, 0.5));
+            }
+
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
+                let node_label = inst
+                    .node_name
+                    .clone()
+                    .unwrap_or_else(|| format!("Gltf_{}", index));
+                world.insert(e, Name(node_label));
                 let (scale, rot, trans) = inst.model.to_scale_rotation_translation();
-                // Сместим в сторону, чтобы не пересекалось с лампочками
                 let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 0.0);
                 world.insert(
                     e,
@@ -382,18 +412,15 @@ impl Game for DemoGame {
                 index += 1;
             }
 
-            println!("Spawned demo scene: 2000 cubes + 20 spheres + glTF");
+            println!("Spawned demo scene");
         }
 
-        // === Системы ===
         for sys in self.systems.iter_mut() {
             sys.update(world, dt);
         }
 
-        // === Анимация: продвигаем время, пересчитываем матрицы, шлём в renderer ===
         let anim_entities: Vec<_> = world.query::<AnimationPlayer>().map(|(e, _)| e).collect();
         for e in anim_entities {
-            // Читаем плеер.
             let Some(player) = world.get::<AnimationPlayer>(e) else {
                 continue;
             };
@@ -401,7 +428,6 @@ impl Game for DemoGame {
             let speed = player.speed;
             let looping = player.looping;
 
-            // Продвигаем время.
             let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
                 player.time += dt * speed;
                 player.time
@@ -419,7 +445,6 @@ impl Game for DemoGame {
                 new_time.min(duration)
             };
 
-            // Скелет.
             let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else {
                 continue;
             };
@@ -427,20 +452,24 @@ impl Game for DemoGame {
                 continue;
             };
 
-            // Local pose + joint matrices.
             let local_pose = clip.local_pose(final_time, &skel.local_bind);
             let joint_matrices = skel.joint_matrices(&local_pose);
 
             renderer.update_skeleton(&skel_handle.0, &joint_matrices);
         }
 
-        // Продолжаем цикл.
         true
+    }
+
+    fn apply_postfx(&mut self, postfx: PostFx) {
+        self.postfx = postfx;
     }
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
         use std::collections::HashMap;
-        let mut buckets: HashMap<(String, String, [u32; 4]), Vec<InstanceData>> = HashMap::new();
+
+        type BucketKey = (String, String, [u32; 4], bool, bool);
+        let mut buckets: HashMap<BucketKey, Vec<InstanceData>> = HashMap::new();
         let planes = self.camera.frustum_planes();
 
         let entities: Vec<_> = world.entities().to_vec();
@@ -468,34 +497,69 @@ impl Game for DemoGame {
                 .get(&mat.0)
                 .unwrap_or_else(|| renderer.materials_default());
 
-            let key = (m.0.clone(), mat.0.clone(), material.base_color.map(f32::to_bits));
+            let blend = material.alpha_mode == AlphaMode::Blend;
+            let double_sided = material.double_sided;
+
+            let key = (
+                m.0.clone(),
+                mat.0.clone(),
+                material.base_color.map(f32::to_bits),
+                blend,
+                double_sided,
+            );
             let inst = InstanceData::new(t.matrix(), material.base_color);
             buckets.entry(key).or_default().push(inst);
         }
 
         buckets
             .into_iter()
-            .map(|((mesh, material_name, _), instances)| MeshDraw {
+            .map(|((mesh, material_name, _, blend, double_sided), instances)| MeshDraw {
                 mesh,
                 instances,
                 texture: Some(material_name),
+                blend,
+                double_sided,
             })
             .collect()
     }
 
-    fn collect_lines(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<LineVertex> {
-        if !self.show_grid {
-            return Vec::new();
-        }
+    fn collect_lines(
+        &mut self,
+        world: &mut World,
+        renderer: &Renderer,
+        selected: &[Entity],
+    ) -> Vec<LineVertex> {
         let mut batch = LineBatch::new();
-        batch.grid(
-            100.0,
-            2.0,
-            [0.15, 0.18, 0.22, 1.0],
-            [0.35, 0.40, 0.48, 1.0],
-            5,
-        );
-        batch.axes(5.0);
+
+        if self.show_grid {
+            batch.grid(
+                100.0,
+                2.0,
+                [0.15, 0.18, 0.22, 1.0],
+                [0.35, 0.40, 0.48, 1.0],
+                5,
+            );
+            batch.axes(5.0);
+        }
+
+        for &e in selected {
+            if let (Some(t), Some(mh)) = (
+                world.get::<Transform>(e),
+                world.get::<MeshHandle>(e),
+            ) {
+                if let Some(mesh) = renderer.meshes.get(&mh.0) {
+                    let model = t.matrix();
+                    let (center, radius) = mesh.world_bounds(&model);
+                    batch.sphere_wireframe(
+                        center,
+                        radius * 1.05,
+                        [1.0, 0.85, 0.2, 1.0],
+                        24,
+                    );
+                }
+            }
+        }
+
         batch.vertices().to_vec()
     }
 

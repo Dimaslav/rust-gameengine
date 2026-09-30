@@ -1,20 +1,4 @@
 //! Загрузчик glTF 2.0 с поддержкой PBR, skin и animation.
-//!
-//! Что реализовано:
-//! - **Иерархия нод** — world-матрицы накапливаются рекурсивно от корня сцены.
-//! - **Дедупликация мешей** — один mesh → один GPU-буфер, даже если N нод
-//!   ссылаются на него.
-//! - **Скелетный skinning** — 4-костный blending, MAX_JOINTS = 64.
-//! - **Animation** — translation/rotation/scale, linear + slerp интерполяция.
-//! - **PBR materials** — base_color, metallic, roughness, normal, emissive.
-//! - **Корректный colorspace** — baseColor/emissive → sRGB, normal/MR → linear.
-//!
-//! Что НЕ реализовано (задел на будущее):
-//! - texture samplers из glTF (сейчас всегда LINEAR + CLAMP)
-//! - alpha mode (OPAQUE / MASK / BLEND)
-//! - double-sided
-//! - morph targets
-//! - KHR_materials_unlit, KHR_texture_transform
 
 use anyhow::{bail, Context, Result};
 use glam::Mat4;
@@ -30,17 +14,11 @@ use super::skinning::{AnimationClip, Skeleton, Track, MAX_JOINTS, PARENT_NONE};
 // Публичные типы
 // ============================================================
 
-/// Опции загрузки. Позволяют отключить ненужные этапы (текстуры, анимации).
 #[derive(Debug, Clone)]
 pub struct GltfLoadOptions {
-    /// Префикс для имён ресурсов (mesh_<index>, tex_<index>, mat_<index>).
     pub prefix: String,
-    /// Загружать ли изображения и создавать текстуры.
     pub load_textures: bool,
-    /// Загружать ли skin/animation.
     pub load_animations: bool,
-    /// Максимальное количество костей в скелете.
-    /// Если скелет больше — берём первые MAX_JOINTS.
     pub max_joints: usize,
 }
 
@@ -55,15 +33,12 @@ impl Default for GltfLoadOptions {
     }
 }
 
-/// Один инстанс модели — нода, ссылающаяся на mesh.
-/// Модель-матрица — **world** (с учётом иерархии).
 pub struct GltfInstance {
     pub mesh_name: String,
     pub material_name: String,
     pub model: Mat4,
     pub skeleton_name: Option<String>,
     pub default_animation: Option<String>,
-    /// Имя ноды из glTF (для отладки).
     pub node_name: Option<String>,
 }
 
@@ -71,7 +46,6 @@ pub struct LoadedGltf {
     pub instances: Vec<GltfInstance>,
     pub skeletons: HashMap<String, Skeleton>,
     pub animations: HashMap<String, AnimationClip>,
-    /// Меши, которые были созданы (имя → количество вершин).
     pub meshes: HashMap<String, usize>,
 }
 
@@ -79,7 +53,6 @@ pub struct LoadedGltf {
 // Точка входа
 // ============================================================
 
-/// Загружает glTF в Renderer с настройками по умолчанию.
 pub fn load_gltf_into(
     renderer: &mut Renderer,
     path: impl AsRef<Path>,
@@ -92,7 +65,6 @@ pub fn load_gltf_into(
     load_gltf_into_with(renderer, path, &opts)
 }
 
-/// Загрузка с полным контролем над опциями.
 pub fn load_gltf_into_with(
     renderer: &mut Renderer,
     path: impl AsRef<Path>,
@@ -107,14 +79,6 @@ pub fn load_gltf_into_with(
     // ============================================================
     // Шаг 0: категоризация изображений — sRGB vs linear
     // ============================================================
-    //
-    // По спецификации glTF 2.0:
-    //   baseColorTexture, emissiveTexture       → sRGB
-    //   metallicRoughnessTexture, normalTexture → linear
-    //
-    // Если одно и то же изображение используется и как sRGB, и как linear —
-    // отдаём приоритет sRGB (baseColor важнее визуально). В реальных
-    // экспортерах такое встречается крайне редко.
     let mut srgb_used: HashSet<usize> = HashSet::new();
     let mut linear_used: HashSet<usize> = HashSet::new();
     for mat in doc.materials() {
@@ -144,8 +108,6 @@ pub fn load_gltf_into_with(
             let w = img.width;
             let h = img.height;
 
-            // linear только если изображение реально используется в
-            // linear-слоте и не используется в sRGB.
             let is_linear = linear_used.contains(&i) && !srgb_used.contains(&i);
 
             match img.format {
@@ -197,7 +159,6 @@ pub fn load_gltf_into_with(
     let mut mesh_name_map: HashMap<(usize, usize), String> = HashMap::new();
     let mut meshes_info: HashMap<String, usize> = HashMap::new();
 
-    // Собираем все mesh-примитивы, на которые ссылаются ноды.
     let mut used_primitives: HashSet<(usize, usize)> = HashSet::new();
     for node in doc.nodes() {
         let Some(mesh) = node.mesh() else { continue };
@@ -216,7 +177,7 @@ pub fn load_gltf_into_with(
     }
 
     // ============================================================
-    // Шаг 5: world-матрицы нод (иерархия)
+    // Шаг 5: world-матрицы нод
     // ============================================================
     let world_matrices = collect_world_transforms(&doc);
 
@@ -261,9 +222,6 @@ pub fn load_gltf_into_with(
                 .and_then(|idx| material_name_map.get(&idx).cloned())
                 .unwrap_or_else(|| format!("{}_mat_default", prefix));
 
-            // Если меш скиннится — создаём skinned-копию материала с тем же
-            // набором текстур, но отдельной bind group (skeleton привязан
-            // через общий Arc<Buffer>, см. Renderer::add_material_with_skeleton).
             let material_name = if let Some(skel_name) = &node_skeleton_name {
                 let skinned_mat = format!("{}__skinned", raw_material);
                 if !renderer.has_material(&skinned_mat) {
@@ -328,6 +286,8 @@ fn load_materials(
     prefix: &str,
     texture_name_map: &HashMap<usize, String>,
 ) -> Result<HashMap<usize, String>> {
+    use crate::render::material::{AlphaMode, SamplerDesc, SamplerFilter, WrapMode};
+
     let mut map: HashMap<usize, String> = HashMap::new();
 
     for (i, mat) in doc.materials().enumerate() {
@@ -338,7 +298,6 @@ fn load_materials(
         material.metallic = pbr.metallic_factor();
         material.roughness = pbr.roughness_factor();
 
-        // Base color texture (sRGB)
         if let Some(tex_info) = pbr.base_color_texture() {
             let img_idx = tex_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -346,7 +305,6 @@ fn load_materials(
             }
         }
 
-        // Metallic-roughness texture (linear, R=AO, G=roughness, B=metallic)
         if let Some(tex_info) = pbr.metallic_roughness_texture() {
             let img_idx = tex_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -354,7 +312,6 @@ fn load_materials(
             }
         }
 
-        // Normal texture (linear)
         if let Some(normal_info) = mat.normal_texture() {
             let img_idx = normal_info.texture().source().index();
             if let Some(name) = texture_name_map.get(&img_idx) {
@@ -363,7 +320,6 @@ fn load_materials(
             }
         }
 
-        // Emissive factor + texture (sRGB)
         let em = mat.emissive_factor();
         material.emissive = [em[0], em[1], em[2]];
         if let Some(tex_info) = mat.emissive_texture() {
@@ -371,6 +327,50 @@ fn load_materials(
             if let Some(name) = texture_name_map.get(&img_idx) {
                 material.emissive_texture = Some(name.clone());
             }
+        }
+
+        // --- alpha mode / cutoff ---
+        material.alpha_mode = match mat.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+            gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+        };
+        material.alpha_cutoff = mat.alpha_cutoff().unwrap_or(0.5);
+
+        // --- double-sided ---
+        material.double_sided = mat.double_sided();
+
+        // --- sampler из base_color_texture ---
+        if let Some(tex_info) = pbr.base_color_texture() {
+            let s = tex_info.texture().sampler();
+            let wrap = |w: gltf::texture::WrappingMode| match w {
+                gltf::texture::WrappingMode::Repeat => WrapMode::Repeat,
+                gltf::texture::WrappingMode::ClampToEdge => WrapMode::ClampToEdge,
+                gltf::texture::WrappingMode::MirroredRepeat => WrapMode::MirroredRepeat,
+            };
+            let flt_mag = |f: gltf::texture::MagFilter| match f {
+                gltf::texture::MagFilter::Nearest => SamplerFilter::Nearest,
+                gltf::texture::MagFilter::Linear => SamplerFilter::Linear,
+            };
+            let flt_min = |f: gltf::texture::MinFilter| match f {
+                gltf::texture::MinFilter::Nearest
+                | gltf::texture::MinFilter::NearestMipmapNearest
+                | gltf::texture::MinFilter::NearestMipmapLinear => SamplerFilter::Nearest,
+                _ => SamplerFilter::Linear,
+            };
+            material.sampler = SamplerDesc {
+                wrap_u: wrap(s.wrap_s()),
+                wrap_v: wrap(s.wrap_t()),
+                mag_filter: flt_mag(
+                    s.mag_filter()
+                        .unwrap_or(gltf::texture::MagFilter::Linear),
+                ),
+                min_filter: flt_min(
+                    s.min_filter()
+                        .unwrap_or(gltf::texture::MinFilter::Linear),
+                ),
+                mip_filter: SamplerFilter::Linear,
+            };
         }
 
         let name = format!("{}_mat_{}", prefix, i);
@@ -381,8 +381,6 @@ fn load_materials(
     if map.is_empty() {
         let name = format!("{}_mat_default", prefix);
         renderer.add_material(&name, Material::default());
-        // Ключ usize::MAX не читается — оставлен для симметрии с
-        // fallback-веткой `unwrap_or_else` выше.
     }
 
     Ok(map)
@@ -427,7 +425,6 @@ fn load_skeletons(
             node_to_joint.insert(node_index, joint_idx);
         }
 
-        // Родители костей — обход всего дерева.
         let mut parents = vec![PARENT_NONE; joints.len()];
         for node in doc.nodes() {
             let parent_idx = node.index();
@@ -442,13 +439,11 @@ fn load_skeletons(
             }
         }
 
-        // Inverse bind matrices.
         let inverse_bind: Vec<Mat4> = match skin.inverse_bind_matrices() {
             Some(accessor) => read_mat4_accessor(&accessor, buffers, joints.len()),
             None => vec![Mat4::IDENTITY; joints.len()],
         };
 
-        // Bind pose.
         let local_bind: Vec<Mat4> = joints
             .iter()
             .map(|n| Mat4::from_cols_array_2d(&n.transform().matrix()))
@@ -585,6 +580,43 @@ fn walk_node(node: &gltf::Node, parent: Mat4, out: &mut HashMap<usize, Mat4>) {
 // Шаг 7: анимации
 // ============================================================
 
+/// Собирает `Track`, валидируя монотонность `times`.
+/// Если timestamps не отсортированы (редкий, но допустимый glTF-паттерн),
+/// сортируем пары (time, value) синхронно и логируем warning.
+fn make_track(
+    mut times: Vec<f32>,
+    mut values: Vec<[f32; 4]>,
+    anim_name: &str,
+    node_idx: usize,
+) -> Option<Track> {
+    if times.is_empty() || values.is_empty() {
+        return None;
+    }
+    // Усечение до min длины — некоторые экспортёры пишут лишние values.
+    let n = times.len().min(values.len());
+    times.truncate(n);
+    values.truncate(n);
+
+    // Проверка сортировки (строгое неубывание — дубликаты допустимы,
+    // Track::sample обрабатывает dt ≈ 0).
+    let sorted = times.windows(2).all(|w| w[0] <= w[1]);
+    if !sorted {
+        log::warn!(
+            "Animation '{}' channel for node {}: times not monotonic — sorting {} keyframes",
+            anim_name,
+            node_idx,
+            times.len()
+        );
+        let mut pairs: Vec<(f32, [f32; 4])> =
+            times.into_iter().zip(values.into_iter()).collect();
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        times = pairs.iter().map(|p| p.0).collect();
+        values = pairs.into_iter().map(|p| p.1).collect();
+    }
+
+    Some(Track { times, values })
+}
+
 fn load_animations(
     doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
@@ -599,7 +631,6 @@ fn load_animations(
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}_anim_{}", prefix, anim_idx));
 
-        // Ищем скелет, к которому относится анимация.
         let mut target_skeleton: Option<&Skeleton> = None;
         for channel in animation.channels() {
             let node_idx = channel.target().node().index();
@@ -661,23 +692,27 @@ fn load_animations(
                 gltf::animation::util::ReadOutputs::Translations(iter) => {
                     let values: Vec<[f32; 4]> =
                         iter.map(|v| [v[0], v[1], v[2], 0.0]).collect();
-                    clip.translations[joint_idx] = Some(Track { times, values });
+                    if let Some(t) = make_track(times, values, &name, node_idx) {
+                        clip.translations[joint_idx] = Some(t);
+                    }
                 }
                 gltf::animation::util::ReadOutputs::Rotations(iter) => {
                     let values: Vec<[f32; 4]> = iter
                         .into_f32()
                         .map(|q| [q[0], q[1], q[2], q[3]])
                         .collect();
-                    clip.rotations[joint_idx] = Some(Track { times, values });
+                    if let Some(t) = make_track(times, values, &name, node_idx) {
+                        clip.rotations[joint_idx] = Some(t);
+                    }
                 }
                 gltf::animation::util::ReadOutputs::Scales(iter) => {
                     let values: Vec<[f32; 4]> =
                         iter.map(|v| [v[0], v[1], v[2], 0.0]).collect();
-                    clip.scales[joint_idx] = Some(Track { times, values });
+                    if let Some(t) = make_track(times, values, &name, node_idx) {
+                        clip.scales[joint_idx] = Some(t);
+                    }
                 }
-                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
-                    // TODO: morph targets
-                }
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {}
             }
         }
 
@@ -691,7 +726,6 @@ fn load_animations(
 // Утилиты
 // ============================================================
 
-/// Читает `Mat4`-accessor из glTF вручную.
 fn read_mat4_accessor(
     accessor: &gltf::Accessor,
     buffers: &[gltf::buffer::Data],
@@ -703,7 +737,6 @@ fn read_mat4_accessor(
     };
     let data = &buffers[view.buffer().index()];
     let base = view.offset() + accessor.offset();
-    // Mat4 = 16 floats = 64 байта.
     let stride = view.stride().unwrap_or(64);
 
     let mut result = Vec::with_capacity(count);

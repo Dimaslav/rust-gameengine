@@ -58,7 +58,8 @@ pub struct LightsUniform {
     pub ambient_color: [f32; 4],
     pub counts: [u32; 4],
     pub light_view_proj: [[f32; 4]; 4],
-    pub _pad0: [f32; 4],
+    /// x = ibl_strength, y/z/w = зарезервировано.
+    pub misc: [f32; 4],
     pub _pad1: [f32; 4],
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
@@ -76,7 +77,10 @@ pub struct PostParams {
 pub struct MaterialUniform {
     pub base_color: [f32; 4],
     pub emissive: [f32; 4],
+    /// metallic, roughness, normal_scale, alpha_cutoff
     pub params: [f32; 4],
+    /// alpha_mode (0=Opaque, 1=Mask, 2=Blend), pad, pad, pad
+    pub flags: [u32; 4],
 }
 
 #[repr(C)]
@@ -122,6 +126,10 @@ pub struct MeshDraw {
     pub mesh: String,
     pub instances: Vec<InstanceData>,
     pub texture: Option<String>,
+    /// `true` → transparent forward-pass (alpha blending).
+    pub blend: bool,
+    /// `true` → рендерить без backface culling (пайплайн-вариант).
+    pub double_sided: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -131,6 +139,8 @@ pub struct PostFx {
     pub exposure: f32,
     pub ssao_strength: f32,
     pub ssao_radius: f32,
+    /// Множитель IBL (diffuse + specular) в lighting и forward transparent.
+    pub ibl_strength: f32,
     pub debug_view: DebugView,
 }
 
@@ -142,16 +152,12 @@ impl Default for PostFx {
             exposure: 1.0,
             ssao_strength: 0.8,
             ssao_radius: 0.6,
+            ibl_strength: 0.35,
             debug_view: DebugView::Final,
         }
     }
 }
 
-/// GPU-представление материала.
-///
-/// `skeleton_uniform` — **Arc**, чтобы один и тот же буфер скелета
-/// мог быть привязан к нескольким материалам (skinned-копии) и
-/// обновлялся из `Renderer::update_skeleton` через общий Arc.
 pub struct MaterialGpu {
     pub bind_group: wgpu::BindGroup,
     pub _material_uniform: wgpu::Buffer,
@@ -304,7 +310,6 @@ pub fn create_noise_texture(
     (texture, view)
 }
 
-/// Создаёт identity-буфер скелета (для статичных материалов).
 pub fn create_identity_skeleton_buffer(device: &wgpu::Device) -> Arc<wgpu::Buffer> {
     let data = SkeletonUniform::identity();
     Arc::new(
@@ -316,10 +321,6 @@ pub fn create_identity_skeleton_buffer(device: &wgpu::Device) -> Arc<wgpu::Buffe
     )
 }
 
-/// Создаёт object bind group: material (6 bindings) + skeleton (1 binding).
-/// Скелетный буфер передаётся снаружи как `Arc` — так один и тот же
-/// скелет может быть привязан к нескольким skinned-материалам и
-/// обновляться одним write_buffer'ом.
 pub fn build_object_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -328,8 +329,15 @@ pub fn build_object_bind_group(
     mr_tex: &Texture,
     normal_tex: &Texture,
     emissive_tex: &Texture,
+    sampler: &wgpu::Sampler,
     skeleton_uniform: Arc<wgpu::Buffer>,
 ) -> MaterialGpu {
+    let alpha_mode_u32: u32 = match material.alpha_mode {
+        crate::render::material::AlphaMode::Opaque => 0,
+        crate::render::material::AlphaMode::Mask => 1,
+        crate::render::material::AlphaMode::Blend => 2,
+    };
+
     let uniform = MaterialUniform {
         base_color: material.base_color,
         emissive: [
@@ -342,8 +350,9 @@ pub fn build_object_bind_group(
             material.metallic,
             material.roughness,
             material.normal_scale,
-            0.0,
+            material.alpha_cutoff,
         ],
+        flags: [alpha_mode_u32, 0, 0, 0],
     };
 
     let material_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -374,7 +383,7 @@ pub fn build_object_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: wgpu::BindingResource::Sampler(&base_tex.sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 5,

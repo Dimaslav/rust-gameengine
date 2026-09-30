@@ -1,13 +1,4 @@
 //! Функции кодирования рендер-проходов.
-//!
-//! Deferred pipeline:
-//!   1. Shadow (3 CSM + 6 cube)      — encode_csm_all / encode_cube_shadow_all
-//!   2. G-buffer (3 MRT + depth)     — encode_gbuffer_pass
-//!   3. SSAO + blur                  — encode_ssao_pass / encode_ssao_blur_pass
-//!   4. Lighting (fullscreen)        — encode_lighting_pass
-//!   5. Forward (lines)              — encode_forward_pass
-//!   6. Post-processing              — encode_post_processing
-//!   7. Debug (F1–F6)                — encode_debug_pass
 
 use crate::render::csm::CASCADE_COUNT;
 use crate::render::debug::DebugView;
@@ -21,21 +12,28 @@ use super::Renderer;
 // Приватные helpers
 // ============================================================
 
-/// Fullscreen triangle: одна треугольная «простыня» на весь экран.
 #[inline]
 fn fullscreen_triangle(pass: &mut wgpu::RenderPass<'_>) {
     pass.draw(0..3, 0..1);
 }
 
-/// Пробегает по всем MeshDraw и рисует их инстансами.
-/// `bind_material_at` — какой bind group slot занимает material.
-/// `None` — material не биндится (shadow pass).
+/// Рисует инстансы бакетов. `include_blend` отбирает opaque или Blend.
+/// `pipeline_single` / `pipeline_double` — варианты пайплайна с culling
+/// и без (double-sided материалы).
+///
+/// Instance buffer залит в исходном порядке `draws`, поэтому offset
+/// продвигается всегда (даже для пропущенных бакетов) — иначе сломается
+/// соответствие.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn draw_all_instances<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     r: &'a Renderer,
     draws: &[MeshDraw],
     bind_material_at: Option<u32>,
+    include_blend: bool,
+    pipeline_single: &'a wgpu::RenderPipeline,
+    pipeline_double: &'a wgpu::RenderPipeline,
 ) {
     let instance_stride = std::mem::size_of::<InstanceData>() as u64;
     let mut offset_bytes: u64 = 0;
@@ -44,9 +42,23 @@ fn draw_all_instances<'a>(
         if d.instances.is_empty() {
             continue;
         }
+
+        if d.blend != include_blend {
+            offset_bytes += d.instances.len() as u64 * instance_stride;
+            continue;
+        }
+
         let Some(mesh) = r.meshes.get(&d.mesh) else {
+            offset_bytes += d.instances.len() as u64 * instance_stride;
             continue;
         };
+
+        let pipeline = if d.double_sided {
+            pipeline_double
+        } else {
+            pipeline_single
+        };
+        pass.set_pipeline(pipeline);
 
         if let Some(slot) = bind_material_at {
             let mat_gpu = d
@@ -102,7 +114,6 @@ fn depth_load() -> wgpu::Operations<f32> {
 // Shadow pass
 // ============================================================
 
-/// Рендерит один слой shadow map. Используется и для CSM, и для cube shadow.
 pub(super) fn encode_shadow_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -122,12 +133,20 @@ pub(super) fn encode_shadow_pass(
         occlusion_query_set: None,
     });
 
-    pass.set_pipeline(&r.shadow_pipeline);
     pass.set_bind_group(0, &r.shadow_pass_bind_group, &[slot_offset]);
-    draw_all_instances(&mut pass, r, draws, None);
+    // Тени: только opaque. Mask-материалы бросают тень всегда (без учёта
+    // alpha-cutoff) — это упрощение, приемлемое для большинства сцен.
+    draw_all_instances(
+        &mut pass,
+        r,
+        draws,
+        None,
+        false,
+        &r.shadow_pipeline,
+        &r.shadow_pipeline_double_sided,
+    );
 }
 
-/// Прогон всех 3 CSM каскадов.
 pub(super) fn encode_csm_all(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -139,7 +158,6 @@ pub(super) fn encode_csm_all(
     }
 }
 
-/// Прогон всех 6 граней cube shadow.
 pub(super) fn encode_cube_shadow_all(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -161,7 +179,6 @@ pub(super) fn encode_cube_shadow_all(
 // G-buffer
 // ============================================================
 
-/// G-buffer: 3 MRT + depth.
 pub(super) fn encode_gbuffer_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -195,9 +212,16 @@ pub(super) fn encode_gbuffer_pass(
         occlusion_query_set: None,
     });
 
-    pass.set_pipeline(&r.gbuffer_pipeline);
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
-    draw_all_instances(&mut pass, r, draws, Some(1));
+    draw_all_instances(
+        &mut pass,
+        r,
+        draws,
+        Some(1),
+        false,
+        &r.gbuffer_pipeline,
+        &r.gbuffer_pipeline_double_sided,
+    );
 }
 
 // ============================================================
@@ -263,22 +287,17 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
 }
 
 // ============================================================
-// Forward
+// Forward (lines)
 // ============================================================
 
-/// Forward pass: только lines поверх HDR.
 pub(super) fn encode_forward_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     line_vertices: &[LineVertex],
 ) {
-    // Если у нас нет ни линий, ни vertex_count в буфере — рано выходим.
     if line_vertices.is_empty() && r.line_buffer.vertex_count == 0 {
         return;
     }
-    // Если vertices были переданы — буфер уже загружен в render().
-    // Если нет, но vertex_count > 0 — значит уже загружен ранее.
-    // Защита: если буфер не заполнен, выходим.
     if r.line_buffer.vertex_count == 0 {
         return;
     }
@@ -303,6 +322,49 @@ pub(super) fn encode_forward_pass(
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
     pass.set_vertex_buffer(0, r.line_buffer.buffer.slice(..));
     pass.draw(0..r.line_buffer.vertex_count, 0..1);
+}
+
+// ============================================================
+// Transparent (forward, blend)
+// ============================================================
+
+pub(super) fn encode_transparent_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    draws: &[MeshDraw],
+) {
+    if !draws.iter().any(|d| d.blend && !d.instances.is_empty()) {
+        return;
+    }
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("transparent_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_view,
+            resolve_target: None,
+            ops: load(),
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &r.sd.gbuffer_depth_view,
+            depth_ops: Some(depth_load()),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_bind_group(0, &r.camera_bind_group, &[]);
+    pass.set_bind_group(1, &r.lights_bind_group, &[]);
+    pass.set_bind_group(2, &r.sd.shadow2_bind_group, &[]);
+    draw_all_instances(
+        &mut pass,
+        r,
+        draws,
+        Some(3),
+        true,
+        &r.transparent_pipeline,
+        &r.transparent_pipeline_double_sided,
+    );
 }
 
 // ============================================================
@@ -381,7 +443,6 @@ pub(super) fn encode_composite_pass(
     fullscreen_triangle(&mut pass);
 }
 
-/// Вся постобработка одним вызовом.
 pub(super) fn encode_post_processing(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,

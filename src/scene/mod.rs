@@ -1,5 +1,8 @@
-pub mod loader;
-pub mod prefab;
+//! Сериализация сцены в RON.
 
-pub use loader::{load_scene_from_file, load_scene_from_str, spawn_scene};
-pub use prefab::{EntityDef, SceneDef};
+pub mod serialize;
+
+pub use serialize::{
+    load_scene_from_file, load_scene_from_str, save_scene_to_file, save_scene_to_string,
+    SceneFile,
+};

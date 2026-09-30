@@ -1,5 +1,4 @@
 const PI: f32 = 3.14159265359;
-const IBL_STRENGTH: f32 = 0.35;
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -11,15 +10,15 @@ struct Camera {
 };
 
 struct Lights {
-    cascade_vp: array<mat4x4<f32>, 3>,
-    cascade_splits: vec4<f32>,
-    ambient_color: vec4<f32>,
-    counts: vec4<u32>,
+    cascade_vp:      array<mat4x4<f32>, 3>,
+    cascade_splits:  vec4<f32>,
+    ambient_color:   vec4<f32>,
+    counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
-    _pad0: vec4<f32>,
-    _pad1: vec4<f32>,
-    dir_lights: array<vec4<f32>, 8>,
-    point_lights: array<vec4<f32>, 32>,
+    misc:            vec4<f32>,   // x = ibl_strength
+    _pad1:           vec4<f32>,
+    dir_lights:      array<vec4<f32>, 8>,
+    point_lights:    array<vec4<f32>, 32>,
     cube_shadow_pos: array<vec4<f32>, 4>,
 };
 
@@ -180,7 +179,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let albedo = g_albedo.rgb;
     let metallic = g_albedo.a;
     let n = normalize(g_normal.rgb);
-    let roughness = g_emissive.a;    // NEW: roughness из emissive.a
+    let roughness = g_emissive.a;
     let emissive = g_emissive.rgb;
 
     let world_pos = reconstruct_world_pos(in.uv, depth);
@@ -188,10 +187,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let v = normalize(camera.camera_pos.xyz - world_pos);
 
     let ao = textureSample(t_ssao, s_ssao, in.uv).r;
+    let ibl_strength = lights.misc.x;
 
     var color = emissive;
-    color += ibl_diffuse(n, albedo, metallic) * ao * IBL_STRENGTH;
-    color += ibl_specular(n, v, albedo, metallic, roughness) * ao * IBL_STRENGTH;
+    color += ibl_diffuse(n, albedo, metallic) * ao * ibl_strength;
+    color += ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
 
     let dir_count = lights.counts.x;
     let csm_shadow = compute_csm_shadow(world_pos, view_depth);

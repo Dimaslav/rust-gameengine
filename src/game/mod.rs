@@ -1,5 +1,6 @@
 pub mod components;
 
 pub use components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, SkeletonHandle, Spinner, Transform, Velocity,
+    AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
+    Velocity,
 };

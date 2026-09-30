@@ -1,13 +1,7 @@
-// G-buffer pass. MRT: albedo, view-normal + linear-depth, emissive.
-// Bind groups: 0=camera, 1=material(+skeleton).
-//
-// Normal map применяется через derivative-based TBN (cotangent frame),
-// поэтому тангенты в вершинах не нужны.
-//
-// Выбор между cull-back и no-cull делается на уровне пайплайна
-// (`gbuffer_pipeline_double_sided`). Для double-sided материалов нормаль
-// флипается через `@builtin(front_facing)`, чтобы освещение было
-// корректным при взгляде с обратной стороны.
+// Forward transparent pass для AlphaMode::Blend.
+// Bind groups: 0=camera, 1=lights, 2=shadow2, 3=material + skeleton.
+// Depth-test против G-buffer depth, без записи depth, alpha blending.
+// Normal map — derivative-based TBN, тот же cotangent frame, что в gbuffer.
 
 struct Camera {
     view_proj:     mat4x4<f32>,
@@ -18,11 +12,24 @@ struct Camera {
     near_far:      vec4<f32>,
 };
 
+struct Lights {
+    cascade_vp:      array<mat4x4<f32>, 3>,
+    cascade_splits:  vec4<f32>,
+    ambient_color:   vec4<f32>,
+    counts:          vec4<u32>,
+    light_view_proj: mat4x4<f32>,
+    misc:            vec4<f32>,   // x = ibl_strength
+    _pad1:           vec4<f32>,
+    dir_lights:      array<vec4<f32>, 8>,
+    point_lights:    array<vec4<f32>, 32>,
+    cube_shadow_pos: array<vec4<f32>, 4>,
+};
+
 struct Material {
     base_color: vec4<f32>,
     emissive:   vec4<f32>,
-    params:     vec4<f32>,   // metallic, roughness, normal_scale, alpha_cutoff
-    flags:      vec4<u32>,   // alpha_mode (0=Opaque, 1=Mask, 2=Blend), _, _, _
+    params:     vec4<f32>,
+    flags:      vec4<u32>,
 };
 
 struct Skeleton {
@@ -36,14 +43,27 @@ struct Instance {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var<uniform> lights: Lights;
 
-@group(1) @binding(0) var base_tex:     texture_2d<f32>;
-@group(1) @binding(1) var mr_tex:       texture_2d<f32>;
-@group(1) @binding(2) var normal_tex:   texture_2d<f32>;
-@group(1) @binding(3) var emissive_tex: texture_2d<f32>;
-@group(1) @binding(4) var mat_samp:     sampler;
-@group(1) @binding(5) var<uniform> mat: Material;
-@group(1) @binding(6) var<uniform> skeleton: Skeleton;
+@group(2) @binding(0)  var csm_tex:          texture_depth_2d_array;
+@group(2) @binding(1)  var csm_samp:         sampler_comparison;
+@group(2) @binding(2)  var cube_shadow_tex:  texture_depth_cube;
+@group(2) @binding(3)  var cube_shadow_samp: sampler_comparison;
+@group(2) @binding(4)  var ssao_tex:         texture_2d<f32>;
+@group(2) @binding(5)  var linear_samp:      sampler;
+@group(2) @binding(6)  var irradiance_tex:   texture_cube<f32>;
+@group(2) @binding(7)  var prefiltered_tex:  texture_cube<f32>;
+@group(2) @binding(8)  var brdf_lut_tex:     texture_2d<f32>;
+@group(2) @binding(9)  var env_samp:         sampler;
+@group(2) @binding(10) var env_cube_tex:     texture_cube<f32>;
+
+@group(3) @binding(0) var base_tex:     texture_2d<f32>;
+@group(3) @binding(1) var mr_tex:       texture_2d<f32>;
+@group(3) @binding(2) var normal_tex:   texture_2d<f32>;
+@group(3) @binding(3) var emissive_tex: texture_2d<f32>;
+@group(3) @binding(4) var mat_samp:     sampler;
+@group(3) @binding(5) var<uniform> mat: Material;
+@group(3) @binding(6) var<uniform> skeleton: Skeleton;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -52,7 +72,6 @@ struct VsIn {
     @location(3) color:    vec4<f32>,
     @location(4) joints:   vec4<u32>,
     @location(5) weights:  vec4<f32>,
-    // instance
     @location(6)  m0: vec4<f32>,
     @location(7)  m1: vec4<f32>,
     @location(8)  m2: vec4<f32>,
@@ -70,7 +89,6 @@ struct VsOut {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
-    @location(4) view_depth: f32,
 };
 
 fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
@@ -107,20 +125,15 @@ fn vs_main(in: VsIn) -> VsOut {
     let world_pos = model * local_pos;
     let world_nrm = normalize((nrm_mat * local_nrm).xyz);
 
-    let view_pos = camera.view * world_pos;
-
     var out: VsOut;
     out.clip_pos     = camera.view_proj * world_pos;
     out.world_pos    = world_pos.xyz;
     out.world_normal = world_nrm;
     out.uv           = in.uv;
     out.color        = in.color * in.inst_color;
-    out.view_depth   = -view_pos.z;
     return out;
 }
 
-// Cotangent frame по Schüler'у. Работает в любом пространстве, где
-// вычисляются derivatives: здесь — world space.
 fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     let dp1 = dpdx(p);
     let dp2 = dpdy(p);
@@ -132,24 +145,35 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     let T = dp2perp * duv1.x + dp1perp * duv2.x;
     let B = dp2perp * duv1.y + dp1perp * duv2.y;
 
-    // Защита от деградации UV (например, на гранях куба).
     let invmax = inverseSqrt(max(max(dot(T, T), dot(B, B)), 0.0001));
     return mat3x3<f32>(T * invmax, B * invmax, N);
 }
 
-struct FsOut {
-    @location(0) albedo:   vec4<f32>,
-    @location(1) normal_d: vec4<f32>,
-    @location(2) emissive: vec4<f32>,
-};
+fn dir_contrib(n: vec3<f32>, idx: u32) -> vec3<f32> {
+    let l_dir_raw = lights.dir_lights[idx * 2u].xyz;
+    let l_col     = lights.dir_lights[idx * 2u + 1u].rgb;
+    let l = normalize(-l_dir_raw);
+    let ndl = max(dot(n, l), 0.0);
+    return l_col * ndl;
+}
+
+fn point_contrib(n: vec3<f32>, world_pos: vec3<f32>, idx: u32) -> vec3<f32> {
+    let pos_range = lights.point_lights[idx * 2u];
+    let col_int   = lights.point_lights[idx * 2u + 1u];
+    let to_l = pos_range.xyz - world_pos;
+    let dist = length(to_l);
+    if (dist > pos_range.w) { return vec3<f32>(0.0); }
+    let l = to_l / max(dist, 0.0001);
+    let ndl = max(dot(n, l), 0.0);
+    let atten = clamp(1.0 - dist / pos_range.w, 0.0, 1.0);
+    return col_int.rgb * ndl * atten * atten;
+}
 
 @fragment
 fn fs_main(
     in: VsOut,
     @builtin(front_facing) front_facing: bool,
-) -> FsOut {
-    // ВСЕ сэмплы делаем до discard — иначе textureSample попадает в
-    // non-uniform control flow, что запрещено WGSL.
+) -> @location(0) vec4<f32> {
     let base_sample     = textureSample(base_tex,     mat_samp, in.uv);
     let mr_sample       = textureSample(mr_tex,       mat_samp, in.uv);
     let normal_sample   = textureSample(normal_tex,   mat_samp, in.uv);
@@ -157,45 +181,38 @@ fn fs_main(
 
     let base = base_sample * mat.base_color * in.color;
 
-    // Alpha cutoff для AlphaMode::Mask.
-    let alpha_mode = mat.flags.x;
-    let alpha_cutoff = mat.params.w;
-    if (alpha_mode == 1u && base.a < alpha_cutoff) {
-        discard;
-    }
+    let alpha = base.a;
+    if (alpha < 0.003) { discard; }
 
-    // Базовая геометрическая нормаль.
     var n_world = normalize(in.world_normal);
     if (!front_facing) {
         n_world = -n_world;
     }
 
-    // Normal map: tangent-space → world-space через cotangent frame.
-    // Fallback normal (128,128,255) даёт (0,0,1) — identity, изменений нет.
+    // Normal map через derivative TBN.
     let n_sample = normal_sample.xyz * 2.0 - 1.0;
-    let n_scaled = vec3<f32>(
-        n_sample.xy * mat.params.z,  // normal_scale
-        n_sample.z,
-    );
+    let n_scaled = vec3<f32>(n_sample.xy * mat.params.z, n_sample.z);
     let tbn = cotangent_frame(n_world, in.world_pos, in.uv);
-    let n_mapped = normalize(tbn * n_scaled);
+    let n = normalize(tbn * n_scaled);
 
-    // MR-текстура: R=AO, G=roughness, B=metallic.
-    let metallic  = clamp(mat.params.x * mr_sample.b, 0.0, 1.0);
-    let roughness = clamp(mat.params.y * mr_sample.g, 0.04, 1.0);
+    let emissive_rgb = emissive_sample.rgb * mat.emissive.rgb;
 
-    // Emissive.
-    let emissive = emissive_sample.rgb * mat.emissive.rgb;
+    let irr = textureSample(irradiance_tex, env_samp, n).rgb;
+    let ambient = lights.ambient_color.rgb;
+    let ibl_strength = lights.misc.x;
 
-    // View-space normal для G-buffer.
-    let n_view = normalize((camera.view * vec4<f32>(n_mapped, 0.0)).xyz);
+    var lit = vec3<f32>(0.0);
+    let dir_count = lights.counts.x;
+    for (var i = 0u; i < dir_count; i = i + 1u) {
+        lit = lit + dir_contrib(n, i);
+    }
+    let pt_count = lights.counts.y;
+    for (var i = 0u; i < pt_count; i = i + 1u) {
+        lit = lit + point_contrib(n, in.world_pos, i);
+    }
 
-    // Линейная глубина, нормированная по far.
-    let depth_norm = clamp(in.view_depth / camera.near_far.y, 0.0, 1.0);
+    let diffuse = base.rgb;
+    let out_rgb = diffuse * (ambient + irr * ibl_strength + lit) + emissive_rgb;
 
-    var out: FsOut;
-    out.albedo   = vec4<f32>(base.rgb, metallic);
-    out.normal_d = vec4<f32>(n_view, depth_norm);
-    out.emissive = vec4<f32>(emissive, roughness);
-    return out;
+    return vec4<f32>(out_rgb, alpha);
 }

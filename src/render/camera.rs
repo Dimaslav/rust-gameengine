@@ -76,6 +76,15 @@ impl Camera3D {
         self.target += (right * -dx + up * dy) * self.distance * 0.002;
     }
 
+    /// Центрирует камеру на точке и ставит дистанцию под размер объекта.
+    ///
+    /// `radius` — радиус bounding-сферы объекта. Множитель 2.5 даёт
+    /// приятный отступ (объект занимает ~30% высоты экрана).
+    pub fn focus_on(&mut self, target: Vec3, radius: f32) {
+        self.target = target;
+        self.distance = (radius * 2.5).max(1.0);
+    }
+
     /// Возвращает 6 плоскостей frustum: [left, right, bottom, top, near, far],
     /// каждая — Vec4(a,b,c,d), где a·x+b·y+c·z+d >= 0 внутри.
     ///
@@ -99,5 +108,31 @@ impl Camera3D {
                 p
             }
         })
+    }
+
+    /// Луч из позиции камеры через пиксель экрана.
+    /// `screen_x/screen_y` — координаты в пикселях от левого верхнего угла.
+    /// Возвращает `(origin, direction)` — direction нормализован.
+    pub fn ray_from_screen(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        width: f32,
+        height: f32,
+    ) -> (Vec3, Vec3) {
+        let ndc_x = (screen_x / width) * 2.0 - 1.0;
+        // winit Y идёт сверху вниз, NDC Y — снизу вверх → инвертируем.
+        let ndc_y = 1.0 - (screen_y / height) * 2.0;
+
+        let inv_vp = self.view_projection().inverse();
+        let near_h = inv_vp * Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+        let far_h = inv_vp * Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+
+        let near_w = near_h.truncate() / near_h.w;
+        let far_w = far_h.truncate() / far_h.w;
+
+        let origin = self.position();
+        let dir = (far_w - near_w).normalize();
+        (origin, dir)
     }
 }
