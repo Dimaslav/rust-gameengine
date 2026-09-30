@@ -1,7 +1,8 @@
-//! Редактор: egui-оверлей + панели + gizmo + undo/redo.
+//! Редактор: egui-оверлей + панели + gizmo + undo/redo + Play + Fly.
 
 pub mod gizmo;
 pub mod picking;
+pub mod play;
 pub mod ui;
 pub mod undo;
 
@@ -14,6 +15,7 @@ use crate::game::components::Transform;
 use crate::render::Material;
 
 use gizmo::GizmoState;
+use play::PlayState;
 use undo::UndoStack;
 
 pub struct Editor {
@@ -25,7 +27,6 @@ pub struct Editor {
 }
 
 pub struct EditorState {
-    /// Выделенные сущности. Порядок сохраняется, последний — "primary".
     pub selected: Vec<Entity>,
     pub save_path: String,
     pub pending_action: Option<EditorAction>,
@@ -33,10 +34,16 @@ pub struct EditorState {
     pub dirty_materials: Vec<(String, Material)>,
     pub undo: UndoStack,
     pub undo_requested: bool,
-    /// Строка поиска в Hierarchy. Пустая — показываем всё.
     pub search_filter: String,
-    /// Внутренний буфер Copy/Paste Transform в инспекторе.
     pub clipboard_transform: Option<Transform>,
+    pub play: PlayState,
+
+    /// Зажат RMB — летим по миру (UE5-подобно).
+    pub flying: bool,
+    /// Скорость полёта в м/с (с учётом Shift/Ctrl).
+    pub fly_speed: f32,
+    /// Чувствительность мыши в fly-режиме.
+    pub fly_sensitivity: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +57,8 @@ pub enum EditorAction {
     Undo,
     Redo,
     FocusSelected,
+    TogglePlay,
+    SpawnPlayerHere,
 }
 
 impl EditorState {
@@ -64,12 +73,12 @@ impl EditorState {
             undo_requested: false,
             search_filter: String::new(),
             clipboard_transform: None,
+            play: PlayState::default(),
+            flying: false,
+            fly_speed: 15.0,
+            fly_sensitivity: 0.0025,
         }
     }
-
-    // ============================================================
-    // Selection helpers
-    // ============================================================
 
     pub fn is_selected(&self, e: Entity) -> bool {
         self.selected.contains(&e)
@@ -88,8 +97,6 @@ impl EditorState {
         }
     }
 
-    /// Выделить диапазон от `anchor` до `e` (в порядке `list`).
-    /// Если `anchor` не найден — просто выделяем `e`.
     pub fn select_range(&mut self, list: &[Entity], anchor: Entity, e: Entity) {
         let (Some(a), Some(b)) = (
             list.iter().position(|&x| x == anchor),
@@ -105,12 +112,10 @@ impl EditorState {
         }
     }
 
-    /// Последний добавленный элемент — на него ориентируется инспектор.
     pub fn primary(&self) -> Option<Entity> {
         self.selected.last().copied()
     }
 
-    /// Убрать из выделения те сущности, которых больше нет в мире.
     pub fn prune_selection(&mut self, world: &World) {
         self.selected.retain(|&e| world.entities().contains(&e));
     }

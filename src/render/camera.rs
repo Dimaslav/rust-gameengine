@@ -1,18 +1,27 @@
 use glam::{Mat4, Vec3, Vec4};
 
-/// Перспективная 3D-камера с orbit-управлением вокруг target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    Orbit,
+    FirstPerson,
+}
+
 pub struct Camera3D {
+    // orbit
     pub target: Vec3,
     pub distance: f32,
-    /// Радианы, вращение вокруг вертикальной оси.
+
+    // общие
     pub yaw: f32,
-    /// Радианы, наклон. Ограничен [-1.5, 1.5] чтобы избежать gimbal-lock.
     pub pitch: f32,
 
     pub fov_y: f32,
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+
+    pub mode: CameraMode,
+    pub first_person_pos: Vec3,
 }
 
 impl Camera3D {
@@ -26,6 +35,8 @@ impl Camera3D {
             aspect,
             near: 0.1,
             far: 1000.0,
+            mode: CameraMode::Orbit,
+            first_person_pos: Vec3::new(0.0, 1.7, -8.0),
         }
     }
 
@@ -35,19 +46,47 @@ impl Camera3D {
         }
     }
 
-    pub fn position(&self) -> Vec3 {
+    /// Направление взгляда. Работает и в Orbit, и в FPS.
+    pub fn forward(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
-        self.target
-            + Vec3::new(
-                self.distance * cp * cy,
-                self.distance * sp,
-                self.distance * cp * sy,
-            )
+        let f = Vec3::new(cp * cy, sp, cp * sy);
+        -f
+    }
+
+    /// Правая ось камеры (в плоскости обзора).
+    pub fn right(&self) -> Vec3 {
+        self.forward().cross(Vec3::Y).normalize_or_zero()
+    }
+
+    /// Верхняя ось камеры.
+    pub fn up(&self) -> Vec3 {
+        self.right().cross(self.forward()).normalize_or_zero()
+    }
+
+    pub fn position(&self) -> Vec3 {
+        match self.mode {
+            CameraMode::Orbit => {
+                let (sy, cy) = self.yaw.sin_cos();
+                let (sp, cp) = self.pitch.sin_cos();
+                self.target
+                    + Vec3::new(
+                        self.distance * cp * cy,
+                        self.distance * sp,
+                        self.distance * cp * sy,
+                    )
+            }
+            CameraMode::FirstPerson => self.first_person_pos,
+        }
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.position(), self.target, Vec3::Y)
+        let pos = self.position();
+        let look = match self.mode {
+            CameraMode::Orbit => self.target,
+            CameraMode::FirstPerson => pos + self.forward(),
+        };
+        Mat4::look_at_rh(pos, look, Vec3::Y)
     }
 
     pub fn proj_matrix(&self) -> Mat4 {
@@ -58,47 +97,108 @@ impl Camera3D {
         self.proj_matrix() * self.view_matrix()
     }
 
+    // ============================================================
+    // Orbit
+    // ============================================================
+
     pub fn orbit(&mut self, dx: f32, dy: f32) {
+        if self.mode != CameraMode::Orbit {
+            return;
+        }
         self.yaw -= dx;
         self.pitch = (self.pitch + dy).clamp(-1.5, 1.5);
     }
 
     pub fn zoom(&mut self, delta: f32) {
+        if self.mode != CameraMode::Orbit {
+            return;
+        }
         self.distance = (self.distance * (1.0 - delta)).clamp(0.5, 500.0);
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {
-        // Панорама в плоскости, перпендикулярной взгляду.
-        // Строки view-матрицы: row0 = right, row1 = up.
+        if self.mode != CameraMode::Orbit {
+            return;
+        }
         let view = self.view_matrix();
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
         self.target += (right * -dx + up * dy) * self.distance * 0.002;
     }
 
-    /// Центрирует камеру на точке и ставит дистанцию под размер объекта.
-    ///
-    /// `radius` — радиус bounding-сферы объекта. Множитель 2.5 даёт
-    /// приятный отступ (объект занимает ~30% высоты экрана).
     pub fn focus_on(&mut self, target: Vec3, radius: f32) {
+        if self.mode != CameraMode::Orbit {
+            return;
+        }
         self.target = target;
         self.distance = (radius * 2.5).max(1.0);
     }
 
-    /// Возвращает 6 плоскостей frustum: [left, right, bottom, top, near, far],
-    /// каждая — Vec4(a,b,c,d), где a·x+b·y+c·z+d >= 0 внутри.
-    ///
-    /// ВАЖНО: нормализуем на длину `(a,b,c)`, а не на длину 4D-вектора.
-    /// Только тогда `dot(n, p) + d` — метрическое расстояние до плоскости.
+    // ============================================================
+    // FPS
+    // ============================================================
+
+    pub fn enter_fps(&mut self, eye: Vec3) {
+        if self.mode == CameraMode::FirstPerson {
+            return;
+        }
+        self.mode = CameraMode::FirstPerson;
+        self.first_person_pos = eye;
+    }
+
+    pub fn exit_fps(&mut self) {
+        self.mode = CameraMode::Orbit;
+    }
+
+    pub fn is_first_person(&self) -> bool {
+        self.mode == CameraMode::FirstPerson
+    }
+
+    /// Mouse look для FPS. Мышь вправо → камера вправо, вниз → вниз.
+    pub fn fps_look(&mut self, dx: f32, dy: f32) {
+        if self.mode != CameraMode::FirstPerson {
+            return;
+        }
+        self.yaw += dx;
+        self.pitch = (self.pitch + dy).clamp(-1.5, 1.5);
+    }
+
+    pub fn fps_move(&mut self, delta: Vec3) {
+        if self.mode != CameraMode::FirstPerson {
+            return;
+        }
+        self.first_person_pos += delta;
+    }
+
+    // ============================================================
+    // Fly (editor, UE5-style)
+    // ============================================================
+
+    /// Mouse look в fly-режиме (Orbit-камера, но вид от свободной позиции).
+    /// Мышь вправо → камера вправо.
+    pub fn fly_look(&mut self, dx: f32, dy: f32) {
+        self.yaw += dx;
+        self.pitch = (self.pitch + dy).clamp(-1.5, 1.5);
+    }
+
+    /// Сдвиг камеры в fly-режиме: перемещает target, а значит и позицию.
+    pub fn fly_move(&mut self, delta: Vec3) {
+        self.target += delta;
+    }
+
+    // ============================================================
+    // Frustum / picking
+    // ============================================================
+
     pub fn frustum_planes(&self) -> [Vec4; 6] {
         let m = self.view_projection();
         [
-            m.row(3) + m.row(0), // left
-            m.row(3) - m.row(0), // right
-            m.row(3) + m.row(1), // bottom
-            m.row(3) - m.row(1), // top
-            m.row(2),            // near (RH + [0,1] depth)
-            m.row(3) - m.row(2), // far
+            m.row(3) + m.row(0),
+            m.row(3) - m.row(0),
+            m.row(3) + m.row(1),
+            m.row(3) - m.row(1),
+            m.row(2),
+            m.row(3) - m.row(2),
         ]
         .map(|p| {
             let n = Vec3::new(p.x, p.y, p.z).length();
@@ -110,9 +210,6 @@ impl Camera3D {
         })
     }
 
-    /// Луч из позиции камеры через пиксель экрана.
-    /// `screen_x/screen_y` — координаты в пикселях от левого верхнего угла.
-    /// Возвращает `(origin, direction)` — direction нормализован.
     pub fn ray_from_screen(
         &self,
         screen_x: f32,
@@ -121,7 +218,6 @@ impl Camera3D {
         height: f32,
     ) -> (Vec3, Vec3) {
         let ndc_x = (screen_x / width) * 2.0 - 1.0;
-        // winit Y идёт сверху вниз, NDC Y — снизу вверх → инвертируем.
         let ndc_y = 1.0 - (screen_y / height) * 2.0;
 
         let inv_vp = self.view_projection().inverse();

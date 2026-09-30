@@ -225,7 +225,7 @@ impl Game for DemoGame {
     ) -> bool {
         use winit::keyboard::KeyCode;
 
-        if input.key_pressed(KeyCode::Escape) {
+        if input.key_pressed(KeyCode::Escape) && !input.play_mode {
             return false;
         }
 
@@ -236,67 +236,72 @@ impl Game for DemoGame {
             }
         }
 
-        if input.key_pressed(KeyCode::KeyG) {
-            self.show_grid = !self.show_grid;
-        }
-        if input.key_pressed(KeyCode::KeyC) {
-            self.show_culling = !self.show_culling;
-        }
-
-        if input.key_pressed(KeyCode::F1) {
-            self.postfx.debug_view = DebugView::Final;
-        }
-        if input.key_pressed(KeyCode::F2) {
-            self.postfx.debug_view = DebugView::Ssao;
-        }
-        if input.key_pressed(KeyCode::F3) {
-            self.postfx.debug_view = DebugView::GbufferNormal;
-        }
-        if input.key_pressed(KeyCode::F4) {
-            self.postfx.debug_view = DebugView::GbufferDepth;
-        }
-        if input.key_pressed(KeyCode::F5) {
-            self.postfx.debug_view = DebugView::HdrPreBloom;
-        }
-        if input.key_pressed(KeyCode::F6) {
-            self.postfx.debug_view = DebugView::CsmCascade0;
-        }
-
-        // Камера вращается ЛКМ, но НЕ во время работы gizmo/UI.
-        // `editor_captured` выставляется движком в начале кадра.
-        let lmb = input.mouse_down(winit::event::MouseButton::Left)
-            && !input.editor_captured;
-        if lmb {
-            let (dx, dy) = input.mouse_delta;
-            if self.dragging {
-                self.camera.orbit(dx * 0.005, dy * 0.005);
+        if !input.play_mode {
+            if input.key_pressed(KeyCode::KeyG) {
+                self.show_grid = !self.show_grid;
             }
-            self.dragging = true;
-        } else {
-            self.dragging = false;
+            if input.key_pressed(KeyCode::KeyC) {
+                self.show_culling = !self.show_culling;
+            }
+
+            if input.key_pressed(KeyCode::F1) {
+                self.postfx.debug_view = DebugView::Final;
+            }
+            if input.key_pressed(KeyCode::F2) {
+                self.postfx.debug_view = DebugView::Ssao;
+            }
+            if input.key_pressed(KeyCode::F3) {
+                self.postfx.debug_view = DebugView::GbufferNormal;
+            }
+            if input.key_pressed(KeyCode::F4) {
+                self.postfx.debug_view = DebugView::GbufferDepth;
+            }
+            if input.key_pressed(KeyCode::F5) {
+                self.postfx.debug_view = DebugView::HdrPreBloom;
+            }
+            if input.key_pressed(KeyCode::F6) {
+                self.postfx.debug_view = DebugView::CsmCascade0;
+            }
         }
 
-        if input.scroll_delta.abs() > 0.01 {
-            self.camera.zoom(input.scroll_delta * 0.05);
-        }
-        let speed = 8.0 * dt;
-        let mut pan = (0.0, 0.0);
-        if input.key_down(KeyCode::KeyW) {
-            pan.1 -= speed;
-        }
-        if input.key_down(KeyCode::KeyS) {
-            pan.1 += speed;
-        }
-        if input.key_down(KeyCode::KeyA) {
-            pan.0 -= speed;
-        }
-        if input.key_down(KeyCode::KeyD) {
-            pan.0 += speed;
-        }
-        if pan != (0.0, 0.0) {
-            self.camera.pan(pan.0, pan.1);
+        // ===== Камера: только Orbit, и только если не в Play и не летим =====
+        if !input.play_mode && !input.editor_flying {
+            let lmb = input.mouse_down(winit::event::MouseButton::Left)
+                && !input.editor_captured;
+            if lmb {
+                let (dx, dy) = input.mouse_delta;
+                if self.dragging {
+                    self.camera.orbit(dx * 0.005, dy * 0.005);
+                }
+                self.dragging = true;
+            } else {
+                self.dragging = false;
+            }
+
+            if input.scroll_delta.abs() > 0.01 {
+                self.camera.zoom(input.scroll_delta * 0.05);
+            }
+
+            let speed = 8.0 * dt;
+            let mut pan = (0.0, 0.0);
+            if input.key_down(KeyCode::KeyW) {
+                pan.1 -= speed;
+            }
+            if input.key_down(KeyCode::KeyS) {
+                pan.1 += speed;
+            }
+            if input.key_down(KeyCode::KeyA) {
+                pan.0 -= speed;
+            }
+            if input.key_down(KeyCode::KeyD) {
+                pan.0 += speed;
+            }
+            if pan != (0.0, 0.0) {
+                self.camera.pan(pan.0, pan.1);
+            }
         }
 
+        // Анимация point-light.
         self.orbit_phase += dt * 0.5;
         let (sp, cp) = self.orbit_phase.sin_cos();
         self.point_lights[1].position[0] = cp * 12.0;

@@ -9,18 +9,14 @@ pub struct Input {
     keys_released: HashSet<KeyCode>,
     mouse_buttons_down: HashSet<MouseButton>,
     pub mouse_pos: (f32, f32),
-    /// Смещение курсора за кадр — для orbit-камеры.
     pub mouse_delta: (f32, f32),
-    /// Колесо прокрутки за кадр.
+    pub mouse_motion: (f32, f32),
     pub scroll_delta: f32,
-    /// Первое событие CursorMoved после входа/выхода курсора.
     first_move: bool,
-    /// True, если редактор в этом кадре «захватил» мышь:
-    /// активный drag gizmo, либо курсор над UI.
-    ///
-    /// Game должен проверять этот флаг перед обработкой мыши,
-    /// чтобы не крутить камеру во время манипуляции gizmo.
-    /// Устанавливается `App::redraw` до вызова `Game::update`.
+
+    pub play_mode: bool,
+    /// RMB зажат — editor fly.
+    pub editor_flying: bool,
     pub editor_captured: bool,
 }
 
@@ -64,7 +60,6 @@ impl Input {
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) {
         if self.first_move {
-            // Просто запоминаем позицию, delta = 0.
             self.first_move = false;
         } else {
             self.mouse_delta.0 += x - self.mouse_pos.0;
@@ -73,8 +68,11 @@ impl Input {
         self.mouse_pos = (x, y);
     }
 
-    /// Вызывать на `CursorEntered`/`CursorLeft`, чтобы следующий move
-    /// не дал скачок относительно «старой» позиции.
+    pub fn on_mouse_motion_device(&mut self, dx: f32, dy: f32) {
+        self.mouse_motion.0 += dx;
+        self.mouse_motion.1 += dy;
+    }
+
     pub fn on_cursor_enter(&mut self) {
         self.first_move = true;
     }
@@ -100,6 +98,7 @@ impl Input {
         self.keys_pressed.clear();
         self.keys_released.clear();
         self.mouse_delta = (0.0, 0.0);
+        self.mouse_motion = (0.0, 0.0);
         self.scroll_delta = 0.0;
     }
 }

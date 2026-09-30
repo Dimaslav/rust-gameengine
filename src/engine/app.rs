@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget};
 use winit::keyboard::KeyCode;
-use winit::window::{Window, WindowBuilder};
+use winit::window::{CursorGrabMode, Window, WindowBuilder};
 
 use crate::ecs::{Entity, World};
 use crate::editor::gizmo::{self, GizmoMode};
@@ -16,6 +16,7 @@ use crate::render::{
     Renderer,
 };
 use glam::Vec3;
+use super::collision::{self, PlayerBox};
 use super::input::Input;
 use super::time::Time;
 
@@ -81,15 +82,202 @@ struct App<G: Game> {
 }
 
 impl<G: Game> App<G> {
+    /// FPS-контроллер с коллизиями + bob по пройденному пути.
+    fn update_player(&mut self, dt: f32) {
+        // 1. Mouse look
+        {
+            let sens = self.editor.state.play.look_sensitivity;
+            let (mdx, mdy) = self.input.mouse_motion;
+            self.game.camera_mut().fps_look(mdx * sens, mdy * sens);
+        }
+
+        // 2. Параметры (копии, чтобы не бороться с borrow checker)
+        let eye_height = self.editor.state.play.eye_height;
+        let player_radius = self.editor.state.play.player_radius;
+        let player_height = self.editor.state.play.player_height;
+        let walk_speed = self.editor.state.play.walk_speed;
+        let run_speed = self.editor.state.play.run_speed;
+        let jump_speed = self.editor.state.play.jump_speed;
+        let gravity = self.editor.state.play.gravity;
+        let bob_enabled = self.editor.state.play.bob_enabled;
+        let bob_amp = self.editor.state.play.bob_amplitude;
+
+        // 3. Горизонтальное движение
+        let f = self.game.camera().forward();
+        let fwd_xz = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+        let right_xz = Vec3::new(fwd_xz.z, 0.0, -fwd_xz.x);
+
+        let running = self.input.key_down(KeyCode::ShiftLeft);
+        let speed = if running { run_speed } else { walk_speed };
+
+        let mut motion = Vec3::ZERO;
+        if self.input.key_down(KeyCode::KeyW) { motion += fwd_xz; }
+        if self.input.key_down(KeyCode::KeyS) { motion -= fwd_xz; }
+        if self.input.key_down(KeyCode::KeyD) { motion += right_xz; }
+        if self.input.key_down(KeyCode::KeyA) { motion -= right_xz; }
+
+        let moving = motion.length_squared() > 1e-8;
+        if moving {
+            motion = motion.normalize() * speed * dt;
+        }
+
+        // 4. Прыжок + гравитация
+        let mut vvel = self.editor.state.play.vertical_velocity;
+        let mut on_ground = self.editor.state.play.on_ground;
+
+        if self.input.key_pressed(KeyCode::Space) && on_ground {
+            vvel = jump_speed;
+            on_ground = false;
+        }
+        vvel -= gravity * dt;
+        let dy = vvel * dt;
+
+        // 5. Коллизии
+        let eye_pos = self.game.camera().first_person_pos;
+        let feet = eye_pos - Vec3::Y * eye_height;
+        let pbox = PlayerBox {
+            radius: player_radius,
+            height: player_height,
+        };
+        let delta = motion + Vec3::new(0.0, dy, 0.0);
+        let (new_feet, landed) =
+            collision::resolve_movement(&self.world, &self.renderer, feet, delta, &pbox);
+
+        // 6. Обновить вертикальное состояние
+        if landed {
+            vvel = 0.0;
+            on_ground = true;
+        } else if dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+            vvel = 0.0;
+            on_ground = true;
+        } else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+            vvel = 0.0;
+        }
+
+        // 7. Head bob — по пройденному расстоянию, не по времени.
+        let horizontal_moved =
+            ((new_feet.x - feet.x).powi(2) + (new_feet.z - feet.z).powi(2)).sqrt();
+
+        let mut bob_dist = self.editor.state.play.bob_distance;
+        let mut bob_cur = self.editor.state.play.bob_current;
+
+        if bob_enabled && on_ground && horizontal_moved > 1e-6 {
+            bob_dist += horizontal_moved * if running { 1.4 } else { 1.0 };
+        }
+        let bob_target = if bob_enabled {
+            bob_dist.sin() * bob_amp
+        } else {
+            0.0
+        };
+        // Низкочастотное сглаживание убирает микро-рывки при колеблющемся dt.
+        bob_cur = bob_cur * 0.85 + bob_target * 0.15;
+        let bob_offset = bob_cur;
+
+        // 8. Записать обратно
+        let new_eye = new_feet + Vec3::Y * (eye_height + bob_offset);
+        self.game.camera_mut().first_person_pos = new_eye;
+
+        let play = &mut self.editor.state.play;
+        play.vertical_velocity = vvel;
+        play.on_ground = on_ground;
+        play.bob_distance = bob_dist;
+        play.bob_current = bob_cur;
+        play.saved_position = new_eye;
+    }
+
+    /// UE5-подобный полёт в редакторе: RMB + WASD.
+    fn update_fly(&mut self, dt: f32) {
+        // Mouse look
+        let sens = self.editor.state.fly_sensitivity;
+        let (mdx, mdy) = self.input.mouse_motion;
+        {
+            let cam = self.game.camera_mut();
+            cam.fly_look(mdx * sens, mdy * sens);
+        }
+
+        // Направления
+        let f = self.game.camera().forward();
+        let r = self.game.camera().right();
+
+        // Множитель скорости
+        let mult = if self.input.key_down(KeyCode::ShiftLeft) {
+            3.0
+        } else if self.input.key_down(KeyCode::ControlLeft) {
+            0.3
+        } else {
+            1.0
+        };
+        let speed = self.editor.state.fly_speed * mult * dt;
+
+        let mut delta = Vec3::ZERO;
+        if self.input.key_down(KeyCode::KeyW) { delta += f; }
+        if self.input.key_down(KeyCode::KeyS) { delta -= f; }
+        if self.input.key_down(KeyCode::KeyD) { delta += r; }
+        if self.input.key_down(KeyCode::KeyA) { delta -= r; }
+        if self.input.key_down(KeyCode::KeyE) || self.input.key_down(KeyCode::Space) {
+            delta += Vec3::Y;
+        }
+        if self.input.key_down(KeyCode::KeyQ) {
+            delta -= Vec3::Y;
+        }
+
+        if delta.length_squared() > 1e-6 {
+            let mv = delta.normalize() * speed;
+            self.game.camera_mut().fly_move(mv);
+        }
+
+        // Scroll — менять fly_speed.
+        if self.input.scroll_delta.abs() > 0.01 {
+            let fs = &mut self.editor.state.fly_speed;
+            *fs = (*fs * (1.0 + self.input.scroll_delta * 0.1)).clamp(0.5, 200.0);
+        }
+    }
+
     fn redraw(&mut self, elwt: &EventLoopWindowTarget<()>) {
         self.time.tick();
         let dt = self.time.delta;
 
         self.world.update_events();
 
-        let (mx, my) = self.input.mouse_pos;
-        self.input.editor_captured = self.editor.state.gizmo.drag.is_some()
-            || !self.in_viewport(mx, my);
+        // F9 — toggle Play. Esc в Play — выход.
+        if self.input.key_pressed(KeyCode::F9) {
+            self.editor.state.pending_action = Some(EditorAction::TogglePlay);
+        }
+        if self.input.key_pressed(KeyCode::Escape) && self.editor.state.play.active {
+            self.editor.state.pending_action = Some(EditorAction::TogglePlay);
+        }
+
+        // === RMB + fly в редакторе ===
+        let rmb = self.input.mouse_down(MouseButton::Right);
+        let want_fly = rmb && !self.editor.state.play.active;
+        let was_flying = self.editor.state.flying;
+
+        if want_fly != was_flying {
+            if want_fly {
+                let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
+                self.window.set_cursor_visible(false);
+                self.input.on_cursor_enter();
+                self.input.mouse_motion = (0.0, 0.0);
+            } else {
+                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                self.window.set_cursor_visible(true);
+            }
+            self.editor.state.flying = want_fly;
+            self.input.editor_flying = want_fly;
+        }
+
+        // === Play или Edit ===
+        if self.editor.state.play.active {
+            self.input.editor_captured = false;
+            self.update_player(dt);
+        } else if self.editor.state.flying {
+            self.input.editor_captured = true;
+            self.update_fly(dt);
+        } else {
+            let (mx, my) = self.input.mouse_pos;
+            self.input.editor_captured = self.editor.state.gizmo.drag.is_some()
+                || !self.in_viewport(mx, my);
+        }
 
         let continue_running = self
             .game
@@ -99,34 +287,41 @@ impl<G: Game> App<G> {
             return;
         }
 
-        let ctrl = self.input.key_down(KeyCode::ControlLeft)
-            || self.input.key_down(KeyCode::ControlRight);
-        if ctrl && self.input.key_pressed(KeyCode::KeyZ) {
-            self.editor.state.pending_action = Some(EditorAction::Undo);
-        }
-        if ctrl && self.input.key_pressed(KeyCode::KeyY) {
-            self.editor.state.pending_action = Some(EditorAction::Redo);
+        if let Some(action @ EditorAction::TogglePlay) = self.editor.state.pending_action {
+            self.editor.state.pending_action = None;
+            self.handle_editor_action(action);
         }
 
-        if !self.editor.state.selected.is_empty() {
-            if self.input.key_pressed(KeyCode::Digit1) {
-                self.editor.state.gizmo.mode = GizmoMode::Translate;
+        if !self.editor.state.play.active {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            if ctrl && self.input.key_pressed(KeyCode::KeyZ) {
+                self.editor.state.pending_action = Some(EditorAction::Undo);
             }
-            if self.input.key_pressed(KeyCode::Digit2) {
-                self.editor.state.gizmo.mode = GizmoMode::Rotate;
+            if ctrl && self.input.key_pressed(KeyCode::KeyY) {
+                self.editor.state.pending_action = Some(EditorAction::Redo);
             }
-            if self.input.key_pressed(KeyCode::Digit3) {
-                self.editor.state.gizmo.mode = GizmoMode::Scale;
+
+            if !self.editor.state.selected.is_empty() {
+                if self.input.key_pressed(KeyCode::Digit1) {
+                    self.editor.state.gizmo.mode = GizmoMode::Translate;
+                }
+                if self.input.key_pressed(KeyCode::Digit2) {
+                    self.editor.state.gizmo.mode = GizmoMode::Rotate;
+                }
+                if self.input.key_pressed(KeyCode::Digit3) {
+                    self.editor.state.gizmo.mode = GizmoMode::Scale;
+                }
+                if self.input.key_pressed(KeyCode::KeyF) && !ctrl {
+                    self.editor.state.pending_action = Some(EditorAction::FocusSelected);
+                }
+                if ctrl && self.input.key_pressed(KeyCode::KeyD) {
+                    self.editor.state.pending_action = Some(EditorAction::Duplicate);
+                }
             }
-            if self.input.key_pressed(KeyCode::KeyF) && !ctrl {
-                self.editor.state.pending_action = Some(EditorAction::FocusSelected);
+            if self.input.key_pressed(KeyCode::Delete) {
+                self.editor.state.pending_action = Some(EditorAction::DeleteSelected);
             }
-            if ctrl && self.input.key_pressed(KeyCode::KeyD) {
-                self.editor.state.pending_action = Some(EditorAction::Duplicate);
-            }
-        }
-        if self.input.key_pressed(KeyCode::Delete) {
-            self.editor.state.pending_action = Some(EditorAction::DeleteSelected);
         }
 
         // egui
@@ -215,21 +410,19 @@ impl<G: Game> App<G> {
             self.renderer.update_material(&name, mat);
         }
 
-        // Проверим, что выделенные существуют (могли исчезнуть при undo).
         self.editor.state.prune_selection(&self.world);
 
         if let Some(action) = self.editor.state.pending_action.take() {
             self.handle_editor_action(action);
         }
 
-        // Draw data
         let selected = self.editor.state.selected.clone();
         let draws = self.game.collect_draws(&mut self.world, &self.renderer);
         let mut lines = self
             .game
             .collect_lines(&mut self.world, &self.renderer, &selected);
 
-        if !selected.is_empty() {
+        if !self.editor.state.play.active && !selected.is_empty() {
             let mut batch = LineBatch::new();
             gizmo::draw_gizmo(
                 &mut batch,
@@ -277,9 +470,18 @@ impl<G: Game> App<G> {
             Err(e) => log::warn!("Surface error: {:?}", e),
         }
 
-        if self.time.frame_count % 10 == 0 {
+        // Реже обновляем заголовок — на Windows это блокирующий вызов.
+        if self.time.frame_count % 30 == 0 {
+            let mode_str = if self.editor.state.play.active {
+                "PLAY"
+            } else if self.editor.state.flying {
+                "FLY"
+            } else {
+                "EDIT"
+            };
             self.window.set_title(&format!(
-                "Rust Engine 3D | FPS: {:>5.1} | Entities: {:>6} | Selected: {}",
+                "Rust Engine 3D [{}] | FPS: {:>5.1} | Entities: {:>6} | Selected: {}",
+                mode_str,
                 self.time.fps(),
                 self.world.len(),
                 self.editor.state.selected.len(),
@@ -333,8 +535,10 @@ impl<G: Game> App<G> {
                 self.world.insert(new_e, nt);
             }
             if let Some(n) = self.world.get::<crate::game::components::Name>(*e).cloned() {
-                self.world
-                    .insert(new_e, crate::game::components::Name(format!("{}_copy", n.0)));
+                self.world.insert(
+                    new_e,
+                    crate::game::components::Name(format!("{}_copy", n.0)),
+                );
             }
             if let Some(m) = self.world.get::<MeshHandle>(*e).cloned() {
                 self.world.insert(new_e, m);
@@ -363,36 +567,81 @@ impl<G: Game> App<G> {
         use crate::game::components::{MaterialHandle, MeshHandle, Transform};
 
         match action {
+            EditorAction::TogglePlay => {
+                let play = &mut self.editor.state.play;
+                play.active = !play.active;
+                self.input.play_mode = play.active;
+
+                if play.active {
+                    play.vertical_velocity = 0.0;
+                    play.on_ground = true;
+                    play.bob_distance = 0.0;
+                    play.bob_current = 0.0;
+
+                    let mut spawn = play.saved_position;
+                    if spawn.y < play.eye_height {
+                        spawn.y = play.eye_height + 0.05;
+                    }
+                    self.game.camera_mut().enter_fps(spawn);
+
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
+                    self.window.set_cursor_visible(false);
+                    self.input.on_cursor_enter();
+                    self.input.mouse_motion = (0.0, 0.0);
+
+                    log::info!("Entered play mode");
+                } else {
+                    play.saved_position = self.game.camera().first_person_pos;
+                    self.game.camera_mut().exit_fps();
+
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                    self.window.set_cursor_visible(true);
+
+                    log::info!("Exited play mode");
+                }
+            }
+            EditorAction::SpawnPlayerHere => {
+                let Some(e) = self.editor.state.primary() else {
+                    return;
+                };
+                let Some(t) = self.world.get::<Transform>(e) else {
+                    return;
+                };
+                let mut pos = t.position;
+                pos.y += self.editor.state.play.eye_height;
+                self.editor.state.play.saved_position = pos;
+                log::info!(
+                    "Player spawn set to ({:.2}, {:.2}, {:.2})",
+                    pos.x,
+                    pos.y,
+                    pos.z
+                );
+            }
             EditorAction::Undo => {
                 if let Some(new_world) = self.editor.state.undo.undo(&self.world) {
                     self.world = new_world;
                     self.editor.state.prune_selection(&self.world);
-                    log::info!("Undo");
                 }
             }
             EditorAction::Redo => {
                 if let Some(new_world) = self.editor.state.undo.redo(&self.world) {
                     self.world = new_world;
                     self.editor.state.prune_selection(&self.world);
-                    log::info!("Redo");
                 }
             }
             EditorAction::Save => {
                 let path = self.editor.state.save_path.clone();
-                match crate::scene::save_scene_to_file(&self.world, &path) {
-                    Ok(()) => log::info!("Scene saved to {}", path),
-                    Err(e) => log::error!("Save failed: {}", e),
+                if let Err(e) = crate::scene::save_scene_to_file(&self.world, &path) {
+                    log::error!("Save failed: {}", e);
                 }
             }
             EditorAction::Load => {
                 let path = self.editor.state.save_path.clone();
                 match crate::scene::load_scene_from_file(&path) {
                     Ok(new_world) => {
-                        let n = new_world.len();
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
-                        log::info!("Scene loaded from {}: {} entities", path, n);
                     }
                     Err(e) => log::error!("Load failed: {}", e),
                 }
@@ -419,18 +668,15 @@ impl<G: Game> App<G> {
                 self.world.insert(e, MaterialHandle(mat.to_string()));
 
                 self.editor.state.select_single(e);
-                log::info!("Added {} (#{})", mesh, e);
             }
             EditorAction::DeleteSelected => {
                 if self.editor.state.selected.is_empty() {
                     return;
                 }
                 self.editor.state.undo.push_forced(&self.world);
-                let count = self.editor.state.selected.len();
                 for e in self.editor.state.selected.drain(..) {
                     self.world.despawn(e);
                 }
-                log::info!("Deleted {} entities", count);
             }
             EditorAction::Duplicate => {
                 self.editor.state.undo.push_forced(&self.world);
@@ -440,11 +686,11 @@ impl<G: Game> App<G> {
                 if self.editor.state.selected.is_empty() {
                     return;
                 }
-                let center =
-                    match gizmo::group_center(&self.world, &self.editor.state.selected) {
-                        Some(c) => c,
-                        None => return,
-                    };
+                let Some(center) =
+                    gizmo::group_center(&self.world, &self.editor.state.selected)
+                else {
+                    return;
+                };
                 let radius =
                     gizmo::group_radius(&self.world, &self.editor.state.selected, &self.renderer);
                 self.game.camera_mut().focus_on(center, radius);
@@ -503,8 +749,9 @@ pub fn run<G: Game>(mut game: G) {
 
                     let wants_keyboard = app.editor.egui_ctx.wants_keyboard_input();
 
+                    let in_play = app.editor.state.play.active;
                     let (px, py) = app.input.mouse_pos;
-                    let in_vp = app.in_viewport(px, py);
+                    let in_vp = in_play || app.in_viewport(px, py);
 
                     match event {
                         WindowEvent::CloseRequested => elwt.exit(),
@@ -520,10 +767,22 @@ pub fn run<G: Game>(mut game: G) {
                             if !consumed && !wants_keyboard =>
                         {
                             app.input.on_key(event);
+
+                            // Esc во время fly — выйти из fly.
+                            if app.editor.state.flying
+                                && event.state == ElementState::Pressed
+                                && event.physical_key
+                                    == winit::keyboard::PhysicalKey::Code(KeyCode::Escape)
+                            {
+                                app.editor.state.flying = false;
+                                app.input.editor_flying = false;
+                                let _ = app.window.set_cursor_grab(CursorGrabMode::None);
+                                app.window.set_cursor_visible(true);
+                            }
                         }
 
                         WindowEvent::MouseInput { state, button, .. }
-                            if !consumed && in_vp =>
+                            if !consumed && in_vp && !in_play =>
                         {
                             app.input.on_mouse_button(button, state);
 
@@ -553,9 +812,14 @@ pub fn run<G: Game>(mut game: G) {
                                                         mx,
                                                         my,
                                                     ) {
-                                                        app.editor.state.undo.push_forced(&app.world);
-                                                        app.editor.state.gizmo.drag = Some(drag);
-                                                        app.editor.state.gizmo.hovered = Some(axis);
+                                                        app.editor
+                                                            .state
+                                                            .undo
+                                                            .push_forced(&app.world);
+                                                        app.editor.state.gizmo.drag =
+                                                            Some(drag);
+                                                        app.editor.state.gizmo.hovered =
+                                                            Some(axis);
                                                         true
                                                     } else {
                                                         false
@@ -591,7 +855,10 @@ pub fn run<G: Game>(mut game: G) {
                             app.input
                                 .on_mouse_move(position.x as f32, position.y as f32);
 
-                            if !app.editor.state.selected.is_empty() {
+                            if !in_play
+                                && !app.editor.state.flying
+                                && !app.editor.state.selected.is_empty()
+                            {
                                 let (mx, my) = app.input.mouse_pos;
                                 if let Some(drag) = app.editor.state.gizmo.drag.clone() {
                                     gizmo::apply_drag_with_mode(
@@ -627,7 +894,7 @@ pub fn run<G: Game>(mut game: G) {
                         }
 
                         WindowEvent::MouseWheel { delta, .. }
-                            if !consumed && in_vp =>
+                            if !consumed && in_vp && !in_play =>
                         {
                             let d = match delta {
                                 MouseScrollDelta::LineDelta(_, y) => y,
@@ -643,6 +910,14 @@ pub fn run<G: Game>(mut game: G) {
 
                         _ => {}
                     }
+                }
+
+                Event::DeviceEvent {
+                    event: DeviceEvent::MouseMotion { delta },
+                    ..
+                } => {
+                    app.input
+                        .on_mouse_motion_device(delta.0 as f32, delta.1 as f32);
                 }
 
                 Event::AboutToWait => {

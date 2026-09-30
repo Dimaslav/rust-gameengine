@@ -2,6 +2,7 @@
 
 use crate::ecs::{Entity, World};
 use crate::editor::gizmo::GizmoMode;
+use crate::editor::play::PlayState;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::components::{
     AnimationPlayer, MaterialHandle, MeshHandle, Name, SkeletonHandle, Spinner, Transform,
@@ -55,6 +56,11 @@ pub fn draw(
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
 
+    // HUD в Play-режиме.
+    if editor.play.active {
+        draw_play_hud(ctx, &editor.play, stats.fps);
+    }
+
     // ===== Верхняя панель =====
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -77,6 +83,24 @@ pub fn draw(
             }
 
             ui.separator();
+
+            if editor.play.active {
+                if ui
+                    .button("■ Stop")
+                    .on_hover_text("Exit play mode (Esc)")
+                    .clicked()
+                {
+                    action = Some(EditorAction::TogglePlay);
+                }
+            } else if ui
+                .button("▶ Play")
+                .on_hover_text("Run game (F9)")
+                .clicked()
+            {
+                action = Some(EditorAction::TogglePlay);
+            }
+
+            ui.separator();
             if ui.button("Save").clicked() {
                 action = Some(EditorAction::Save);
             }
@@ -96,6 +120,22 @@ pub fn draw(
             ui.separator();
             ui.label(format!("Lights: {}d {}p", stats.dir_lights, stats.point_lights));
 
+            if editor.play.active {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("● PLAY")
+                        .strong()
+                        .color(egui::Color32::from_rgb(230, 90, 90)),
+                );
+            } else if editor.flying {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("✦ FLY")
+                        .strong()
+                        .color(egui::Color32::from_rgb(90, 180, 230)),
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.toggle_value(&mut state.show_renderer_panel, "Renderer");
                 ui.toggle_value(&mut state.show_inspector_panel, "Inspector");
@@ -105,258 +145,377 @@ pub fn draw(
         });
     });
 
-    // ===== Левая панель =====
-    if state.show_stats_panel || state.show_hierarchy_panel {
-        egui::SidePanel::left("left_panel")
-            .default_width(260.0)
-            .show(ctx, |ui| {
-                if state.show_stats_panel {
-                    ui.heading("Stats");
-                    ui.separator();
-                    ui.label(format!("FPS: {:.1}", stats.fps));
-                    ui.label(format!(
-                        "Frame: {:.2} ms",
-                        if stats.fps > 0.1 { 1000.0 / stats.fps } else { 0.0 }
-                    ));
-                    ui.separator();
-                    ui.label(format!("Entities: {}", stats.entities));
-                    ui.label(format!("Draws: {}", stats.draws));
-                    ui.label(format!("Instances: {}", stats.instances));
-                    ui.separator();
-                    ui.label(format!("Dir lights: {}", stats.dir_lights));
-                    ui.label(format!("Point lights: {}", stats.point_lights));
-                }
-
-                if state.show_hierarchy_panel {
-                    ui.separator();
-                    ui.heading("Hierarchy");
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        if ui.button("+ Cube").clicked() {
-                            action = Some(EditorAction::AddCube);
-                        }
-                        if ui.button("+ Sphere").clicked() {
-                            action = Some(EditorAction::AddSphere);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !editor.selected.is_empty(),
-                                egui::Button::new("Duplicate (Ctrl+D)"),
-                            )
-                            .clicked()
-                        {
-                            action = Some(EditorAction::Duplicate);
-                        }
-                        if ui
-                            .add_enabled(
-                                !editor.selected.is_empty(),
-                                egui::Button::new("Delete"),
-                            )
-                            .clicked()
-                        {
-                            action = Some(EditorAction::DeleteSelected);
-                        }
-                    });
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("🔍");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.search_filter)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("filter by name…"),
-                        );
-                    });
-                    ui.separator();
-
-                    let filter_lower = editor.search_filter.to_lowercase();
-                    let all_entities: Vec<Entity> = world.entities().to_vec();
-                    let filtered: Vec<Entity> = all_entities
-                        .into_iter()
-                        .filter(|&e| {
-                            if filter_lower.is_empty() {
-                                return true;
-                            }
-                            entity_display_name(world, e)
-                                .to_lowercase()
-                                .contains(&filter_lower)
-                        })
-                        .collect();
-
-                    let total = filtered.len();
-                    let sel_count = editor.selected.len();
-                    if sel_count > 1 {
-                        ui.label(format!("{} shown · {} selected", total, sel_count));
-                    } else {
-                        ui.label(format!("{} shown", total));
+    // Левая/правая панели — только вне Play.
+    if !editor.play.active {
+        // ===== Левая =====
+        if state.show_stats_panel || state.show_hierarchy_panel {
+            egui::SidePanel::left("left_panel")
+                .default_width(260.0)
+                .show(ctx, |ui| {
+                    if state.show_stats_panel {
+                        ui.heading("Stats");
+                        ui.separator();
+                        ui.label(format!("FPS: {:.1}", stats.fps));
+                        ui.label(format!(
+                            "Frame: {:.2} ms",
+                            if stats.fps > 0.1 { 1000.0 / stats.fps } else { 0.0 }
+                        ));
+                        ui.separator();
+                        ui.label(format!("Entities: {}", stats.entities));
+                        ui.label(format!("Draws: {}", stats.draws));
+                        ui.label(format!("Instances: {}", stats.instances));
+                        ui.separator();
+                        ui.label(format!("Dir lights: {}", stats.dir_lights));
+                        ui.label(format!("Point lights: {}", stats.point_lights));
                     }
 
-                    let anchor = editor.primary();
+                    if state.show_hierarchy_panel {
+                        ui.separator();
+                        ui.heading("Hierarchy");
+                        ui.separator();
 
-                    let row_height = 18.0;
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .max_height(400.0)
-                        .show_rows(ui, row_height, total, |ui, row_range| {
-                            for i in row_range {
-                                let e = filtered[i];
-                                let label = entity_display_name(world, e);
-                                let is_selected = editor.is_selected(e);
-
-                                let response = ui.selectable_label(is_selected, &label);
-
-                                if response.clicked() {
-                                    let modifiers = ui.input(|i| i.modifiers);
-                                    if modifiers.ctrl || modifiers.command {
-                                        editor.toggle_select(e);
-                                    } else if modifiers.shift {
-                                        let anchor_e = anchor.unwrap_or(e);
-                                        editor.select_range(&filtered, anchor_e, e);
-                                    } else {
-                                        editor.select_single(e);
-                                    }
-                                }
-                                if response.double_clicked() {
-                                    editor.select_single(e);
-                                    action = Some(EditorAction::FocusSelected);
-                                }
-
-                                response.context_menu(|ui| {
-                                    if ui.button("Focus (F)").clicked() {
-                                        editor.select_single(e);
-                                        action = Some(EditorAction::FocusSelected);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Duplicate").clicked() {
-                                        editor.select_single(e);
-                                        action = Some(EditorAction::Duplicate);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Delete").clicked() {
-                                        editor.select_single(e);
-                                        action = Some(EditorAction::DeleteSelected);
-                                        ui.close_menu();
-                                    }
-                                });
+                        ui.horizontal(|ui| {
+                            if ui.button("+ Cube").clicked() {
+                                action = Some(EditorAction::AddCube);
+                            }
+                            if ui.button("+ Sphere").clicked() {
+                                action = Some(EditorAction::AddSphere);
                             }
                         });
-                }
-            });
-    }
-
-    // ===== Правая панель =====
-    if state.show_inspector_panel || state.show_renderer_panel {
-        egui::SidePanel::right("right_panel")
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                if state.show_inspector_panel {
-                    ui.heading("Inspector");
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("Gizmo:");
-                        let m = &mut editor.gizmo.mode;
-                        if ui.selectable_label(*m == GizmoMode::Translate, "T (1)").clicked() {
-                            *m = GizmoMode::Translate;
-                        }
-                        if ui.selectable_label(*m == GizmoMode::Rotate, "R (2)").clicked() {
-                            *m = GizmoMode::Rotate;
-                        }
-                        if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() {
-                            *m = GizmoMode::Scale;
-                        }
-                    });
-                    ui.separator();
-
-                    let n = editor.selected.len();
-                    if n == 0 {
-                        ui.label("Nothing selected");
-                    } else if n > 1 {
-                        ui.label(format!("{} objects selected", n));
-                        ui.label("(Ctrl+click to add/remove, Shift+click for range)");
-                        ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("Focus (F)").clicked() {
-                                action = Some(EditorAction::FocusSelected);
-                            }
-                            if ui.button("Duplicate").clicked() {
+                            if ui
+                                .add_enabled(
+                                    !editor.selected.is_empty(),
+                                    egui::Button::new("Duplicate (Ctrl+D)"),
+                                )
+                                .clicked()
+                            {
                                 action = Some(EditorAction::Duplicate);
                             }
-                            if ui.button("Delete").clicked() {
+                            if ui
+                                .add_enabled(
+                                    !editor.selected.is_empty(),
+                                    egui::Button::new("Delete"),
+                                )
+                                .clicked()
+                            {
                                 action = Some(EditorAction::DeleteSelected);
                             }
                         });
                         ui.separator();
-                        if ui.button("Deselect all").clicked() {
-                            editor.selected.clear();
-                        }
-                    } else {
-                        let e = editor.selected[0];
-                        if !world.entities().contains(&e) {
-                            editor.selected.clear();
-                            ui.label("Selection removed");
+
+                        ui.horizontal(|ui| {
+                            ui.label("🔍");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut editor.search_filter)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("filter by name…"),
+                            );
+                        });
+                        ui.separator();
+
+                        let filter_lower = editor.search_filter.to_lowercase();
+                        let all_entities: Vec<Entity> = world.entities().to_vec();
+                        let filtered: Vec<Entity> = all_entities
+                            .into_iter()
+                            .filter(|&e| {
+                                if filter_lower.is_empty() {
+                                    return true;
+                                }
+                                entity_display_name(world, e)
+                                    .to_lowercase()
+                                    .contains(&filter_lower)
+                            })
+                            .collect();
+
+                        let total = filtered.len();
+                        let sel_count = editor.selected.len();
+                        if sel_count > 1 {
+                            ui.label(format!("{} shown · {} selected", total, sel_count));
                         } else {
-                            draw_inspector(ui, world, e, editor, assets, &mut action);
+                            ui.label(format!("{} shown", total));
+                        }
+
+                        let anchor = editor.primary();
+
+                        let row_height = 18.0;
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .max_height(400.0)
+                            .show_rows(ui, row_height, total, |ui, row_range| {
+                                for i in row_range {
+                                    let e = filtered[i];
+                                    let label = entity_display_name(world, e);
+                                    let is_selected = editor.is_selected(e);
+
+                                    let response = ui.selectable_label(is_selected, &label);
+
+                                    if response.clicked() {
+                                        let modifiers = ui.input(|i| i.modifiers);
+                                        if modifiers.ctrl || modifiers.command {
+                                            editor.toggle_select(e);
+                                        } else if modifiers.shift {
+                                            let anchor_e = anchor.unwrap_or(e);
+                                            editor.select_range(&filtered, anchor_e, e);
+                                        } else {
+                                            editor.select_single(e);
+                                        }
+                                    }
+                                    if response.double_clicked() {
+                                        editor.select_single(e);
+                                        action = Some(EditorAction::FocusSelected);
+                                    }
+
+                                    response.context_menu(|ui| {
+                                        if ui.button("Focus (F)").clicked() {
+                                            editor.select_single(e);
+                                            action = Some(EditorAction::FocusSelected);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Duplicate").clicked() {
+                                            editor.select_single(e);
+                                            action = Some(EditorAction::Duplicate);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Delete").clicked() {
+                                            editor.select_single(e);
+                                            action = Some(EditorAction::DeleteSelected);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                });
+        }
+
+        // ===== Правая =====
+        if state.show_inspector_panel || state.show_renderer_panel {
+            egui::SidePanel::right("right_panel")
+                .default_width(340.0)
+                .show(ctx, |ui| {
+                    if state.show_inspector_panel {
+                        ui.heading("Inspector");
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label("Gizmo:");
+                            let m = &mut editor.gizmo.mode;
+                            if ui.selectable_label(*m == GizmoMode::Translate, "T (1)").clicked() {
+                                *m = GizmoMode::Translate;
+                            }
+                            if ui.selectable_label(*m == GizmoMode::Rotate, "R (2)").clicked() {
+                                *m = GizmoMode::Rotate;
+                            }
+                            if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() {
+                                *m = GizmoMode::Scale;
+                            }
+                        });
+                        ui.separator();
+
+                        let n = editor.selected.len();
+                        if n == 0 {
+                            ui.label("Nothing selected");
+                        } else if n > 1 {
+                            ui.label(format!("{} objects selected", n));
+                            ui.label("(Ctrl+click to add/remove, Shift+click for range)");
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                if ui.button("Focus (F)").clicked() {
+                                    action = Some(EditorAction::FocusSelected);
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    action = Some(EditorAction::Duplicate);
+                                }
+                                if ui.button("Delete").clicked() {
+                                    action = Some(EditorAction::DeleteSelected);
+                                }
+                            });
+                            ui.separator();
+                            if ui.button("Deselect all").clicked() {
+                                editor.selected.clear();
+                            }
+                        } else {
+                            let e = editor.selected[0];
+                            if !world.entities().contains(&e) {
+                                editor.selected.clear();
+                                ui.label("Selection removed");
+                            } else {
+                                draw_inspector(ui, world, e, editor, assets, &mut action);
+                            }
                         }
                     }
-                }
 
-                if state.show_renderer_panel {
-                    ui.separator();
-                    egui::CollapsingHeader::new("Renderer")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.label("Post-processing");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_threshold, 0.1..=5.0)
-                                    .text("Bloom threshold"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_strength, 0.0..=3.0)
-                                    .text("Bloom strength"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.exposure, 0.1..=3.0)
-                                    .text("Exposure"),
-                            );
+                    if state.show_renderer_panel {
+                        ui.separator();
+                        egui::CollapsingHeader::new("Renderer")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.label("Post-processing");
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.bloom_threshold, 0.1..=5.0)
+                                        .text("Bloom threshold"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.bloom_strength, 0.0..=3.0)
+                                        .text("Bloom strength"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.exposure, 0.1..=3.0)
+                                        .text("Exposure"),
+                                );
 
-                            ui.separator();
-                            ui.label("SSAO");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0)
-                                    .text("Strength"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ssao_radius, 0.05..=2.0)
-                                    .text("Radius"),
-                            );
+                                ui.separator();
+                                ui.label("SSAO");
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0)
+                                        .text("Strength"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.ssao_radius, 0.05..=2.0)
+                                        .text("Radius"),
+                                );
 
-                            ui.separator();
-                            ui.label("IBL");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ibl_strength, 0.0..=3.0)
-                                    .text("IBL strength"),
-                            );
+                                ui.separator();
+                                ui.label("IBL");
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.ibl_strength, 0.0..=3.0)
+                                        .text("IBL strength"),
+                                );
 
-                            ui.separator();
-                            ui.label("Debug view");
-                            ui.horizontal_wrapped(|ui| {
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Final, "Final");
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Ssao, "SSAO");
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferNormal, "Normal");
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferDepth, "Depth");
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::HdrPreBloom, "HDR");
-                                debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::CsmCascade0, "CSM");
+                                ui.separator();
+                                ui.label("Debug view");
+                                ui.horizontal_wrapped(|ui| {
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Final, "Final");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Ssao, "SSAO");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferNormal, "Normal");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferDepth, "Depth");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::HdrPreBloom, "HDR");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::CsmCascade0, "CSM");
+                                });
+
+                                ui.separator();
+                                egui::CollapsingHeader::new("Play")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        let p = &mut editor.play;
+                                        ui.add(egui::Slider::new(&mut p.walk_speed, 0.5..=20.0).text("Walk speed"));
+                                        ui.add(egui::Slider::new(&mut p.run_speed, 1.0..=40.0).text("Run speed"));
+                                        ui.add(egui::Slider::new(&mut p.jump_speed, 1.0..=20.0).text("Jump"));
+                                        ui.add(egui::Slider::new(&mut p.gravity, 1.0..=60.0).text("Gravity"));
+                                        ui.add(egui::Slider::new(&mut p.eye_height, 0.5..=3.0).text("Eye height"));
+                                        ui.add(
+                                            egui::Slider::new(&mut p.look_sensitivity, 0.0005..=0.01)
+                                                .text("Look sensitivity"),
+                                        );
+                                        ui.separator();
+                                        ui.label("Player AABB");
+                                        ui.add(egui::Slider::new(&mut p.player_radius, 0.1..=1.0).text("Radius"));
+                                        ui.add(egui::Slider::new(&mut p.player_height, 0.5..=3.0).text("Height"));
+                                        ui.separator();
+                                        ui.checkbox(&mut p.bob_enabled, "Head bob");
+                                        ui.add(
+                                            egui::Slider::new(&mut p.bob_amplitude, 0.0..=0.15)
+                                                .text("Bob amplitude"),
+                                        );
+                                        ui.separator();
+                                        ui.checkbox(&mut p.show_crosshair, "Show crosshair");
+                                        ui.checkbox(&mut p.show_hud, "Show HUD");
+                                    });
+
+                                ui.separator();
+                                egui::CollapsingHeader::new("Fly (RMB)")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        ui.label("WASD — move, E/Q or Space — up/down");
+                                        ui.label("Shift — faster, Ctrl — slower");
+                                        ui.label("Scroll during fly — fly speed");
+                                        ui.separator();
+                                        ui.add(
+                                            egui::Slider::new(&mut editor.fly_speed, 1.0..=100.0)
+                                                .text("Fly speed"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut editor.fly_sensitivity, 0.0005..=0.01)
+                                                .text("Fly sensitivity"),
+                                        );
+                                    });
                             });
-                        });
-                }
-            });
+                    }
+                });
+        }
     }
 
     action
+}
+
+// ============================================================
+// Play HUD
+// ============================================================
+
+fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
+    if play.show_crosshair {
+        let screen = ctx.screen_rect();
+        let center = screen.center();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("crosshair_layer"),
+        ));
+        let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
+        let len = 8.0;
+        let thick = 1.0;
+        painter.line_segment(
+            [
+                egui::pos2(center.x - len, center.y),
+                egui::pos2(center.x + len, center.y),
+            ],
+            egui::Stroke::new(thick, color),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x, center.y - len),
+                egui::pos2(center.x, center.y + len),
+            ],
+            egui::Stroke::new(thick, color),
+        );
+    }
+
+    if play.show_hud {
+        egui::Area::new(egui::Id::new("play_hud_area"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -16.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("FPS: {:.0}", fps))
+                                .monospace()
+                                .color(egui::Color32::from_rgb(230, 230, 230)),
+                        );
+                        let p = play.saved_position;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Pos: {:.1}, {:.1}, {:.1}",
+                                p.x, p.y, p.z
+                            ))
+                            .monospace()
+                            .color(egui::Color32::from_rgb(200, 200, 200)),
+                        );
+                        let state_str = if play.on_ground {
+                            "on ground"
+                        } else {
+                            "airborne"
+                        };
+                        ui.label(
+                            egui::RichText::new(state_str)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(180, 200, 180)),
+                        );
+                    });
+            });
+    }
 }
 
 // ============================================================
@@ -382,7 +541,6 @@ fn draw_inspector(
     assets: &UiAssets<'_>,
     action: &mut Option<EditorAction>,
 ) {
-    // === Header: Entity ID + Name + Focus ===
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("#{}", e))
@@ -404,9 +562,11 @@ fn draw_inspector(
         if ui.button("Focus (F)").clicked() {
             *action = Some(EditorAction::FocusSelected);
         }
+        if ui.button("Spawn Player Here").clicked() {
+            *action = Some(EditorAction::SpawnPlayerHere);
+        }
     });
 
-    // === Components chips ===
     let mut chips: Vec<&str> = Vec::new();
     if world.has::<Transform>(e) { chips.push("Transform"); }
     if world.has::<MeshHandle>(e) { chips.push("Mesh"); }
@@ -430,12 +590,10 @@ fn draw_inspector(
 
     ui.separator();
 
-    // === Transform ===
     egui::CollapsingHeader::new("Transform")
         .default_open(true)
         .show(ui, |ui| {
             if let Some(t) = world.get_mut::<Transform>(e) {
-                // Кнопки Copy/Paste/Reset
                 ui.horizontal(|ui| {
                     if ui.button("Copy").on_hover_text("Скопировать transform").clicked() {
                         editor.clipboard_transform = Some(*t);
@@ -462,7 +620,6 @@ fn draw_inspector(
                     }
                 });
 
-                // Position
                 let mut pos = t.position.to_array();
                 ui.label("Position");
                 let mut changed_pos = false;
@@ -485,7 +642,6 @@ fn draw_inspector(
                     t.position = Vec3::from_array(pos);
                 }
 
-                // Rotation
                 let (mut ry, mut rx, mut rz) = t.rotation.to_euler(glam::EulerRot::YXZ);
                 ui.label("Rotation (deg)");
                 let mut changed_rot = false;
@@ -517,7 +673,6 @@ fn draw_inspector(
                     t.rotation = glam::Quat::from_euler(glam::EulerRot::YXZ, ry, rx, rz);
                 }
 
-                // Scale
                 let mut scale = t.scale.to_array();
                 ui.label("Scale");
                 let mut changed_scale = false;
@@ -544,11 +699,9 @@ fn draw_inspector(
             }
         });
 
-    // === Geometry (Mesh + Material) ===
     egui::CollapsingHeader::new("Geometry")
         .default_open(true)
         .show(ui, |ui| {
-            // Mesh selector
             if let Some(mh) = world.get_mut::<MeshHandle>(e) {
                 let mut current = mh.0.clone();
                 ui.horizontal(|ui| {
@@ -568,7 +721,6 @@ fn draw_inspector(
                 ui.label("(no Mesh)");
             }
 
-            // Material selector
             if let Some(mh) = world.get_mut::<MaterialHandle>(e) {
                 let mut current = mh.0.clone();
                 ui.horizontal(|ui| {
@@ -589,7 +741,6 @@ fn draw_inspector(
             }
         });
 
-    // === Material editor ===
     if let Some((name, original)) = &assets.selected_material {
         egui::CollapsingHeader::new(format!("Material: {}", name))
             .default_open(false)
@@ -663,7 +814,6 @@ fn draw_inspector(
             });
     }
 
-    // === Spinner ===
     if world.has::<Spinner>(e) {
         egui::CollapsingHeader::new("Spinner")
             .default_open(false)
@@ -690,7 +840,6 @@ fn draw_inspector(
             });
     }
 
-    // === Velocity ===
     if world.has::<Velocity>(e) {
         egui::CollapsingHeader::new("Velocity")
             .default_open(false)
