@@ -1,12 +1,12 @@
 const PI: f32 = 3.14159265359;
 
 struct Camera {
-    view_proj: mat4x4<f32>,
+    view_proj:     mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    view: mat4x4<f32>,
-    inv_view: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-    near_far: vec4<f32>,
+    view:          mat4x4<f32>,
+    inv_view:      mat4x4<f32>,
+    camera_pos:    vec4<f32>,
+    near_far:      vec4<f32>,
 };
 
 struct Lights {
@@ -15,10 +15,10 @@ struct Lights {
     ambient_color:   vec4<f32>,
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
-    misc:            vec4<f32>,   // x = ibl_strength
-    fog_params:      vec4<f32>,   // x=density, y=height_base, z=height_falloff
-    fog_color:       vec4<f32>,   // rgb = color
-    _pad1:           vec4<f32>,
+    misc:            vec4<f32>,
+    fog_params:      vec4<f32>,
+    fog_color:       vec4<f32>,
+    shadow_params:   vec4<f32>,
     dir_lights:      array<vec4<f32>, 8>,
     point_lights:    array<vec4<f32>, 32>,
     cube_shadow_pos: array<vec4<f32>, 4>,
@@ -129,26 +129,86 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
     return prefiltered * (f0 * brdf.x + brdf.y);
 }
 
-fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32) -> f32 {
-    var cascade = 0i;
-    if (view_depth > lights.cascade_splits.x) { cascade = 1i; }
-    if (view_depth > lights.cascade_splits.y) { cascade = 2i; }
+// ============================================================
+// Shadow sampling
+// ============================================================
+
+// 12-tap Poisson disk. Развёрнуто вручную, потому что naga
+// не разрешает индексировать array переменной.
+fn sample_csm_poisson(
+    world_pos: vec3<f32>,
+    cascade: i32,
+    bias: f32,
+) -> f32 {
     let light_clip = lights.cascade_vp[cascade] * vec4<f32>(world_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
     if (ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
-    let bias = 0.002;
+
     let depth = ndc.z - bias;
-    var shadow = 0.0;
     let texel = 1.0 / 2048.0;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            let off = vec2<f32>(f32(x), f32(y)) * texel;
-            shadow += textureSampleCompare(t_csm, s_csm, uv + off, cascade, depth);
+    let r = 1.5;
+    let s = texel * r;
+
+    var shadow = 0.0;
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.326, -0.406) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.840, -0.074) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.696,  0.457) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.203,  0.621) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.962, -0.195) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.473, -0.480) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.519,  0.767) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.185, -0.893) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.507,  0.064) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.896,  0.412) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.322, -0.933) * s, cascade, depth);
+    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.792, -0.598) * s, cascade, depth);
+    return shadow / 12.0;
+}
+
+fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: vec3<f32>) -> f32 {
+    let s = lights.shadow_params;
+    let base_bias = s.x;
+    let normal_bias = s.y;
+
+    let ndl = clamp(dot(n, l), 0.0, 1.0);
+    let slope = 1.0 - ndl;
+    let bias = base_bias * (1.0 + normal_bias * slope);
+
+    var cascade = 0;
+    if (view_depth > lights.cascade_splits.x) { cascade = 1; }
+    if (view_depth > lights.cascade_splits.y) { cascade = 2; }
+
+    var shadow = sample_csm_poisson(world_pos, cascade, bias);
+
+    if (cascade < 2) {
+        var split_end = lights.cascade_splits.y;
+        var split_prev = lights.cascade_splits.x;
+        if (cascade == 0) {
+            split_end = lights.cascade_splits.x;
+            split_prev = 0.0;
+        }
+        let range = split_end - split_prev;
+        let blend_zone = range * 0.15;
+        let dist_to_edge = split_end - view_depth;
+
+        if (dist_to_edge < blend_zone && dist_to_edge > 0.0) {
+            let t = dist_to_edge / blend_zone;
+            let shadow_next = sample_csm_poisson(world_pos, cascade + 1, bias);
+            shadow = mix(shadow_next, shadow, t);
         }
     }
-    return shadow / 9.0;
+
+    let fade_start = s.z;
+    let fade_end = s.w;
+    if (view_depth > fade_start) {
+        let fade = clamp((view_depth - fade_start) / max(fade_end - fade_start, 1e-4), 0.0, 1.0);
+        shadow = mix(shadow, 1.0, fade);
+    }
+
+    return shadow;
 }
 
 fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
@@ -157,17 +217,32 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
     let to_frag = world_pos - pos;
     let dist = length(to_frag);
     if (dist > far) { return 1.0; }
+
     let dir = to_frag / max(dist, 0.0001);
-    let bias = 0.01;
+    let bias = lights.shadow_params.x * 3.0;
     let depth = dist / far - bias;
-    return textureSampleCompare(t_point_shadow, s_point_shadow, dir, depth);
+
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.99);
+    let t1 = normalize(cross(up, dir));
+    let t2 = cross(dir, t1);
+    let s = far * 2.0 / 1024.0 * 1.5;
+
+    var shadow = 0.0;
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 *  0.707 + t2 *  0.707) * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 * -0.707 + t2 *  0.707) * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 *  0.707 + t2 * -0.707) * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 * -0.707 + t2 * -0.707) * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir +  t1 * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir -  t1 * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir +  t2 * s), depth);
+    shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir -  t2 * s), depth);
+    return shadow / 8.0;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth = textureSample(t_depth, s_lin, in.uv);
     if (depth >= 0.9999) {
-        // Небо рисует отдельный skybox pass. Здесь — ничего.
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
@@ -193,14 +268,17 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     color += ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
 
     let dir_count = lights.counts.x;
-    let csm_shadow = compute_csm_shadow(world_pos, view_depth);
     for (var i: u32 = 0u; i < dir_count; i = i + 1u) {
         let idx = i * 2u;
         let dir_w = lights.dir_lights[idx];
         let col_w = lights.dir_lights[idx + 1u];
         let l = normalize(dir_w.xyz);
         let radiance = col_w.rgb * dir_w.w;
-        let s = select(1.0, csm_shadow, i == 0u);
+
+        var s = 1.0;
+        if (i == 0u) {
+            s = compute_csm_shadow(world_pos, view_depth, n, l);
+        }
         color += pbr_light(n, v, l, albedo, metallic, roughness, radiance * s);
     }
 
@@ -224,7 +302,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // === Height fog ===
     let fog_density = lights.fog_params.x;
     if (fog_density > 0.0) {
         let fog_h_base  = lights.fog_params.y;

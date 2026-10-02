@@ -20,7 +20,10 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 struct VOut {
-    @builtin(position) clip: vec4<f32>,
+    // @invariant — обязательно, потому что pipeline использует depth_compare: Equal.
+    // Без него драйвер может округлить z-координату по-разному в разных
+    // проходах, и skybox будет мерцать.
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) ndc: vec2<f32>,
 };
 

@@ -1,4 +1,4 @@
-//! Picking: луч → точный raycast по треугольникам, box select.
+//! Picking: луч → BVH-accelerated raycast по треугольникам, box select.
 
 use glam::Vec3;
 
@@ -22,7 +22,11 @@ pub fn pick_entity(
     pick_ray(world, renderer, origin, dir).map(|(e, _)| e)
 }
 
-/// Возвращает (entity, t) — ближайшее попадание луча.
+/// Возвращает (entity, t_world) — ближайшее попадание луча.
+///
+/// `t_world` — расстояние в мировых единицах вдоль `dir` (который
+/// должен быть нормализован). Это позволяет использовать результат
+/// для сравнения с `interact_distance` / `gun_range`.
 pub fn pick_ray(
     world: &World,
     renderer: &Renderer,
@@ -34,26 +38,39 @@ pub fn pick_ray(
     for &e in world.entities() {
         let Some(mh) = world.get::<MeshHandle>(e) else { continue };
         let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
+        if mesh.bvh.is_empty() {
+            continue;
+        }
 
         let model = crate::game::world_matrix(world, e);
-        let (center, radius) = mesh.world_bounds(&model);
 
-        let Some(_t_sphere) = ray_sphere_hit(origin, dir, center, radius) else {
+        // Broad phase — bounding sphere.
+        let (center, radius) = mesh.world_bounds(&model);
+        let Some(_) = ray_sphere_hit(origin, dir, center, radius) else {
             continue;
         };
 
+        // Переводим луч в локальное пространство меша.
         let inv_model = model.inverse();
         let local_o = inv_model.transform_point3(origin);
-        let local_d = inv_model.transform_vector3(dir).normalize();
+        let local_d_unnorm = inv_model.transform_vector3(dir);
+        let local_d_len = local_d_unnorm.length();
+        if local_d_len < 1e-12 {
+            continue;
+        }
+        let local_d = local_d_unnorm / local_d_len;
 
-        for tri in &mesh.triangles {
-            if let Some(t) = ray_triangle(local_o, local_d, tri[0], tri[1], tri[2]) {
-                let scale = (model.transform_vector3(local_d).length()).max(0.0001);
-                let t_world = t / scale;
-                if best.map_or(true, |(_, bt)| t_world < bt) {
-                    best = Some((e, t_world));
-                }
-                break;
+        // BVH raycast.
+        // `t_local` — расстояние вдоль `local_d` в локальных единицах.
+        // Пропорция: t_world = t_local / |M⁻¹ · dir|. Раньше формула
+        // была `t / |M·local_d|`, что давало неверные дистанции при
+        // неединичном масштабе.
+        if let Some((_tri_idx, t_local)) =
+            mesh.bvh.raycast(local_o, local_d, f32::INFINITY, &mesh.triangles)
+        {
+            let t_world = t_local / local_d_len;
+            if best.map_or(true, |(_, bt)| t_world < bt) {
+                best = Some((e, t_world));
             }
         }
     }
@@ -65,10 +82,6 @@ pub fn pick_ray(
 /// проецируется внутрь экранного прямоугольника `rect`.
 ///
 /// `rect` = (x0, y0, x1, y1) в физических пикселях, порядок любой.
-/// Проекция центра AABB — компромисс: работает быстро и не пропускает
-/// крупные объекты, у которых центр за экраном, но объект виден
-/// (для них центр обычно всё равно попадает в rect, если объект
-/// достаточно крупный).
 pub fn entities_in_screen_rect(
     world: &World,
     renderer: &Renderer,
@@ -115,21 +128,4 @@ fn ray_sphere_hit(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<
     } else {
         Some(t)
     }
-}
-
-fn ray_triangle(ro: Vec3, rd: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<f32> {
-    let e1 = v1 - v0;
-    let e2 = v2 - v0;
-    let p = rd.cross(e2);
-    let det = e1.dot(p);
-    if det.abs() < 1e-8 { return None; }
-    let inv_det = 1.0 / det;
-    let tvec = ro - v0;
-    let u = tvec.dot(p) * inv_det;
-    if !(0.0..=1.0).contains(&u) { return None; }
-    let q = tvec.cross(e1);
-    let v = rd.dot(q) * inv_det;
-    if v < 0.0 || u + v > 1.0 { return None; }
-    let t = e2.dot(q) * inv_det;
-    if t > 1e-5 { Some(t) } else { None }
 }

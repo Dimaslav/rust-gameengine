@@ -94,8 +94,9 @@ pub struct Renderer {
     lighting_pipeline: wgpu::RenderPipeline,
     ssao_pipeline: wgpu::RenderPipeline,
     ssao_blur_pipeline: wgpu::RenderPipeline,
-    bright_pipeline: wgpu::RenderPipeline,
-    blur_pipeline: wgpu::RenderPipeline,
+    bloom_prefilter_pipeline: wgpu::RenderPipeline,
+    bloom_downsample_pipeline: wgpu::RenderPipeline,
+    bloom_upsample_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
     fxaa_pipeline: wgpu::RenderPipeline,
     skybox_pipeline: wgpu::RenderPipeline,
@@ -104,9 +105,6 @@ pub struct Renderer {
     debug_depth_pipeline: wgpu::RenderPipeline,
     csm_debug_bind_group: wgpu::BindGroup,
 
-    bloom_uniform_h: wgpu::Buffer,
-    bloom_uniform_v: wgpu::Buffer,
-    bright_uniform: wgpu::Buffer,
     tonemap_uniform: wgpu::Buffer,
     ssao_uniform: wgpu::Buffer,
 
@@ -132,7 +130,7 @@ pub struct Renderer {
     pub textures: HashMap<String, Texture>,
     default_material: Material,
 
-    /// Время для анимации film grain.
+    /// Время для анимации film grain и temporal rotation SSAO.
     skybox_time: f32,
 }
 
@@ -428,6 +426,7 @@ impl Renderer {
             ],
         });
 
+        // SSAO layout: t_gbuffer, noise, sampler, uniform, depth_src
         let ssao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ssao_layout"),
             entries: &[
@@ -464,6 +463,16 @@ impl Renderer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -758,24 +767,6 @@ impl Renderer {
             }],
         });
 
-        let bloom_uniform_h = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bloom_uniform_h"),
-            size: std::mem::size_of::<PostParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bloom_uniform_v = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bloom_uniform_v"),
-            size: std::mem::size_of::<PostParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bright_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bright_uniform"),
-            size: std::mem::size_of::<PostParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let tonemap_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tonemap_uniform"),
             size: std::mem::size_of::<TonemapParams>() as u64,
@@ -930,8 +921,6 @@ impl Renderer {
         )
         .expect("gbuffer pipeline (double-sided)");
 
-        // Shadow pipeline теперь получает material_layout вторым
-        // bind group — из него читается skeleton для skinning.
         let shadow_pipeline = make_shadow_pipeline(
             &device,
             &shadow_pass_layout,
@@ -977,8 +966,9 @@ impl Renderer {
                 .expect("lighting pipeline");
         let (ssao_pipeline, ssao_blur_pipeline) =
             make_ssao_pipelines(&device, &ssao_layout).expect("ssao pipelines");
-        let (bright_pipeline, blur_pipeline) =
-            make_bloom_pipelines(&device, &bloom_layout).expect("bloom pipelines");
+        let (bloom_prefilter_pipeline, bloom_downsample_pipeline, bloom_upsample_pipeline) =
+            make_bloom_chain_pipelines(&device, &bloom_layout)
+                .expect("bloom chain pipelines");
         let tonemap_pipeline =
             make_tonemap_pipeline(&device, &config, &tonemap_layout).expect("tonemap pipeline");
         let (debug2d_pipeline, debug_depth_pipeline) =
@@ -1006,10 +996,6 @@ impl Renderer {
             &shadow2_layout,
             &debug_layout,
             &lighting_layout,
-            &bloom_uniform_h,
-            &bloom_uniform_v,
-            &bright_uniform,
-            &tonemap_uniform,
             &ssao_uniform,
             &ssao_noise_view,
             &csm_array_view,
@@ -1018,6 +1004,9 @@ impl Renderer {
             &cube_shadow_sampler,
             &camera_buffer,
             &ibl,
+            0.5,
+            1.0,
+            &tonemap_uniform,
         );
 
         let csm_debug_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1145,17 +1134,15 @@ impl Renderer {
             lighting_pipeline,
             ssao_pipeline,
             ssao_blur_pipeline,
-            bright_pipeline,
-            blur_pipeline,
+            bloom_prefilter_pipeline,
+            bloom_downsample_pipeline,
+            bloom_upsample_pipeline,
             tonemap_pipeline,
             fxaa_pipeline,
             skybox_pipeline,
             debug2d_pipeline,
             debug_depth_pipeline,
             csm_debug_bind_group,
-            bloom_uniform_h,
-            bloom_uniform_v,
-            bright_uniform,
             tonemap_uniform,
             ssao_uniform,
             skybox_uniform,
@@ -1225,7 +1212,7 @@ impl Renderer {
                     &self.lights_layout, &self.shadow2_layout,
                 )?,
                 ssao: make_ssao_pipelines(&self.device, &self.ssao_layout)?,
-                bloom: make_bloom_pipelines(&self.device, &self.bloom_layout)?,
+                bloom_chain: make_bloom_chain_pipelines(&self.device, &self.bloom_layout)?,
                 tonemap: make_tonemap_pipeline(
                     &self.device, &self.config, &self.tonemap_layout,
                 )?,
@@ -1265,8 +1252,9 @@ impl Renderer {
         self.lighting_pipeline = built.lighting;
         self.ssao_pipeline = built.ssao.0;
         self.ssao_blur_pipeline = built.ssao.1;
-        self.bright_pipeline = built.bloom.0;
-        self.blur_pipeline = built.bloom.1;
+        self.bloom_prefilter_pipeline = built.bloom_chain.0;
+        self.bloom_downsample_pipeline = built.bloom_chain.1;
+        self.bloom_upsample_pipeline = built.bloom_chain.2;
         self.tonemap_pipeline = built.tonemap;
         self.debug2d_pipeline = built.debug.0;
         self.debug_depth_pipeline = built.debug.1;
@@ -1286,7 +1274,22 @@ impl Renderer {
     // ============================================================
 
     pub fn add_mesh(&mut self, name: impl Into<String>, mesh: Mesh) {
-        self.meshes.insert(name.into(), mesh);
+        let name = name.into();
+
+        // Регистрируем LOD-версии как отдельные меши с суффиксами.
+        // `name` → LOD0, `name__lod0` → LOD1, `name__lod1` → LOD2, ...
+        for (i, lod) in mesh.lods.iter().enumerate() {
+            let lod_mesh = Mesh::from_raw_parts(
+                &self.device,
+                &lod.vertices,
+                &lod.indices,
+                &format!("{}__lod{}", name, i),
+                false, // без рекурсивной генерации LOD
+            );
+            self.meshes.insert(format!("{}__lod{}", name, i), lod_mesh);
+        }
+
+        self.meshes.insert(name, mesh);
     }
 
     pub fn mesh_names(&self) -> Vec<String> {
@@ -1574,10 +1577,6 @@ impl Renderer {
             &self.shadow2_layout,
             &self.debug_layout,
             &self.lighting_layout,
-            &self.bloom_uniform_h,
-            &self.bloom_uniform_v,
-            &self.bright_uniform,
-            &self.tonemap_uniform,
             &self.ssao_uniform,
             &self.ssao_noise_view,
             &self.csm_array_view,
@@ -1586,6 +1585,9 @@ impl Renderer {
             &self.cube_shadow_sampler,
             &self.camera_buffer,
             &ibl_owned,
+            0.5,
+            1.0,
+            &self.tonemap_uniform,
         );
 
         self.ibl = Some(ibl_owned);
@@ -1715,6 +1717,12 @@ impl Renderer {
             postfx.fog_color[2],
             0.0,
         ];
+        let shadow_params = [
+            postfx.shadow_bias,
+            postfx.shadow_normal_bias,
+            postfx.shadow_fade_start,
+            postfx.shadow_fade_end,
+        ];
 
         let lights_uniform = LightsUniform {
             cascade_vp: csm_packed,
@@ -1725,7 +1733,7 @@ impl Renderer {
             misc,
             fog_params,
             fog_color,
-            _pad1: [0.0; 4],
+            shadow_params,
             dir_lights: dir_packed,
             point_lights: pt_packed,
             cube_shadow_pos: cube_pos_packed,
@@ -1733,7 +1741,7 @@ impl Renderer {
         self.queue
             .write_buffer(&self.lights_buffer, 0, bytemuck::bytes_of(&lights_uniform));
 
-        // Shadow pass uniforms — 9 слотов
+        // Shadow pass uniforms — 9 слотов.
         {
             let stride = self.shadow_pass_stride as usize;
             let light_size = std::mem::size_of::<LightsUniform>();
@@ -1749,7 +1757,7 @@ impl Renderer {
                     misc,
                     fog_params,
                     fog_color,
-                    _pad1: [0.0; 4],
+                    shadow_params,
                     dir_lights: dir_packed,
                     point_lights: pt_packed,
                     cube_shadow_pos: cube_pos_packed,
@@ -1784,27 +1792,19 @@ impl Renderer {
         }
 
         // === Post uniforms ===
-        let bloom_w = self.config.width / 2;
-        let bloom_h = self.config.height / 2;
-        let texel = [1.0 / bloom_w as f32, 1.0 / bloom_h as f32];
-
-        let bright_params = PostParams {
-            values: [postfx.bloom_threshold, 0.0, 0.0, 0.0],
+        let knee = postfx.bloom_knee.max(1e-4);
+        let radius = postfx.bloom_radius.max(0.5);
+        let w = self.config.width.max(1) as f32;
+        let h = self.config.height.max(1) as f32;
+        let prefilter_uniform_data = BloomParams {
+            texel: [1.0 / w, 1.0 / h, 2.0 / w, 2.0 / h],
+            params: [postfx.bloom_threshold, knee, radius, 0.0],
         };
-        self.queue
-            .write_buffer(&self.bright_uniform, 0, bytemuck::bytes_of(&bright_params));
-
-        let blur_h_params = PostParams {
-            values: [1.0, 0.0, texel[0], texel[1]],
-        };
-        self.queue
-            .write_buffer(&self.bloom_uniform_h, 0, bytemuck::bytes_of(&blur_h_params));
-
-        let blur_v_params = PostParams {
-            values: [0.0, 1.0, texel[0], texel[1]],
-        };
-        self.queue
-            .write_buffer(&self.bloom_uniform_v, 0, bytemuck::bytes_of(&blur_v_params));
+        self.queue.write_buffer(
+            &self.sd.bloom_chain.prefilter_uniform,
+            0,
+            bytemuck::bytes_of(&prefilter_uniform_data),
+        );
 
         let tonemap_params = TonemapParams {
             values: [postfx.bloom_strength, postfx.exposure, self.skybox_time, 0.0],
@@ -1835,8 +1835,6 @@ impl Renderer {
         self.queue
             .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox_params));
 
-        // SSAO: шум тайлится каждые 4 пикселя по обеим осям.
-        // shader делает `fract(uv * tiling)`, поэтому tiling = screen_size / 4.
         let noise_tile_x = self.config.width as f32 / 4.0;
         let noise_tile_y = self.config.height as f32 / 4.0;
         let ssao_data = SsaoUniform {
@@ -1847,6 +1845,7 @@ impl Renderer {
                 postfx.ssao_radius,
             ],
             params: [0.025, postfx.ssao_strength, noise_tile_x, noise_tile_y],
+            time: [self.skybox_time, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
@@ -1987,7 +1986,7 @@ struct BuiltPipelines {
     transparent_double_sided: wgpu::RenderPipeline,
     lighting: wgpu::RenderPipeline,
     ssao: (wgpu::RenderPipeline, wgpu::RenderPipeline),
-    bloom: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    bloom_chain: (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline),
     tonemap: wgpu::RenderPipeline,
     debug: (wgpu::RenderPipeline, wgpu::RenderPipeline),
     fxaa: wgpu::RenderPipeline,
@@ -2074,8 +2073,6 @@ fn make_shadow_pipeline(
         label: Some("shadow_shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
     });
-    // group 0 = shadow_pass_layout (dynamic Lights), group 1 = material_layout
-    // (используется только skeleton для skinning).
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("shadow_pipeline_layout"),
         bind_group_layouts: &[shadow_pass_layout, material_layout],
@@ -2376,10 +2373,10 @@ fn make_ssao_pipelines(
     Ok((main, blur))
 }
 
-fn make_bloom_pipelines(
+fn make_bloom_chain_pipelines(
     device: &wgpu::Device,
     bloom_layout: &wgpu::BindGroupLayout,
-) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
+) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
     let src = crate::shader_source!("src/render/bloom.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bloom_shader"),
@@ -2390,55 +2387,47 @@ fn make_bloom_pipelines(
         bind_group_layouts: &[bloom_layout],
         push_constant_ranges: &[],
     });
-    let bright = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("bright_pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: Default::default(),
+
+    let make = |entry: &str, blend: Option<wgpu::BlendState>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(entry),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: entry,
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        })
+    };
+
+    let prefilter = make("fs_prefilter", None);
+    let downsample = make("fs_downsample", None);
+    let upsample_blend = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_bright",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
-    let blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("blur_pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_blur",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
-    Ok((bright, blur))
+        alpha: wgpu::BlendComponent::OVER,
+    };
+    let upsample = make("fs_upsample", Some(upsample_blend));
+
+    Ok((prefilter, downsample, upsample))
 }
 
 fn make_tonemap_pipeline(
@@ -2469,8 +2458,6 @@ fn make_tonemap_pipeline(
             module: &shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
-                // tonemap всегда пишет в LDR (Rgba8UnormSrgb).
-                // sRGB-энкодинг делает GPU — в шейдере pow(1/2.2) НЕ применяется.
                 format: LDR_FORMAT,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,

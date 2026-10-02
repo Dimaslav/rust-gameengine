@@ -19,7 +19,8 @@
 //! Array property header НЕ ЗАВИСИТ от версии:
 //!   u32 length
 //!   u32 encoding        (0 = raw, 1 = zlib)
-//!   u32 stored_length   (всегда есть; для raw обычно == length*elem_size)
+//!   u32 stored_length   (всегда есть; для raw — размер данных, включая
+//!                        возможный padding; для zlib — размер сжатых данных)
 //!   data
 
 use anyhow::{bail, Context, Result};
@@ -27,13 +28,12 @@ use std::io::Read;
 
 use super::fbx_ast::{FbxArg, FbxNode};
 
-const BIN_MAGIC_21: &[u8] = b"Kaydara FBX Binary  \x00";       // 21B
-const BIN_MAGIC_23: &[u8] = b"Kaydara FBX Binary  \x00\x1a\x00"; // 23B
+const BIN_MAGIC_21: &[u8] = b"Kaydara FBX Binary  \x00";
+const BIN_MAGIC_23: &[u8] = b"Kaydara FBX Binary  \x00\x1a\x00";
 
 const MIN_VERSION: u32 = 7000;
 const MAX_VERSION: u32 = 7700;
 
-/// Жёсткие каппы — защита от мусорных заголовков.
 const MAX_NUM_PROPERTIES: u64 = 1_000_000;
 const MAX_ARRAY_LEN: u32 = 200_000_000;
 const MAX_NAME_LEN: u8 = 200;
@@ -50,21 +50,19 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
         bail!("FBX binary: слишком короткий файл ({} байт)", bytes.len());
     }
 
-    // === Диагностика первых байт ===
     let head_len = bytes.len().min(32);
     let head_hex: String = bytes[..head_len]
         .iter()
         .map(|b| format!("{:02X}", b))
         .collect::<Vec<_>>()
         .join(" ");
-    log::error!("FBX binary head[{}]: {}", head_len, head_hex);
+    log::debug!("FBX binary head[{}]: {}", head_len, head_hex);
 
-    // === Определение длины magic и offset версии ===
     let full_magic_ok = bytes.len() >= BIN_MAGIC_23.len()
         && &bytes[..BIN_MAGIC_23.len()] == BIN_MAGIC_23;
 
     if !full_magic_ok {
-        log::error!(
+        log::debug!(
             "FBX binary: полная 23-байтовая магия не совпала (байты 21..23 = {:02X} {:02X}). \
              Использую 21-байтовую.",
             bytes[21], bytes[22]
@@ -77,7 +75,7 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
     let (version, header_end) = if (MIN_VERSION..=MAX_VERSION).contains(&v23) {
         (v23, 27usize)
     } else if (MIN_VERSION..=MAX_VERSION).contains(&v21) {
-        log::error!(
+        log::debug!(
             "FBX binary: версия найдена на offset 21 (= {}), а не 23. Сдвигаю header на 25 байт.",
             v21
         );
@@ -90,7 +88,7 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
         );
     };
 
-    log::error!(
+    log::debug!(
         "FBX binary: version = {}, header_end = {} байт, file_size = {}",
         version,
         header_end,
@@ -107,7 +105,7 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
         }
     }
 
-    log::error!(
+    log::debug!(
         "FBX binary: parsed top-level nodes = {} (names: {})",
         nodes.len(),
         nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")
@@ -183,8 +181,6 @@ fn read_node(
     let file_size = cur.data.len();
     let node_start = cur.pos();
 
-    // Если осталось меньше, чем размер null-заголовка — это нормальный
-    // конец (последний child, а после него ничего).
     let min_header = if version >= 7500 { 25 } else { 13 };
     if cur.remaining() < min_header {
         return Ok(None);
@@ -197,7 +193,6 @@ fn read_node(
         return Ok(None);
     }
 
-    // === Жёсткие проверки ===
     if end_offset > file_size as u64 {
         bail!(
             "FBX binary: node@{}: end_offset {} > file_size {}",
@@ -232,7 +227,6 @@ fn read_node(
     let name_bytes = cur.take(name_len as usize)?;
     let name = String::from_utf8_lossy(name_bytes).to_string();
 
-    // === Свойства с проверкой границ ===
     let props_start = cur.pos();
     let props_end = props_start
         .checked_add(property_list_len as usize)
@@ -256,7 +250,7 @@ fn read_node(
                 node_start, name, i
             );
         }
-        args.push(read_property(cur, version)?);
+        args.push(read_property(cur)?);
         if cur.pos() > props_end {
             bail!(
                 "FBX binary: node@{} '{}': property #{} пересекла property_list_len",
@@ -265,7 +259,6 @@ fn read_node(
         }
     }
 
-    // Выравниваем курсор до конца property list (на случай паддинга).
     if cur.pos() != props_end {
         log::warn!(
             "FBX binary: node@{} '{}': properties consumed {} bytes, header says {}",
@@ -277,19 +270,14 @@ fn read_node(
         cur.set_pos(props_end);
     }
 
-    if depth < 2 {
-        log::error!(
-            "FBX binary: node@{} '{}': end={}, props={}, args_read={}, name_len={}",
-            node_start, name, end_offset, num_properties, args.len(), name_len
-        );
-    }
+    log::debug!(
+        "FBX binary: node@{} '{}': end={}, props={}, args_read={}, name_len={}",
+        node_start, name, end_offset, num_properties, args.len(), name_len
+    );
 
-    // === Дети ===
     let end = end_offset as usize;
     let mut children = Vec::new();
     while cur.pos() < end {
-        // Если остаётся меньше, чем минимальный node header — это
-        // padding до end_offset. Дальше не читаем.
         if end - cur.pos() < min_header {
             break;
         }
@@ -299,7 +287,6 @@ fn read_node(
         }
     }
 
-    // Синхронизация на end_offset.
     if cur.pos() < end {
         cur.set_pos(end);
     }
@@ -327,7 +314,7 @@ fn read_node_header(cur: &mut Cursor<'_>, version: u32) -> Result<(u64, u64, u64
 // Property reader
 // ============================================================
 
-fn read_property(cur: &mut Cursor<'_>, version: u32) -> Result<FbxArg> {
+fn read_property(cur: &mut Cursor<'_>) -> Result<FbxArg> {
     let tag_offset = cur.pos();
     let tag = cur.u8()?;
     match tag as char {
@@ -374,10 +361,12 @@ fn read_property(cur: &mut Cursor<'_>, version: u32) -> Result<FbxArg> {
 // Array header НЕ ЗАВИСИТ от FBX версии:
 //   u32 array_len
 //   u32 encoding          (0 = raw, 1 = zlib)
-//   u32 stored_len        (всегда присутствует)
+//   u32 stored_len
 //   data
 //
-// (Раньше третий u32 читался только при encoding==1 — это был баг.)
+// Для encoding=0 курсор обязан продвинуться на stored_len (не raw_len),
+// потому что stored_len может включать padding.
+// Для encoding=1 читаем ровно stored_len сжатых байт и разжимаем до raw_len.
 
 fn read_array(
     cur: &mut Cursor<'_>,
@@ -417,23 +406,23 @@ fn read_array(
         ))?;
 
     let bytes: Vec<u8> = if encoding == 0 {
-        // Для raw обычно stored_len == raw_len, но иногда бывает
-        // padding. Читаем по raw_len, логируем расхождение.
-        if stored_len != raw_len {
-            log::warn!(
-                "FBX binary: array@{} tag='{}': encoding=0, stored_len={}, raw_len={}",
+        // Raw: cursor продвигается на stored_len (включая возможный
+        // padding), декодируем первые raw_len байт.
+        if stored_len < raw_len {
+            bail!(
+                "FBX binary: raw array@{} tag='{}': stored_len {} < raw_len {}",
                 tag_offset, tag, stored_len, raw_len
             );
         }
-        if raw_len > cur.remaining() {
+        if stored_len > cur.remaining() {
             bail!(
-                "FBX binary: raw array@{} tag='{}': need {} bytes, remaining {}",
-                tag_offset, tag, raw_len, cur.remaining()
+                "FBX binary: raw array@{} tag='{}': stored_len {} > remaining {}",
+                tag_offset, tag, stored_len, cur.remaining()
             );
         }
-        cur.take(raw_len)?.to_vec()
+        let stored = cur.take(stored_len)?;
+        stored[..raw_len].to_vec()
     } else {
-        // encoding == 1: zlib.
         if stored_len > cur.remaining() {
             bail!(
                 "FBX binary: compressed array@{}: stored_len {} > remaining {}",

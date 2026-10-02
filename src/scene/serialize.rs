@@ -10,12 +10,14 @@ use crate::game::components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
     SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
 };
+use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use glam::Vec3;
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct SceneFile {
     #[serde(default)]
     pub entities: Vec<EntitySnapshot>,
+    /// Точка спавна игрока (для Play-режима).
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
 }
@@ -23,7 +25,6 @@ pub struct SceneFile {
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
     /// Оригинальный entity id. Нужен для ремапа `Parent` при загрузке.
-    /// У старых файлов отсутствует — тогда Parent просто отбрасывается.
     #[serde(default)]
     pub entity_id: Option<u32>,
     #[serde(default)]
@@ -57,6 +58,14 @@ pub struct EntitySnapshot {
     pub tint: Option<[f32; 4]>,
     #[serde(default)]
     pub visible: Option<bool>,
+
+    // === Physics ===
+    #[serde(default)]
+    pub rigid_body: Option<RigidBody>,
+    #[serde(default)]
+    pub collider: Option<Collider>,
+    #[serde(default)]
+    pub physics_material: Option<PhysicsMaterial>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -191,8 +200,20 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     if let Some(t) = world.get::<Tint>(e) { s.tint = Some(t.0); any = true; }
     if let Some(v) = world.get::<Visible>(e) { s.visible = Some(v.0); any = true; }
 
-    // Важно: entity_id устанавливается ВСЕГДА, но он не считается
-    // «компонентом» — сущности без компонентов в снимок не попадают.
+    // === Physics ===
+    if let Some(rb) = world.get::<RigidBody>(e) {
+        s.rigid_body = Some(*rb);
+        any = true;
+    }
+    if let Some(col) = world.get::<Collider>(e) {
+        s.collider = Some(*col);
+        any = true;
+    }
+    if let Some(mat) = world.get::<PhysicsMaterial>(e) {
+        s.physics_material = Some(*mat);
+        any = true;
+    }
+
     if any { Some(s) } else { None }
 }
 
@@ -201,7 +222,6 @@ pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
     let mut world = World::new();
 
-    // Pass 1: spawn всех, построить old_id → new_id.
     let mut id_map: HashMap<u32, Entity> = HashMap::with_capacity(file.entities.len());
     let mut pending_parent: Vec<(Entity, Option<u32>)> = Vec::with_capacity(file.entities.len());
 
@@ -215,8 +235,6 @@ pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
         pending_parent.push((new_e, old_parent));
     }
 
-    // Pass 2: перепривязать Parent через маппинг. Если old_id отсутствует
-    // (старый файл) — Parent отбрасывается: указывать было бы некуда.
     for (new_e, old_parent) in pending_parent {
         if let Some(old_p) = old_parent {
             if let Some(&new_p) = id_map.get(&old_p) {
@@ -235,8 +253,7 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
     load_scene_from_str(&text)
 }
 
-/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет вызывающий
-/// (через two-pass, где есть маппинг old→new).
+/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет вызывающий.
 pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
@@ -248,7 +265,6 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             scale: glam::Vec3::from_array(t.scale),
         });
     }
-    // Parent — НЕ здесь. См. load_scene_from_str / prefab::instantiate_prefab.
     if let Some(m) = snap.mesh { world.insert(e, MeshHandle(m)); }
     if let Some(m) = snap.material { world.insert(e, MaterialHandle(m)); }
     if let Some(s) = snap.skeleton { world.insert(e, SkeletonHandle(s)); }
@@ -291,6 +307,11 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     }
     if let Some(t) = snap.tint { world.insert(e, Tint(t)); }
     if let Some(v) = snap.visible { world.insert(e, Visible(v)); }
+
+    // === Physics ===
+    if let Some(rb) = snap.rigid_body { world.insert(e, rb); }
+    if let Some(col) = snap.collider { world.insert(e, col); }
+    if let Some(mat) = snap.physics_material { world.insert(e, mat); }
 
     e
 }

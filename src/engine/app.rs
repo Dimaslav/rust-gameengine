@@ -15,6 +15,7 @@ use crate::game::components::{
     Chase, Health, Interactable, MaterialHandle, MeshHandle, Parent, SkeletonHandle, Spinner,
     Tint, Transform, Trigger, TriggerAction, Velocity,
 };
+use crate::physics::PhysicsWorld;
 use crate::render::{
     Camera3D, EguiFrameData, GpuLight, GpuPointLight, LineBatch, LineVertex, MeshDraw,
     ParticleInstance, PostFx, Renderer,
@@ -74,7 +75,6 @@ pub trait Game: 'static {
     fn camera_mut(&mut self) -> &mut Camera3D;
 }
 
-/// Летящая пуля — глобальный runtime-объект (не ECS).
 #[derive(Clone, Copy)]
 struct Projectile {
     position: Vec3,
@@ -96,23 +96,20 @@ struct App<G: Game> {
     mouse_press_pos: Option<(f32, f32)>,
     viewport_rect: Option<egui::Rect>,
 
-    // === ПКМ: различаем короткий клик (меню) от протяжки (fly) ===
     rmb_press_time: Option<Instant>,
     rmb_press_pos: Option<(f32, f32)>,
     rmb_dragged: bool,
 
-    // === CPU particles ===
     particles: Vec<Particle>,
-
-    // === Летящие пули ===
     projectiles: Vec<Projectile>,
 
-    // === Audio ===
     audio: Option<AudioSystem>,
+
+    // === Physics ===
+    physics: PhysicsWorld,
 }
 
 impl<G: Game> App<G> {
-    /// FPS-контроллер: движение, стрельба, взаимодействие, триггеры, Chase.
     fn update_player(&mut self, dt: f32) {
         // 1. Mouse look
         {
@@ -121,7 +118,7 @@ impl<G: Game> App<G> {
             self.game.camera_mut().fps_look(mdx * sens, mdy * sens);
         }
 
-        // 2. Приседание — читаем Ctrl.
+        // 2. Приседание.
         let crouching = self.input.key_down(KeyCode::ControlLeft)
             || self.input.key_down(KeyCode::ControlRight);
         self.editor.state.play.crouching = crouching;
@@ -133,7 +130,7 @@ impl<G: Game> App<G> {
             play.current_eye_height += (target - play.current_eye_height) * lerp;
         }
 
-        // 3. Параметры (копии)
+        // 3. Параметры.
         let eye_height = self.editor.state.play.current_eye_height;
         let player_radius = self.editor.state.play.player_radius;
         let player_height = if crouching {
@@ -154,7 +151,7 @@ impl<G: Game> App<G> {
         let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
 
-        // 4. Движение
+        // 4. Движение.
         let f = self.game.camera().forward();
         let fwd_xz = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
         let right_xz = Vec3::new(-fwd_xz.z, 0.0, fwd_xz.x);
@@ -174,7 +171,7 @@ impl<G: Game> App<G> {
             motion = motion.normalize() * speed * dt;
         }
 
-        // 5. Прыжок + гравитация
+        // 5. Прыжок + гравитация.
         let mut vvel = self.editor.state.play.vertical_velocity;
         let mut on_ground = self.editor.state.play.on_ground;
 
@@ -185,7 +182,7 @@ impl<G: Game> App<G> {
         vvel -= gravity * dt;
         let dy = vvel * dt;
 
-        // 6. Коллизии + пол
+        // 6. Коллизии + пол.
         let eye_pos = self.game.camera().first_person_pos;
         let feet = eye_pos - Vec3::Y * eye_height;
         let pcap = PlayerCapsule {
@@ -212,7 +209,7 @@ impl<G: Game> App<G> {
             vvel = 0.0;
         }
 
-        // 7. Head bob
+        // 7. Head bob.
         let horizontal_moved =
             ((new_feet.x - feet.x).powi(2) + (new_feet.z - feet.z).powi(2)).sqrt();
 
@@ -226,7 +223,7 @@ impl<G: Game> App<G> {
         bob_cur = bob_cur * 0.85 + bob_target * 0.15;
         let bob_offset = bob_cur;
 
-        // 8. Записать позицию и состояние
+        // 8. Записать.
         let new_eye = new_feet + Vec3::Y * (eye_height + bob_offset);
         self.game.camera_mut().first_person_pos = new_eye;
 
@@ -241,7 +238,7 @@ impl<G: Game> App<G> {
             play.interact_cooldown = (play.interact_cooldown - dt).max(0.0);
         }
 
-        // 9. Прицел + стрельба + E
+        // 9. Прицел + стрельба.
         let origin = self.game.camera().position();
         let dir = self.game.camera().forward();
 
@@ -257,7 +254,6 @@ impl<G: Game> App<G> {
         });
         self.editor.state.play.highlight = new_highlight;
 
-        // Стрельба (ЛКМ)
         let lmb = self.input.mouse_down(MouseButton::Left);
         let can_fire = lmb
             && self.editor.state.play.fire_cooldown <= 0.0
@@ -316,7 +312,7 @@ impl<G: Game> App<G> {
             }
         }
 
-        // E — взаимодействие
+        // E — взаимодействие.
         if self.input.key_pressed(KeyCode::KeyE)
             && self.editor.state.play.interact_cooldown <= 0.0
         {
@@ -351,7 +347,7 @@ impl<G: Game> App<G> {
             }
         }
 
-        // 10. Триггеры
+        // 10. Триггеры.
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
 
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
@@ -389,7 +385,7 @@ impl<G: Game> App<G> {
             }
         }
 
-        // 11. Chase
+        // 11. Chase.
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
@@ -596,6 +592,8 @@ impl<G: Game> App<G> {
         if self.input.key_pressed(KeyCode::Escape) && self.editor.state.play.active {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
+        // Escape в edit-режиме: сначала закрываем UI-элементы,
+        // и только если закрывать нечего — выходим из приложения.
         if !self.editor.state.play.active
             && !self.editor.state.flying
             && self.input.key_pressed(KeyCode::Escape)
@@ -680,6 +678,10 @@ impl<G: Game> App<G> {
             elwt.exit();
             return;
         }
+
+        // Физика шагает после game.update: игровые системы могут
+        // приложить force/impulse к телам перед симуляцией.
+        self.physics.step(&mut self.world, dt_smooth);
 
         self.update_particles(dt);
         self.update_projectiles(dt);
@@ -961,7 +963,7 @@ impl<G: Game> App<G> {
                 "EDIT"
             };
             self.window.set_title(&format!(
-                "Rust Engine 3D [{}] | FPS {:>5.1} | Frame {:.2}/{:.2} ms | Hitches {} | Entities {} | Sel {} | Particles {} | Proj {}",
+                "Rust Engine 3D [{}] | FPS {:>5.1} | Frame {:.2}/{:.2} ms | Hitches {} | Entities {} | Sel {} | Particles {} | Proj {} | Physics {} pairs",
                 mode_str,
                 self.time.fps(),
                 self.time.frame_time_avg_ms(),
@@ -971,6 +973,7 @@ impl<G: Game> App<G> {
                 self.editor.state.selected.len(),
                 self.particles.len(),
                 self.projectiles.len(),
+                self.physics.last_broad_pairs,
             ));
         }
 
@@ -1049,6 +1052,16 @@ impl<G: Game> App<G> {
             }
             if let Some(&i) = self.world.get::<Interactable>(*e) {
                 self.world.insert(new_e, i);
+            }
+            // === Physics ===
+            if let Some(rb) = self.world.get::<crate::physics::RigidBody>(*e).copied() {
+                self.world.insert(new_e, rb);
+            }
+            if let Some(col) = self.world.get::<crate::physics::Collider>(*e).copied() {
+                self.world.insert(new_e, col);
+            }
+            if let Some(mat) = self.world.get::<crate::physics::PhysicsMaterial>(*e).copied() {
+                self.world.insert(new_e, mat);
             }
 
             new_selected.push(new_e);
@@ -1678,6 +1691,7 @@ pub fn run<G: Game>(mut game: G) {
         particles: Vec::new(),
         projectiles: Vec::new(),
         audio: AudioSystem::new(),
+        physics: PhysicsWorld::default(),
     };
 
     event_loop

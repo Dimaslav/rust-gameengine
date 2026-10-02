@@ -6,6 +6,7 @@ use crate::render::line::LineVertex;
 use crate::render::mesh::InstanceData;
 
 use super::gpu_types::*;
+use super::size_dep::BLOOM_MIP_COUNT;
 use super::Renderer;
 
 // ============================================================
@@ -127,8 +128,6 @@ pub(super) fn encode_shadow_pass(
     });
 
     pass.set_bind_group(0, &r.shadow_pass_bind_group, &[slot_offset]);
-    // group 1 = material_layout: shadow-шейдер читает из него только
-    // skeleton (binding 6) для skinning. Остальные bindings не используются.
     draw_all_instances(
         &mut pass,
         r,
@@ -422,14 +421,15 @@ pub(super) fn encode_transparent_pass(
 }
 
 // ============================================================
-// Post-processing
+// Bloom mip chain
 // ============================================================
 
-pub(super) fn encode_bright_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+pub(super) fn encode_bloom_prefilter(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    let mip0 = &r.sd.bloom_chain.mips[0];
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("bright_pass"),
+        label: Some("bloom_prefilter"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.bloom_a_view,
+            view: &mip0.view,
             resolve_target: None,
             ops: clear(wgpu::Color::BLACK),
         })],
@@ -437,44 +437,70 @@ pub(super) fn encode_bright_pass(r: &Renderer, encoder: &mut wgpu::CommandEncode
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    pass.set_pipeline(&r.bright_pipeline);
-    pass.set_bind_group(0, &r.sd.bright_bind_group, &[]);
+    pass.set_pipeline(&r.bloom_prefilter_pipeline);
+    pass.set_bind_group(0, &r.sd.bloom_chain.prefilter_bg, &[]);
     fullscreen_triangle(&mut pass);
 }
 
-pub(super) fn encode_blur_h_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("blur_h_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.bloom_b_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-    });
-    pass.set_pipeline(&r.blur_pipeline);
-    pass.set_bind_group(0, &r.sd.blur_h_bind_group, &[]);
-    fullscreen_triangle(&mut pass);
+pub(super) fn encode_bloom_downsample(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    for i in 1..BLOOM_MIP_COUNT {
+        let dst = &r.sd.bloom_chain.mips[i];
+        let bg = &r.sd.bloom_chain.downsample_bgs[i - 1];
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bloom_downsample"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst.view,
+                resolve_target: None,
+                ops: clear(wgpu::Color::BLACK),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&r.bloom_downsample_pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        fullscreen_triangle(&mut pass);
+    }
 }
 
-pub(super) fn encode_blur_v_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("blur_v_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.bloom_a_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-    });
-    pass.set_pipeline(&r.blur_pipeline);
-    pass.set_bind_group(0, &r.sd.blur_v_bind_group, &[]);
-    fullscreen_triangle(&mut pass);
+pub(super) fn encode_bloom_upsample(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    // Порядок: mip[4] → mip[3], mip[3] → mip[2], ..., mip[1] → mip[0].
+    // Additive blend: mip[i] уже содержит downsample-результат.
+    for idx in 0..(BLOOM_MIP_COUNT - 1) {
+        let dst_level = BLOOM_MIP_COUNT - 2 - idx;
+        let dst = &r.sd.bloom_chain.mips[dst_level];
+        let bg = &r.sd.bloom_chain.upsample_bgs[idx];
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bloom_upsample"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&r.bloom_upsample_pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        fullscreen_triangle(&mut pass);
+    }
 }
+
+pub(super) fn encode_bloom_chain(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    encode_bloom_prefilter(r, encoder);
+    encode_bloom_downsample(r, encoder);
+    encode_bloom_upsample(r, encoder);
+}
+
+// ============================================================
+// Post-processing
+// ============================================================
 
 pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -519,9 +545,7 @@ pub(super) fn encode_post_processing(
     encoder: &mut wgpu::CommandEncoder,
     swap_view: &wgpu::TextureView,
 ) {
-    encode_bright_pass(r, encoder);
-    encode_blur_h_pass(r, encoder);
-    encode_blur_v_pass(r, encoder);
+    encode_bloom_chain(r, encoder);
     encode_composite_pass(r, encoder);
     encode_fxaa_pass(r, encoder, swap_view);
 }

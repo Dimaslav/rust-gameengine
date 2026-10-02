@@ -16,16 +16,11 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
-/// LDR-таргет после tonemap (перед FXAA).
 pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
 pub const SHADOW_SLOT_COUNT: u64 = 9;
-
-// ============================================================
-// GPU структуры
-// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -60,13 +55,10 @@ pub struct LightsUniform {
     pub ambient_color: [f32; 4],
     pub counts: [u32; 4],
     pub light_view_proj: [[f32; 4]; 4],
-    /// x = ibl_strength, y/z/w = зарезервировано.
     pub misc: [f32; 4],
-    /// x = fog_density, y = fog_height_base, z = fog_height_falloff, w = 0.
     pub fog_params: [f32; 4],
-    /// rgb = fog_color, a = 0.
     pub fog_color: [f32; 4],
-    pub _pad1: [f32; 4],
+    pub shadow_params: [f32; 4],
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
     pub cube_shadow_pos: [[f32; 4]; 4],
@@ -78,23 +70,24 @@ pub struct PostParams {
     pub values: [f32; 4],
 }
 
-/// Расширенный uniform для tonemap: values + effects.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct BloomParams {
+    pub texel: [f32; 4],
+    pub params: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TonemapParams {
-    /// x = bloom strength, y = exposure, z = time (для grain), w = unused
     pub values: [f32; 4],
-    /// x = vignette_strength, y = film_grain, z = chromatic_aberration, w = unused
     pub effects: [f32; 4],
 }
 
-/// Uniform для skybox pass.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct SkyboxParams {
-    /// x = ibl_strength, y = fog_density, z = fog_height_base, w = fog_height_falloff
     pub values: [f32; 4],
-    /// rgb = fog_color
     pub fog_color: [f32; 4],
 }
 
@@ -103,9 +96,7 @@ pub struct SkyboxParams {
 pub struct MaterialUniform {
     pub base_color: [f32; 4],
     pub emissive: [f32; 4],
-    /// metallic, roughness, normal_scale, alpha_cutoff
     pub params: [f32; 4],
-    /// alpha_mode (0=Opaque, 1=Mask, 2=Blend), pad, pad, pad
     pub flags: [u32; 4],
 }
 
@@ -136,6 +127,7 @@ impl SkeletonUniform {
 pub struct SsaoUniform {
     pub proj_scale: [f32; 4],
     pub params: [f32; 4],
+    pub time: [f32; 4],
 }
 
 #[repr(C)]
@@ -147,17 +139,13 @@ pub struct DebugParams {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct FxaaParams {
-    /// xy = inverse size, z = strength, w = unused
     pub values: [f32; 4],
 }
 
-/// Инстанс частицы для billboard-рендера.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ParticleInstance {
-    /// xyz = позиция в мире, w = размер (world units).
     pub position_size: [f32; 4],
-    /// rgba; alpha управляет затуханием.
     pub color: [f32; 4],
 }
 
@@ -176,17 +164,11 @@ impl ParticleInstance {
     }
 }
 
-// ============================================================
-// Публичные типы
-// ============================================================
-
 pub struct MeshDraw {
     pub mesh: String,
     pub instances: Vec<InstanceData>,
     pub texture: Option<String>,
-    /// `true` → transparent forward-pass (alpha blending).
     pub blend: bool,
-    /// `true` → рендерить без backface culling (пайплайн-вариант).
     pub double_sided: bool,
 }
 
@@ -194,32 +176,30 @@ pub struct MeshDraw {
 pub struct PostFx {
     pub bloom_threshold: f32,
     pub bloom_strength: f32,
+    pub bloom_knee: f32,
+    pub bloom_radius: f32,
     pub exposure: f32,
     pub ssao_strength: f32,
     pub ssao_radius: f32,
-    /// Множитель IBL (diffuse + specular) в lighting и forward transparent.
     pub ibl_strength: f32,
     pub debug_view: DebugView,
-
-    /// FXAA strength: 0 — выключено, 1 — полное сглаживание.
     pub fxaa_strength: f32,
-
-    /// Fog: цвет тумана в linear-space (обычно light-blue).
     pub fog_color: [f32; 3],
-    /// Плотность: 0 — туман выключен.
     pub fog_density: f32,
-    /// Базовая высота: ниже неё туман однородный.
     pub fog_height_base: f32,
-    /// Падение плотности с высотой (exp(-h * falloff)).
     pub fog_height_falloff: f32,
-
-    // === Пост-эффекты tonemap ===
-    /// Затемнение по краям экрана: 0 — выключено.
     pub vignette_strength: f32,
-    /// Зерно: 0 — выключено.
     pub film_grain: f32,
-    /// Хроматическая аберрация: 0 — выключено.
     pub chromatic_aberration: f32,
+    pub shadow_bias: f32,
+    pub shadow_normal_bias: f32,
+    pub shadow_fade_start: f32,
+    pub shadow_fade_end: f32,
+    /// Множитель дистанции LOD. 1.0 — стандарт; 2.0 — LOD переключается
+    /// позже (выше качество, ниже FPS).
+    pub lod_bias: f32,
+    /// Дистанции LOD. На каждом уровне — свой порог.
+    pub lod_distances: [f32; 4],
 }
 
 impl Default for PostFx {
@@ -227,6 +207,8 @@ impl Default for PostFx {
         Self {
             bloom_threshold: 1.2,
             bloom_strength: 0.6,
+            bloom_knee: 0.5,
+            bloom_radius: 1.0,
             exposure: 1.0,
             ssao_strength: 0.8,
             ssao_radius: 0.6,
@@ -240,6 +222,12 @@ impl Default for PostFx {
             vignette_strength: 0.0,
             film_grain: 0.0,
             chromatic_aberration: 0.0,
+            shadow_bias: 0.0015,
+            shadow_normal_bias: 3.0,
+            shadow_fade_start: 150.0,
+            shadow_fade_end: 200.0,
+            lod_bias: 1.0,
+            lod_distances: [30.0, 80.0, 200.0, 500.0],
         }
     }
 }
@@ -250,10 +238,6 @@ pub struct MaterialGpu {
     pub skeleton_uniform: Arc<wgpu::Buffer>,
 }
 
-// ============================================================
-// Хелперы создания ресурсов
-// ============================================================
-
 pub fn create_depth_view(
     device: &wgpu::Device,
     width: u32,
@@ -262,11 +246,7 @@ pub fn create_depth_view(
 ) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
@@ -292,11 +272,7 @@ pub fn create_color_target(
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
@@ -330,12 +306,8 @@ pub fn create_noise_texture(
         let sign = ((bits >> 31) & 0x1) as u16;
         let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
         let mant = (bits >> 13) & 0x3FF;
-        if exp <= 0 {
-            return sign << 15;
-        }
-        if exp >= 31 {
-            return (sign << 15) | 0x7C00;
-        }
+        if exp <= 0 { return sign << 15; }
+        if exp >= 31 { return (sign << 15) | 0x7C00; }
         (sign << 15) | ((exp as u16) << 10) | (mant as u16)
     }
 
@@ -359,11 +331,7 @@ pub fn create_noise_texture(
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_noise"),
-        size: wgpu::Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -385,11 +353,7 @@ pub fn create_noise_texture(
             bytes_per_row: Some(size * 8),
             rows_per_image: Some(size),
         },
-        wgpu::Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
     );
 
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -427,10 +391,7 @@ pub fn build_object_bind_group(
     let uniform = MaterialUniform {
         base_color: material.base_color,
         emissive: [
-            material.emissive[0],
-            material.emissive[1],
-            material.emissive[2],
-            1.0,
+            material.emissive[0], material.emissive[1], material.emissive[2], 1.0,
         ],
         params: [
             material.metallic,

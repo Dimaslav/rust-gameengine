@@ -2,6 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use crate::render::bvh::Bvh;
+use crate::render::lod::{generate_lods, LodLevel};
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex3D {
@@ -96,17 +99,37 @@ pub struct Mesh {
     pub aabb_max: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
 
-    // === CPU-копии для экспорта (FBX и т.п.) ===
+    /// BVH для быстрого raycast. Строится из `triangles` при `Mesh::new`.
+    pub bvh: Bvh,
+
+    // CPU-копии для экспорта (FBX и т.п.).
     pub cpu_vertices: Vec<Vertex3D>,
     pub cpu_indices: Vec<u32>,
+
+    /// Автоматически сгенерированные LOD-уровни (не считая LOD0).
+    /// Пустой, если меш слишком простой.
+    pub lods: Vec<LodLevel>,
 }
 
 impl Mesh {
+    /// Публичный конструктор: строит меш + генерирует LOD.
     pub fn new(
         device: &wgpu::Device,
         vertices: &[Vertex3D],
         indices: &[u32],
         label: &str,
+    ) -> Self {
+        Self::from_raw_parts(device, vertices, indices, label, true)
+    }
+
+    /// Конструктор без генерации LOD. Для внутреннего использования
+    /// (`Renderer::add_mesh` при регистрации LOD-версий).
+    pub fn from_raw_parts(
+        device: &wgpu::Device,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+        label: &str,
+        generate_lods_too: bool,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{label}_vb")),
@@ -143,6 +166,14 @@ impl Mesh {
             triangles.push([a, b, c]);
         }
 
+        let bvh = Bvh::build(&triangles);
+
+        let lods = if generate_lods_too && triangles.len() >= 200 {
+            generate_lods(vertices, indices, 3)
+        } else {
+            Vec::new()
+        };
+
         Self {
             vertex_buffer,
             index_buffer,
@@ -152,8 +183,10 @@ impl Mesh {
             aabb_min,
             aabb_max,
             triangles,
+            bvh,
             cpu_vertices: vertices.to_vec(),
             cpu_indices: indices.to_vec(),
+            lods,
         }
     }
 

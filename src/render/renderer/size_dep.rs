@@ -1,22 +1,38 @@
 //! Ресурсы, зависящие от размера окна.
-//!
-//! 14C-2: убран `gbuffer_depth_gray` — depth упакован в `gbuffer_normal.a`.
-//! SSAO читает normal из `.rgb` и depth из `.a` одной текстуры.
 
 use crate::render::ibl::IblResources;
 
 use super::gpu_types::*;
 
+/// Сколько уровней в bloom chain.
+pub const BLOOM_MIP_COUNT: usize = 5;
+
+/// Один уровень bloom chain.
+pub struct BloomMip {
+    pub view: wgpu::TextureView,
+    pub _tex: wgpu::Texture,
+    pub size: (u32, u32),
+}
+
+/// Bloom mip chain (5 уровней) + bind groups для prefilter/downsample/upsample.
+pub struct BloomChain {
+    pub mips: Vec<BloomMip>,
+    pub sampler: wgpu::Sampler,
+
+    pub prefilter_bg: wgpu::BindGroup,
+    pub downsample_bgs: Vec<wgpu::BindGroup>,
+    pub upsample_bgs: Vec<wgpu::BindGroup>,
+
+    pub prefilter_uniform: wgpu::Buffer,
+    pub _downsample_uniforms: Vec<wgpu::Buffer>,
+    pub _upsample_uniforms: Vec<wgpu::Buffer>,
+}
+
 pub struct SizeDependent {
     pub hdr_view: wgpu::TextureView,
-
-    pub bloom_a_view: wgpu::TextureView,
-    pub bloom_b_view: wgpu::TextureView,
+    pub bloom_chain: BloomChain,
     pub linear_sampler: wgpu::Sampler,
 
-    pub bright_bind_group: wgpu::BindGroup,
-    pub blur_h_bind_group: wgpu::BindGroup,
-    pub blur_v_bind_group: wgpu::BindGroup,
     pub composite_bind_group: wgpu::BindGroup,
 
     /// LDR-таргет после tonemap (перед FXAA).
@@ -55,10 +71,6 @@ pub fn build_size_dependent(
     shadow2_layout: &wgpu::BindGroupLayout,
     debug_layout: &wgpu::BindGroupLayout,
     lighting_layout: &wgpu::BindGroupLayout,
-    bloom_uniform_h: &wgpu::Buffer,
-    bloom_uniform_v: &wgpu::Buffer,
-    bright_uniform: &wgpu::Buffer,
-    tonemap_uniform: &wgpu::Buffer,
     ssao_uniform: &wgpu::Buffer,
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
@@ -67,17 +79,29 @@ pub fn build_size_dependent(
     cube_shadow_sampler: &wgpu::Sampler,
     camera_buffer: &wgpu::Buffer,
     ibl: &IblResources,
+    bloom_knee: f32,
+    bloom_radius: f32,
+    tonemap_uniform: &wgpu::Buffer,
 ) -> SizeDependent {
     let w = config.width.max(1);
     let h = config.height.max(1);
-    let bw = (w / 2).max(1);
-    let bh = (h / 2).max(1);
 
     let hdr_view = create_color_target(device, "hdr", w, h, HDR_FORMAT, 1, true);
     let ldr_view = create_color_target(device, "ldr", w, h, LDR_FORMAT, 1, true);
-    let bloom_a_view = create_color_target(device, "bloom_a", bw, bh, HDR_FORMAT, 1, true);
-    let bloom_b_view = create_color_target(device, "bloom_b", bw, bh, HDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
+
+    // ============================================================
+    // Bloom chain
+    // ============================================================
+    let bloom_chain = build_bloom_chain(
+        device,
+        bloom_layout,
+        &hdr_view,
+        w,
+        h,
+        bloom_knee,
+        bloom_radius,
+    );
 
     // G-buffer: 3 MRT + depth
     let gbuffer_albedo_view =
@@ -92,7 +116,7 @@ pub fn build_size_dependent(
     let ssao_view = create_color_target(device, "ssao", w, h, SSAO_FORMAT, 1, true);
     let ssao_blur_view = create_color_target(device, "ssao_blur", w, h, SSAO_FORMAT, 1, true);
 
-    // SSAO читает normal+depth из gbuffer_normal (rgb=normal, a=depth_norm).
+    // SSAO pass: t_gbuffer + noise + sampler + uniform + binding 4 (тот же gbuffer).
     let ssao_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao_bind_group"),
         layout: ssao_layout,
@@ -113,9 +137,14 @@ pub fn build_size_dependent(
                 binding: 3,
                 resource: ssao_uniform.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view),
+            },
         ],
     });
 
+    // SSAO blur pass: t_ssao + noise + sampler + uniform + binding 4 (gbuffer depth).
     let ssao_blur_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao_blur_bind_group"),
         layout: ssao_layout,
@@ -135,6 +164,10 @@ pub fn build_size_dependent(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: ssao_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view),
             },
         ],
     });
@@ -221,63 +254,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    let bright_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("bright_bind_group"),
-        layout: bloom_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&hdr_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&linear_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: bright_uniform.as_entire_binding(),
-            },
-        ],
-    });
-
-    let blur_h_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("blur_h_bind_group"),
-        layout: bloom_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&bloom_a_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&linear_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: bloom_uniform_h.as_entire_binding(),
-            },
-        ],
-    });
-
-    let blur_v_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("blur_v_bind_group"),
-        layout: bloom_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&bloom_b_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&linear_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: bloom_uniform_v.as_entire_binding(),
-            },
-        ],
-    });
-
     let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("composite_bind_group"),
         layout: tonemap_layout,
@@ -288,7 +264,7 @@ pub fn build_size_dependent(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&bloom_a_view),
+                resource: wgpu::BindingResource::TextureView(&bloom_chain.mips[0].view),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -362,14 +338,224 @@ pub fn build_size_dependent(
 
     SizeDependent {
         hdr_view,
-        bloom_a_view, bloom_b_view, linear_sampler,
-        bright_bind_group, blur_h_bind_group, blur_v_bind_group, composite_bind_group,
+        bloom_chain,
+        linear_sampler,
+        composite_bind_group,
         ldr_view,
         fxaa_uniform,
         fxaa_bind_group,
-        gbuffer_albedo_view, gbuffer_normal_view, gbuffer_emissive_view, gbuffer_depth_view,
-        ssao_view, ssao_blur_view, ssao_bind_group, ssao_blur_bind_group,
-        shadow2_bind_group, lighting_bind_group,
-        debug_uniform, debug_bind_ssao, debug_bind_gbuffer, debug_bind_depth, debug_bind_hdr,
+        gbuffer_albedo_view,
+        gbuffer_normal_view,
+        gbuffer_emissive_view,
+        gbuffer_depth_view,
+        ssao_view,
+        ssao_blur_view,
+        ssao_bind_group,
+        ssao_blur_bind_group,
+        shadow2_bind_group,
+        lighting_bind_group,
+        debug_uniform,
+        debug_bind_ssao,
+        debug_bind_gbuffer,
+        debug_bind_depth,
+        debug_bind_hdr,
     }
+}
+
+// ============================================================
+// Bloom chain builder
+// ============================================================
+
+fn build_bloom_chain(
+    device: &wgpu::Device,
+    bloom_layout: &wgpu::BindGroupLayout,
+    hdr_view: &wgpu::TextureView,
+    screen_w: u32,
+    screen_h: u32,
+    knee: f32,
+    radius: f32,
+) -> BloomChain {
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("bloom_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    let mut mips: Vec<BloomMip> = Vec::with_capacity(BLOOM_MIP_COUNT);
+    for level in 0..BLOOM_MIP_COUNT {
+        let div = 1u32 << (level + 1);
+        let w = (screen_w / div).max(1);
+        let h = (screen_h / div).max(1);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bloom_mip"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        mips.push(BloomMip {
+            view,
+            _tex: tex,
+            size: (w, h),
+        });
+    }
+
+    let prefilter_uniform = make_bloom_uniform(
+        device,
+        screen_w,
+        screen_h,
+        mips[0].size.0,
+        mips[0].size.1,
+        1.0,
+        knee,
+        radius,
+    );
+
+    let prefilter_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bloom_prefilter_bg"),
+        layout: bloom_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(hdr_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: prefilter_uniform.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut downsample_bgs = Vec::with_capacity(BLOOM_MIP_COUNT - 1);
+    let mut downsample_uniforms = Vec::with_capacity(BLOOM_MIP_COUNT - 1);
+    for i in 1..BLOOM_MIP_COUNT {
+        let src = &mips[i - 1];
+        let dst = &mips[i];
+        let u = make_bloom_uniform(
+            device,
+            src.size.0,
+            src.size.1,
+            dst.size.0,
+            dst.size.1,
+            1.0,
+            knee,
+            radius,
+        );
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom_downsample_bg"),
+            layout: bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: u.as_entire_binding(),
+                },
+            ],
+        });
+        downsample_bgs.push(bg);
+        downsample_uniforms.push(u);
+    }
+
+    let mut upsample_bgs = Vec::with_capacity(BLOOM_MIP_COUNT - 1);
+    let mut upsample_uniforms = Vec::with_capacity(BLOOM_MIP_COUNT - 1);
+    for src_level in (1..BLOOM_MIP_COUNT).rev() {
+        let src = &mips[src_level];
+        let dst = &mips[src_level - 1];
+        let u = make_bloom_uniform(
+            device,
+            src.size.0,
+            src.size.1,
+            dst.size.0,
+            dst.size.1,
+            1.0,
+            knee,
+            radius,
+        );
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom_upsample_bg"),
+            layout: bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: u.as_entire_binding(),
+                },
+            ],
+        });
+        upsample_bgs.push(bg);
+        upsample_uniforms.push(u);
+    }
+
+    BloomChain {
+        mips,
+        sampler,
+        prefilter_bg,
+        downsample_bgs,
+        upsample_bgs,
+        prefilter_uniform,
+        _downsample_uniforms: downsample_uniforms,
+        _upsample_uniforms: upsample_uniforms,
+    }
+}
+
+fn make_bloom_uniform(
+    device: &wgpu::Device,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    threshold: f32,
+    knee: f32,
+    radius: f32,
+) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+
+    let data = BloomParams {
+        texel: [
+            1.0 / src_w.max(1) as f32,
+            1.0 / src_h.max(1) as f32,
+            1.0 / dst_w.max(1) as f32,
+            1.0 / dst_h.max(1) as f32,
+        ],
+        params: [threshold, knee, radius, 0.0],
+    };
+
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("bloom_uniform"),
+        contents: bytemuck::bytes_of(&data),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
 }
