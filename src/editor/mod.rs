@@ -78,6 +78,10 @@ pub struct EditorState {
     pub fly_sensitivity: f32,
 
     pub clipboard_entities: Vec<EntitySnapshot>,
+
+    // === FBX ===
+    /// Путь/имя по умолчанию для экспорта FBX (кэш последнего выбора).
+    pub fbx_export_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,14 @@ pub enum EditorAction {
     LoadTextures,
     /// Удалить текстуру из реестра по имени.
     RemoveTexture(String),
+
+    // === FBX ===
+    /// Экспортировать всю сцену в `.fbx`.
+    ExportFbxAll,
+    /// Экспортировать только выделение.
+    ExportFbxSelected,
+    /// Импортировать ASCII FBX (Blender/Maya/Unity).
+    ImportFbx,
 }
 
 impl EditorState {
@@ -139,6 +151,7 @@ impl EditorState {
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
             clipboard_entities: Vec::new(),
+            fbx_export_path: "scene.fbx".to_string(),
         };
         s.prefab_list = crate::scene::prefab::list_prefabs(&s.prefabs_dir);
         s
@@ -208,6 +221,7 @@ impl Editor {
             Some(window.scale_factor() as f32),
             None,
         );
+        // egui-wgpu 0.28.1: new(device, format, depth_format, msaa_samples).
         let egui_renderer = EguiRenderer::new(device, surface_format, None, 1);
 
         Self {

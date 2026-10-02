@@ -451,13 +451,10 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Создать burst частиц в позиции.
     fn spawn_burst(&mut self, origin: Vec3, params: &particles::BurstParams) {
         particles::emit_burst(&mut self.particles, origin, params);
     }
 
-    /// Если материал с этим именем используется кем-то ещё — создать
-    /// уникальную копию `<name>_uniq_<entity>` и назначить её этому entity.
     fn ensure_unique_material_for(&mut self, entity: Entity) -> Option<String> {
         let mh = self.world.get::<MaterialHandle>(entity).cloned()?;
         let current_name = mh.0;
@@ -496,7 +493,6 @@ impl<G: Game> App<G> {
         Some(unique_name)
     }
 
-    /// Обновить частицы: возраст, движение, гравитация, удаление мёртвых.
     fn update_particles(&mut self, dt: f32) {
         for p in &mut self.particles {
             p.age += dt;
@@ -511,7 +507,6 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Обновить пули: двигать, проверять попадания, удалять мёртвые.
     fn update_projectiles(&mut self, dt: f32) {
         if self.projectiles.is_empty() {
             return;
@@ -601,8 +596,6 @@ impl<G: Game> App<G> {
         if self.input.key_pressed(KeyCode::Escape) && self.editor.state.play.active {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
-        // Escape в edit-режиме: сначала закрываем активные UI-элементы,
-        // и только если закрывать нечего — выходим из приложения.
         if !self.editor.state.play.active
             && !self.editor.state.flying
             && self.input.key_pressed(KeyCode::Escape)
@@ -627,12 +620,17 @@ impl<G: Game> App<G> {
 
         if want_fly != was_flying {
             if want_fly {
+                let cur_pos = self.game.camera().position();
+                self.game.camera_mut().enter_fly(cur_pos);
+
                 let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
                 self.window.set_cursor_visible(false);
                 self.input.on_cursor_enter();
                 self.input.mouse_motion = (0.0, 0.0);
                 self.input.skip_motion_frames = 4;
             } else {
+                self.game.camera_mut().exit_fly();
+
                 let _ = self.window.set_cursor_grab(CursorGrabMode::None);
                 self.window.set_cursor_visible(true);
             }
@@ -1222,7 +1220,7 @@ impl<G: Game> App<G> {
                         t.position[2] += offset.z;
                     }
                     snap.parent = None;
-                    snap.entity_id = None; // чтобы не было коллизий при возможном двухпроходном спавне
+                    snap.entity_id = None;
                     if let Some(ref mut n) = snap.name {
                         n.push_str("_paste");
                     }
@@ -1529,6 +1527,108 @@ impl<G: Game> App<G> {
                     log::warn!("Texture '{}' not found", name);
                 }
             }
+            EditorAction::ExportFbxAll => {
+                let default_name = self.editor.state.fbx_export_path.clone();
+                let path = rfd::FileDialog::new()
+                    .set_file_name(&default_name)
+                    .add_filter("FBX", &["fbx"])
+                    .save_file();
+                let Some(path) = path else { return; };
+                if let Some(p) = path.to_str() {
+                    self.editor.state.fbx_export_path = p.to_string();
+                }
+
+                let opts = crate::scene::fbx_export::FbxExportOptions {
+                    selected: None,
+                };
+                match crate::scene::fbx_export::export_fbx(
+                    &self.world,
+                    &self.renderer,
+                    &path,
+                    &opts,
+                ) {
+                    Ok(stats) => log::info!(
+                        "FBX exported (all): {} entities, {} geometries, \
+                         {} materials, {} verts, {} tris → {}",
+                        stats.entities,
+                        stats.geometries,
+                        stats.materials,
+                        stats.total_vertices,
+                        stats.total_triangles,
+                        path.display()
+                    ),
+                    Err(e) => log::error!("FBX export failed: {:#}", e),
+                }
+            }
+            EditorAction::ExportFbxSelected => {
+                if self.editor.state.selected.is_empty() {
+                    log::warn!("FBX export: nothing selected");
+                    return;
+                }
+                let default_name = self.editor.state.fbx_export_path.clone();
+                let path = rfd::FileDialog::new()
+                    .set_file_name(&default_name)
+                    .add_filter("FBX", &["fbx"])
+                    .save_file();
+                let Some(path) = path else { return; };
+                if let Some(p) = path.to_str() {
+                    self.editor.state.fbx_export_path = p.to_string();
+                }
+
+                let opts = crate::scene::fbx_export::FbxExportOptions {
+                    selected: Some(self.editor.state.selected.clone()),
+                };
+                match crate::scene::fbx_export::export_fbx(
+                    &self.world,
+                    &self.renderer,
+                    &path,
+                    &opts,
+                ) {
+                    Ok(stats) => log::info!(
+                        "FBX exported (selection): {} entities, {} geometries, \
+                         {} materials, {} verts, {} tris → {}",
+                        stats.entities,
+                        stats.geometries,
+                        stats.materials,
+                        stats.total_vertices,
+                        stats.total_triangles,
+                        path.display()
+                    ),
+                    Err(e) => log::error!("FBX export failed: {:#}", e),
+                }
+            }
+            EditorAction::ImportFbx => {
+                let path = rfd::FileDialog::new()
+                    .add_filter("FBX", &["fbx"])
+                    .pick_file();
+                let Some(path) = path else { return; };
+
+                let opts = crate::scene::fbx_import::FbxImportOptions {
+                    scale: 1.0,
+                    prefix: String::new(),
+                };
+                match crate::scene::fbx_import::import_fbx(
+                    &mut self.world,
+                    &mut self.renderer,
+                    &path,
+                    &opts,
+                ) {
+                    Ok(stats) => {
+                        log::info!(
+                            "FBX imported: {} models, {} meshes, {} materials, \
+                             {} verts, {} tris → {}",
+                            stats.models,
+                            stats.meshes,
+                            stats.materials,
+                            stats.total_vertices,
+                            stats.total_triangles,
+                            path.display()
+                        );
+                        self.editor.state.selected.clear();
+                    }
+                    Err(e) => log::error!("FBX import failed: {:#}", e),
+                }
+            }
             EditorAction::PlacePalette | EditorAction::ClearPalette => {}
         }
     }
@@ -1612,6 +1712,7 @@ pub fn run<G: Game>(mut game: G) {
                                 && event.physical_key
                                     == winit::keyboard::PhysicalKey::Code(KeyCode::Escape)
                             {
+                                app.game.camera_mut().exit_fly();
                                 app.editor.state.flying = false;
                                 app.input.editor_flying = false;
                                 let _ = app.window.set_cursor_grab(CursorGrabMode::None);

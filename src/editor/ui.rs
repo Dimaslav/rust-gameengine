@@ -156,6 +156,20 @@ pub fn draw(
                         action = Some(EditorAction::MakeMaterialUnique);
                         editor.context_menu_pos = None;
                     }
+
+                    // === FBX ===
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Export FBX (selection)"))
+                        .clicked()
+                    {
+                        action = Some(EditorAction::ExportFbxSelected);
+                        editor.context_menu_pos = None;
+                    }
+                    if ui.button("Import FBX…").clicked() {
+                        action = Some(EditorAction::ImportFbx);
+                        editor.context_menu_pos = None;
+                    }
                 });
             });
 
@@ -270,6 +284,36 @@ pub fn draw(
                     .desired_width(140.0)
                     .hint_text("scene.ron"),
             );
+
+            // === FBX ===
+            ui.separator();
+            if ui
+                .button("FBX All")
+                .on_hover_text("Экспортировать всю сцену в .fbx (Blender/Maya/Unity/UE)")
+                .clicked()
+            {
+                action = Some(EditorAction::ExportFbxAll);
+            }
+            if ui
+                .add_enabled(
+                    !editor.selected.is_empty(),
+                    egui::Button::new("FBX Sel"),
+                )
+                .on_hover_text("Экспортировать только выделение в .fbx")
+                .clicked()
+            {
+                action = Some(EditorAction::ExportFbxSelected);
+            }
+            if ui
+                .button("FBX Import")
+                .on_hover_text(
+                    "Импортировать ASCII FBX (Blender/Maya/Unity). \
+                     Скелеты/анимации/текстуры пока пропускаются.",
+                )
+                .clicked()
+            {
+                action = Some(EditorAction::ImportFbx);
+            }
 
             ui.separator();
             ui.label(format!("FPS: {:.1}", stats.fps));
@@ -600,6 +644,12 @@ pub fn draw(
                                                     ui.close_menu();
                                                 }
                                                 ui.separator();
+                                                if ui.button("Export FBX…").clicked() {
+                                                    editor.select_single(e);
+                                                    action = Some(EditorAction::ExportFbxSelected);
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
                                                 if world.has::<Parent>(e) {
                                                     if ui
                                                         .button("Clear Parent")
@@ -811,6 +861,9 @@ pub fn draw(
                                 }
                                 if ui.button("Delete").clicked() {
                                     action = Some(EditorAction::DeleteSelected);
+                                }
+                                if ui.button("FBX Sel").clicked() {
+                                    action = Some(EditorAction::ExportFbxSelected);
                                 }
                             });
                             ui.separator();
@@ -1266,8 +1319,6 @@ fn would_create_cycle(world: &World, child: Entity, new_parent: Entity) -> bool 
     true
 }
 
-/// ComboBox для выбора текстуры из списка. `(none)` — сбросить.
-/// Возвращает `true`, если выбор изменился.
 fn texture_picker(
     ui: &mut egui::Ui,
     id: &str,
@@ -1693,6 +1744,10 @@ fn draw_inspector(
         if ui.button("Spawn Player Here").clicked() {
             *action = Some(EditorAction::SpawnPlayerHere);
         }
+        // === FBX ===
+        if ui.button("Export FBX").clicked() {
+            *action = Some(EditorAction::ExportFbxSelected);
+        }
     });
 
     // === Visibility ===
@@ -1988,7 +2043,6 @@ fn draw_inspector(
                 let r = ui.color_edit_button_rgb(&mut m.emissive);
                 if r.changed() { changed = true; editor.undo_requested = true; }
 
-                // === Текстурные слоты ===
                 ui.separator();
                 ui.label(
                     egui::RichText::new("Textures")
@@ -2063,8 +2117,6 @@ fn draw_inspector(
                 }
 
                 if changed {
-                    // Передаём entity — App сам сделает материал unique,
-                    // если он шарится между несколькими объектами.
                     editor.dirty_materials.push((e, name.clone(), m));
                 }
             });

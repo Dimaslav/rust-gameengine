@@ -95,6 +95,10 @@ pub struct Mesh {
     pub aabb_min: Vec3,
     pub aabb_max: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
+
+    // === CPU-копии для экспорта (FBX и т.п.) ===
+    pub cpu_vertices: Vec<Vertex3D>,
+    pub cpu_indices: Vec<u32>,
 }
 
 impl Mesh {
@@ -148,6 +152,8 @@ impl Mesh {
             aabb_min,
             aabb_max,
             triangles,
+            cpu_vertices: vertices.to_vec(),
+            cpu_indices: indices.to_vec(),
         }
     }
 

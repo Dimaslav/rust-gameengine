@@ -18,6 +18,8 @@ image = { version = "0.25", default-features = false, features = [
     "hdr", "exr", "ico", "pnm", "qoi", "ff"
 ] }
 
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 anyhow = "1"
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1", features = ["derive"] }
