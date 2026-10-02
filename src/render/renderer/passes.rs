@@ -127,11 +127,13 @@ pub(super) fn encode_shadow_pass(
     });
 
     pass.set_bind_group(0, &r.shadow_pass_bind_group, &[slot_offset]);
+    // group 1 = material_layout: shadow-шейдер читает из него только
+    // skeleton (binding 6) для skinning. Остальные bindings не используются.
     draw_all_instances(
         &mut pass,
         r,
         draws,
-        None,
+        Some(1),
         false,
         &r.shadow_pipeline,
         &r.shadow_pipeline_double_sided,
@@ -281,9 +283,6 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
 // Skybox
 // ============================================================
 
-/// Рисует env cubemap на far-plane (depth == 1.0). Depth-write отключён,
-/// depth-compare = Equal → пишет только по небу, у которого G-buffer
-/// depth = 1.0.
 pub(super) fn encode_skybox_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("skybox_pass"),
@@ -376,7 +375,6 @@ pub(super) fn encode_particles_pass(
     pass.set_pipeline(&r.particles_pipeline);
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
     pass.set_vertex_buffer(0, r.particles_instance_buffer.slice(..));
-    // 6 вершин (2 треугольника) на инстанс, N инстансов.
     pass.draw(0..6, 0..particle_count);
 }
 
@@ -478,7 +476,6 @@ pub(super) fn encode_blur_v_pass(r: &Renderer, encoder: &mut wgpu::CommandEncode
     fullscreen_triangle(&mut pass);
 }
 
-/// Tonemap HDR+bloom → LDR target (не swap).
 pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("composite_pass"),
@@ -496,7 +493,6 @@ pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEnc
     fullscreen_triangle(&mut pass);
 }
 
-/// FXAA: LDR → swap.
 pub(super) fn encode_fxaa_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,

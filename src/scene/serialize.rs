@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ecs::{Entity, World};
@@ -15,17 +16,21 @@ use glam::Vec3;
 pub struct SceneFile {
     #[serde(default)]
     pub entities: Vec<EntitySnapshot>,
-    /// Точка спавна игрока (для Play-режима).
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
+    /// Оригинальный entity id. Нужен для ремапа `Parent` при загрузке.
+    /// У старых файлов отсутствует — тогда Parent просто отбрасывается.
+    #[serde(default)]
+    pub entity_id: Option<u32>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub transform: Option<TransformSnapshot>,
+    /// Ссылка на оригинальный entity id родителя (в терминах `entity_id`).
     #[serde(default)]
     pub parent: Option<u32>,
     #[serde(default)]
@@ -84,7 +89,7 @@ pub struct ChaseSnapshot { pub speed: f32, pub stop_distance: f32 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerSnapshot {
     pub radius: f32,
-    pub action: String,   // "teleport" | "tint" | "despawn"
+    pub action: String,
     pub param: [f32; 4],
     pub once: bool,
     pub fired: bool,
@@ -92,7 +97,7 @@ pub struct TriggerSnapshot {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InteractableSnapshot {
-    pub kind: String,     // "pickup" | "paint" | "toggle"
+    pub kind: String,
     pub color: Option<[f32; 4]>,
 }
 
@@ -125,6 +130,7 @@ pub fn save_scene_to_file(
 
 pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     let mut s = EntitySnapshot::default();
+    s.entity_id = Some(e);
     let mut any = false;
 
     if let Some(n) = world.get::<Name>(e) { s.name = Some(n.0.clone()); any = true; }
@@ -185,16 +191,40 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     if let Some(t) = world.get::<Tint>(e) { s.tint = Some(t.0); any = true; }
     if let Some(v) = world.get::<Visible>(e) { s.visible = Some(v.0); any = true; }
 
+    // Важно: entity_id устанавливается ВСЕГДА, но он не считается
+    // «компонентом» — сущности без компонентов в снимок не попадают.
     if any { Some(s) } else { None }
 }
 
-/// Загрузка сцены. Возвращает мир + опциональный спавн игрока.
+/// Загрузка сцены: two-pass, чтобы корректно перепривязать `Parent`.
 pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
     let mut world = World::new();
+
+    // Pass 1: spawn всех, построить old_id → new_id.
+    let mut id_map: HashMap<u32, Entity> = HashMap::with_capacity(file.entities.len());
+    let mut pending_parent: Vec<(Entity, Option<u32>)> = Vec::with_capacity(file.entities.len());
+
     for snap in file.entities {
-        spawn_snapshot(&mut world, snap);
+        let old_id = snap.entity_id;
+        let old_parent = snap.parent;
+        let new_e = spawn_snapshot(&mut world, snap);
+        if let Some(old) = old_id {
+            id_map.insert(old, new_e);
+        }
+        pending_parent.push((new_e, old_parent));
     }
+
+    // Pass 2: перепривязать Parent через маппинг. Если old_id отсутствует
+    // (старый файл) — Parent отбрасывается: указывать было бы некуда.
+    for (new_e, old_parent) in pending_parent {
+        if let Some(old_p) = old_parent {
+            if let Some(&new_p) = id_map.get(&old_p) {
+                world.insert(new_e, Parent(new_p));
+            }
+        }
+    }
+
     let spawn = file.player_spawn.map(Vec3::from_array);
     Ok((world, spawn))
 }
@@ -205,6 +235,8 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
     load_scene_from_str(&text)
 }
 
+/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет вызывающий
+/// (через two-pass, где есть маппинг old→new).
 pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
@@ -216,7 +248,7 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             scale: glam::Vec3::from_array(t.scale),
         });
     }
-    if let Some(p) = snap.parent { world.insert(e, Parent(p)); }
+    // Parent — НЕ здесь. См. load_scene_from_str / prefab::instantiate_prefab.
     if let Some(m) = snap.mesh { world.insert(e, MeshHandle(m)); }
     if let Some(m) = snap.material { world.insert(e, MaterialHandle(m)); }
     if let Some(s) = snap.skeleton { world.insert(e, SkeletonHandle(s)); }

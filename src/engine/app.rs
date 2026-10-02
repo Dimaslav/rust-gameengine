@@ -126,7 +126,6 @@ impl<G: Game> App<G> {
             || self.input.key_down(KeyCode::ControlRight);
         self.editor.state.play.crouching = crouching;
 
-        // Интерполируем высоту глаз: стоим — eye_height, сидим — crouch_height.
         {
             let play = &mut self.editor.state.play;
             let target = if crouching { play.crouch_height } else { play.eye_height };
@@ -459,12 +458,10 @@ impl<G: Game> App<G> {
 
     /// Если материал с этим именем используется кем-то ещё — создать
     /// уникальную копию `<name>_uniq_<entity>` и назначить её этому entity.
-    /// Возвращает имя итогового материала.
     fn ensure_unique_material_for(&mut self, entity: Entity) -> Option<String> {
         let mh = self.world.get::<MaterialHandle>(entity).cloned()?;
         let current_name = mh.0;
 
-        // Сколько entity используют этот материал?
         let user_count = self
             .world
             .entities()
@@ -481,7 +478,6 @@ impl<G: Game> App<G> {
             return Some(current_name);
         }
 
-        // Клонируем материал под уникальным именем.
         let unique_name = format!("{}_uniq_{}", current_name, entity);
         if !self.renderer.has_material(&unique_name) {
             let Some(base) = self.renderer.materials.get(&current_name).cloned() else {
@@ -605,18 +601,26 @@ impl<G: Game> App<G> {
         if self.input.key_pressed(KeyCode::Escape) && self.editor.state.play.active {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
+        // Escape в edit-режиме: сначала закрываем активные UI-элементы,
+        // и только если закрывать нечего — выходим из приложения.
         if !self.editor.state.play.active
             && !self.editor.state.flying
             && self.input.key_pressed(KeyCode::Escape)
         {
+            let mut consumed = false;
             if self.editor.state.palette.active.is_some() {
                 self.editor.state.palette.active = None;
+                consumed = true;
             } else if self.editor.state.context_menu_pos.is_some() {
                 self.editor.state.context_menu_pos = None;
+                consumed = true;
+            }
+            if !consumed {
+                elwt.exit();
+                return;
             }
         }
 
-        // === RMB + fly (только если пользователь начал движение) ===
         let rmb = self.input.mouse_down(MouseButton::Right);
         let want_fly = rmb && self.rmb_dragged && !self.editor.state.play.active;
         let was_flying = self.editor.state.flying;
@@ -636,7 +640,6 @@ impl<G: Game> App<G> {
             self.input.editor_flying = want_fly;
         }
 
-        // === Play / Fly / Edit ===
         if self.editor.state.play.active {
             self.input.editor_captured = false;
             self.update_player(dt_smooth);
@@ -649,7 +652,6 @@ impl<G: Game> App<G> {
                 || !self.in_viewport(mx, my);
         }
 
-        // === Ghost preview активной кисти ===
         if !self.editor.state.play.active && !self.editor.state.flying {
             if self.editor.state.palette.active.is_some() {
                 let (mx, my) = self.input.mouse_pos;
@@ -681,7 +683,6 @@ impl<G: Game> App<G> {
             return;
         }
 
-        // Обновляем частицы и пули (не зависит от игры).
         self.update_particles(dt);
         self.update_projectiles(dt);
 
@@ -731,7 +732,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // egui
         let mut postfx = self.game.postfx();
 
         let mesh_names = self.renderer.mesh_names();
@@ -744,7 +744,6 @@ impl<G: Game> App<G> {
                 Some((mh.0.clone(), mat))
             });
 
-        // Список текстур (sorted by name) + размеры — для Assets-панели.
         let mut texture_list: Vec<(String, u32, u32)> = self
             .renderer
             .textures
@@ -825,9 +824,7 @@ impl<G: Game> App<G> {
             self.editor.state.undo.push(&self.world);
         }
 
-        // === Авто-unique материал при правке shared ===
         for (entity, name, mat) in self.editor.state.dirty_materials.drain(..) {
-            // Сколько объектов ссылаются на это имя?
             let user_count = self
                 .world
                 .entities()
@@ -841,8 +838,6 @@ impl<G: Game> App<G> {
                 .count();
 
             let final_name = if user_count > 1 {
-                // Материал shared — клонируем под уникальным именем
-                // и переключаем на него только этот entity.
                 let unique_name = format!("{}_uniq_{}", name, entity);
                 if !self.renderer.has_material(&unique_name) {
                     self.renderer.add_material(&unique_name, mat.clone());
@@ -1061,7 +1056,6 @@ impl<G: Game> App<G> {
             new_selected.push(new_e);
         }
 
-        // Уникализируем материалы всех дубликатов.
         for &ne in &new_selected {
             self.ensure_unique_material_for(ne);
         }
@@ -1111,7 +1105,6 @@ impl<G: Game> App<G> {
             _ => {}
         }
 
-        // Уникализируем материал — чтобы не зависеть от других объектов.
         self.ensure_unique_material_for(e);
 
         self.editor.state.select_single(e);
@@ -1229,13 +1222,13 @@ impl<G: Game> App<G> {
                         t.position[2] += offset.z;
                     }
                     snap.parent = None;
+                    snap.entity_id = None; // чтобы не было коллизий при возможном двухпроходном спавне
                     if let Some(ref mut n) = snap.name {
                         n.push_str("_paste");
                     }
                     let e = crate::scene::serialize::spawn_snapshot(&mut self.world, snap);
                     new_selected.push(e);
                 }
-                // Уникализируем материалы вставленных сущностей.
                 for &ne in &new_selected {
                     self.ensure_unique_material_for(ne);
                 }
@@ -1324,7 +1317,6 @@ impl<G: Game> App<G> {
                 self.world.insert(e, MeshHandle(mesh.to_string()));
                 self.world.insert(e, MaterialHandle(mat.to_string()));
 
-                // Уникализируем сразу.
                 self.ensure_unique_material_for(e);
 
                 self.editor.state.select_single(e);
@@ -1442,7 +1434,6 @@ impl<G: Game> App<G> {
                 );
                 let n = new_entities.len();
 
-                // Уникализируем материалы всех сущностей инстанса.
                 for &ne in &new_entities {
                     self.ensure_unique_material_for(ne);
                 }
@@ -1595,13 +1586,11 @@ pub fn run<G: Game>(mut game: G) {
 
             match event {
                 Event::WindowEvent { event, window_id } if window_id == app.window.id() => {
-                    let consumed = app.editor.on_window_event(&app.window, &event);
+                    let _consumed = app.editor.on_window_event(&app.window, &event);
 
                     let wants_keyboard = app.editor.egui_ctx.wants_keyboard_input();
 
                     let in_play = app.editor.state.play.active;
-                    let (px, py) = app.input.mouse_pos;
-                    let in_vp = in_play || app.in_viewport(px, py);
 
                     match event {
                         WindowEvent::CloseRequested => elwt.exit(),
@@ -1614,7 +1603,7 @@ pub fn run<G: Game>(mut game: G) {
                         }
 
                         WindowEvent::KeyboardInput { ref event, .. }
-                            if !consumed && !wants_keyboard =>
+                            if !wants_keyboard =>
                         {
                             app.input.on_key(event);
 
@@ -1630,25 +1619,34 @@ pub fn run<G: Game>(mut game: G) {
                             }
                         }
 
-                        WindowEvent::MouseInput { state, button, .. }
-                            if !consumed && in_vp && !in_play =>
-                        {
+                        WindowEvent::MouseInput { state, button, .. } if !in_play => {
                             app.input.on_mouse_button(button, state);
 
-                            if button == MouseButton::Left {
+                            let (mx, my) = app.input.mouse_pos;
+                            let in_vp = app.in_viewport(mx, my);
+
+                            if button == MouseButton::Left && in_vp {
                                 match state {
                                     ElementState::Pressed => {
                                         if app.editor.state.palette.active.is_some() {
-                                            if let Some(item) = app.editor.state.palette.active {
+                                            if let Some(item) =
+                                                app.editor.state.palette.active
+                                            {
                                                 if let Some(pos) =
                                                     app.editor.state.palette.preview_pos
                                                 {
-                                                    let ctrl =
-                                                        app.input.key_down(KeyCode::ControlLeft)
-                                                        || app.input
+                                                    let ctrl = app
+                                                        .input
+                                                        .key_down(KeyCode::ControlLeft)
+                                                        || app
+                                                            .input
                                                             .key_down(KeyCode::ControlRight);
                                                     let snap = ctrl
-                                                        || app.editor.state.palette.snap_to_grid;
+                                                        || app
+                                                            .editor
+                                                            .state
+                                                            .palette
+                                                            .snap_to_grid;
                                                     let step =
                                                         app.editor.state.palette.grid_step;
                                                     let final_pos = if snap {
@@ -1656,17 +1654,27 @@ pub fn run<G: Game>(mut game: G) {
                                                     } else {
                                                         pos
                                                     };
-                                                    app.spawn_palette_item(item, final_pos);
-                                                    if !app.editor.state.palette.keep_active {
-                                                        app.editor.state.palette.active = None;
+                                                    app.spawn_palette_item(
+                                                        item, final_pos,
+                                                    );
+                                                    if !app
+                                                        .editor
+                                                        .state
+                                                        .palette
+                                                        .keep_active
+                                                    {
+                                                        app.editor
+                                                            .state
+                                                            .palette
+                                                            .active = None;
                                                     }
                                                 }
                                             }
                                             app.mouse_press_pos = None;
                                         } else {
                                             let started_gizmo =
-                                                if !app.editor.state.selected.is_empty() {
-                                                    let (mx, my) = app.input.mouse_pos;
+                                                if !app.editor.state.selected.is_empty()
+                                                {
                                                     let ax = gizmo::pick_axis(
                                                         &app.world,
                                                         &app.editor.state.selected,
@@ -1676,10 +1684,13 @@ pub fn run<G: Game>(mut game: G) {
                                                         mx,
                                                         my,
                                                     );
+
                                                     if let Some(axis) = ax {
-                                                        let alt = app.input
+                                                        let alt = app
+                                                            .input
                                                             .key_down(KeyCode::AltLeft)
-                                                            || app.input
+                                                            || app
+                                                                .input
                                                                 .key_down(KeyCode::AltRight);
                                                         if alt {
                                                             app.editor
@@ -1689,24 +1700,32 @@ pub fn run<G: Game>(mut game: G) {
                                                             app.duplicate_selected();
                                                         }
 
-                                                        if let Some(drag) = gizmo::begin_drag(
-                                                            &app.world,
-                                                            &app.editor.state.selected,
-                                                            axis,
-                                                            app.editor.state.gizmo.mode,
-                                                            app.game.camera(),
-                                                            &app.renderer,
-                                                            mx,
-                                                            my,
-                                                        ) {
+                                                        if let Some(drag) =
+                                                            gizmo::begin_drag(
+                                                                &app.world,
+                                                                &app.editor
+                                                                    .state
+                                                                    .selected,
+                                                                axis,
+                                                                app.editor.state.gizmo.mode,
+                                                                app.game.camera(),
+                                                                &app.renderer,
+                                                                mx,
+                                                                my,
+                                                            )
+                                                        {
                                                             app.editor
                                                                 .state
                                                                 .undo
                                                                 .push_forced(&app.world);
-                                                            app.editor.state.gizmo.drag =
-                                                                Some(drag);
-                                                            app.editor.state.gizmo.hovered =
-                                                                Some(axis);
+                                                            app.editor
+                                                                .state
+                                                                .gizmo
+                                                                .drag = Some(drag);
+                                                            app.editor
+                                                                .state
+                                                                .gizmo
+                                                                .hovered = Some(axis);
                                                             true
                                                         } else {
                                                             false
@@ -1719,7 +1738,6 @@ pub fn run<G: Game>(mut game: G) {
                                                 };
 
                                             if !started_gizmo {
-                                                let (mx, my) = app.input.mouse_pos;
                                                 app.editor.state.box_select =
                                                     Some(BoxSelect {
                                                         start: (mx, my),
@@ -1732,12 +1750,13 @@ pub fn run<G: Game>(mut game: G) {
                                     ElementState::Released => {
                                         app.editor.state.gizmo.drag = None;
 
-                                        if let Some(bs) = app.editor.state.box_select.take() {
+                                        if let Some(bs) =
+                                            app.editor.state.box_select.take()
+                                        {
                                             let dx = bs.current.0 - bs.start.0;
                                             let dy = bs.current.1 - bs.start.1;
 
                                             if dx * dx + dy * dy < 9.0 {
-                                                let (mx, my) = app.input.mouse_pos;
                                                 app.try_pick((mx, my));
                                             } else {
                                                 let entities = crate::editor::picking::entities_in_screen_rect(
@@ -1747,23 +1766,37 @@ pub fn run<G: Game>(mut game: G) {
                                                     (bs.start.0, bs.start.1, bs.current.0, bs.current.1),
                                                 );
 
-                                                let shift = app.input.key_down(KeyCode::ShiftLeft)
-                                                    || app.input.key_down(KeyCode::ShiftRight);
+                                                let shift = app
+                                                    .input
+                                                    .key_down(KeyCode::ShiftLeft)
+                                                    || app
+                                                        .input
+                                                        .key_down(KeyCode::ShiftRight);
 
                                                 if shift {
                                                     for e in entities {
-                                                        if !app.editor.state.selected.contains(&e) {
-                                                            app.editor.state.selected.push(e);
+                                                        if !app
+                                                            .editor
+                                                            .state
+                                                            .selected
+                                                            .contains(&e)
+                                                        {
+                                                            app.editor
+                                                                .state
+                                                                .selected
+                                                                .push(e);
                                                         }
                                                     }
                                                 } else {
-                                                    app.editor.state.selected = entities;
+                                                    app.editor.state.selected =
+                                                        entities;
                                                 }
                                             }
 
                                             app.mouse_press_pos = None;
-                                        } else if let Some((px, py)) = app.mouse_press_pos.take() {
-                                            let (mx, my) = app.input.mouse_pos;
+                                        } else if let Some((px, py)) =
+                                            app.mouse_press_pos.take()
+                                        {
                                             let dx = mx - px;
                                             let dy = my - py;
                                             if dx * dx + dy * dy < 9.0 {
@@ -1781,10 +1814,12 @@ pub fn run<G: Game>(mut game: G) {
                                     }
                                     ElementState::Released => {
                                         let was_drag = app.rmb_dragged;
-                                        if !was_drag {
+                                        if !was_drag && in_vp {
                                             if let Some(t) = app.rmb_press_time {
                                                 if t.elapsed().as_millis() < 300 {
-                                                    app.editor.state.context_menu_pos =
+                                                    app.editor
+                                                        .state
+                                                        .context_menu_pos =
                                                         Some(app.input.mouse_pos);
                                                 }
                                             }
@@ -1797,11 +1832,12 @@ pub fn run<G: Game>(mut game: G) {
                             }
                         }
 
-                        WindowEvent::CursorMoved { position, .. } if !consumed => {
+                        WindowEvent::CursorMoved { position, .. } => {
                             app.input
                                 .on_mouse_move(position.x as f32, position.y as f32);
 
                             let (mx, my) = app.input.mouse_pos;
+                            let in_vp = app.in_viewport(mx, my);
 
                             if let Some(bs) = &mut app.editor.state.box_select {
                                 bs.current = (mx, my);
@@ -1824,9 +1860,15 @@ pub fn run<G: Game>(mut game: G) {
                                 && !app.editor.state.selected.is_empty()
                                 && app.editor.state.box_select.is_none()
                             {
-                                if let Some(drag) = app.editor.state.gizmo.drag.clone() {
-                                    let snap = app.input.key_down(KeyCode::ControlLeft)
-                                        || app.input.key_down(KeyCode::ControlRight)
+                                if let Some(drag) =
+                                    app.editor.state.gizmo.drag.clone()
+                                {
+                                    let snap = app
+                                        .input
+                                        .key_down(KeyCode::ControlLeft)
+                                        || app
+                                            .input
+                                            .key_down(KeyCode::ControlRight)
                                         || app.editor.state.gizmo.snap_enabled;
                                     gizmo::apply_drag_with_mode(
                                         &mut app.world,
@@ -1838,8 +1880,8 @@ pub fn run<G: Game>(mut game: G) {
                                         mx,
                                         my,
                                     );
-                                } else if app.in_viewport(mx, my) {
-                                    app.editor.state.gizmo.hovered = gizmo::pick_axis(
+                                } else if in_vp {
+                                    let h = gizmo::pick_axis(
                                         &app.world,
                                         &app.editor.state.selected,
                                         app.game.camera(),
@@ -1848,6 +1890,8 @@ pub fn run<G: Game>(mut game: G) {
                                         mx,
                                         my,
                                     );
+
+                                    app.editor.state.gizmo.hovered = h;
                                 } else {
                                     app.editor.state.gizmo.hovered = None;
                                 }
@@ -1861,14 +1905,17 @@ pub fn run<G: Game>(mut game: G) {
                             app.input.on_cursor_enter();
                         }
 
-                        WindowEvent::MouseWheel { delta, .. }
-                            if !consumed && in_vp && !in_play =>
-                        {
-                            let d = match delta {
-                                MouseScrollDelta::LineDelta(_, y) => y,
-                                MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
-                            };
-                            app.input.on_scroll(d);
+                        WindowEvent::MouseWheel { delta, .. } if !in_play => {
+                            let (mx, my) = app.input.mouse_pos;
+                            if app.in_viewport(mx, my) {
+                                let d = match delta {
+                                    MouseScrollDelta::LineDelta(_, y) => y,
+                                    MouseScrollDelta::PixelDelta(p) => {
+                                        p.y as f32 / 50.0
+                                    }
+                                };
+                                app.input.on_scroll(d);
+                            }
                         }
 
                         WindowEvent::RedrawRequested => {

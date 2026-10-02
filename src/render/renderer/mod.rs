@@ -889,8 +889,6 @@ impl Renderer {
         let ibl = ibl::IblResources::load_or_default(&device, &queue, "assets/sky.hdr")
             .expect("IBL init failed");
 
-        // skybox_bind_group зависит только от camera_buffer + env cubemap,
-        // которые не пересоздаются при resize → создаём один раз.
         let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skybox_bind_group"),
             layout: &skybox_layout,
@@ -932,12 +930,22 @@ impl Renderer {
         )
         .expect("gbuffer pipeline (double-sided)");
 
-        let shadow_pipeline =
-            make_shadow_pipeline(&device, &shadow_pass_layout, Some(wgpu::Face::Back))
-                .expect("shadow pipeline");
-        let shadow_pipeline_double_sided =
-            make_shadow_pipeline(&device, &shadow_pass_layout, None)
-                .expect("shadow pipeline (double-sided)");
+        // Shadow pipeline теперь получает material_layout вторым
+        // bind group — из него читается skeleton для skinning.
+        let shadow_pipeline = make_shadow_pipeline(
+            &device,
+            &shadow_pass_layout,
+            &material_layout,
+            Some(wgpu::Face::Back),
+        )
+        .expect("shadow pipeline");
+        let shadow_pipeline_double_sided = make_shadow_pipeline(
+            &device,
+            &shadow_pass_layout,
+            &material_layout,
+            None,
+        )
+        .expect("shadow pipeline (double-sided)");
 
         let line_pipeline =
             make_line_pipeline(&device, &camera_layout).expect("line pipeline");
@@ -1187,10 +1195,12 @@ impl Renderer {
                     &self.device, &self.camera_layout, &self.material_layout, None,
                 )?,
                 shadow: make_shadow_pipeline(
-                    &self.device, &self.shadow_pass_layout, Some(wgpu::Face::Back),
+                    &self.device, &self.shadow_pass_layout,
+                    &self.material_layout, Some(wgpu::Face::Back),
                 )?,
                 shadow_double_sided: make_shadow_pipeline(
-                    &self.device, &self.shadow_pass_layout, None,
+                    &self.device, &self.shadow_pass_layout,
+                    &self.material_layout, None,
                 )?,
                 line: make_line_pipeline(&self.device, &self.camera_layout)?,
                 particles: make_particles_pipeline(&self.device, &self.camera_layout)?,
@@ -1289,23 +1299,16 @@ impl Renderer {
         self.materials.names()
     }
 
-    /// Список имён загруженных текстур, отсортированный.
     pub fn texture_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.textures.keys().cloned().collect();
         v.sort();
         v
     }
 
-    /// Размеры текстуры в пикселях.
     pub fn texture_size(&self, name: &str) -> Option<(u32, u32)> {
         self.textures.get(name).map(|t| t.size)
     }
 
-    /// Удалить текстуру из реестра.
-    /// Возвращает `true`, если текстура существовала.
-    ///
-    /// Материалы, ссылающиеся на неё через `Option<String>`, при следующем
-    /// `add_material` / `update_material` автоматически откатятся на fallback.
     pub fn remove_texture(&mut self, name: &str) -> bool {
         self.textures.remove(name).is_some()
     }
@@ -1832,6 +1835,10 @@ impl Renderer {
         self.queue
             .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox_params));
 
+        // SSAO: шум тайлится каждые 4 пикселя по обеим осям.
+        // shader делает `fract(uv * tiling)`, поэтому tiling = screen_size / 4.
+        let noise_tile_x = self.config.width as f32 / 4.0;
+        let noise_tile_y = self.config.height as f32 / 4.0;
         let ssao_data = SsaoUniform {
             proj_scale: [
                 proj.x_axis.x,
@@ -1839,7 +1846,7 @@ impl Renderer {
                 camera.far,
                 postfx.ssao_radius,
             ],
-            params: [0.025, postfx.ssao_strength, 1.0 / 4.0, 1.0 / 4.0],
+            params: [0.025, postfx.ssao_strength, noise_tile_x, noise_tile_y],
         };
         self.queue
             .write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
@@ -2059,6 +2066,7 @@ fn make_gbuffer_pipeline(
 fn make_shadow_pipeline(
     device: &wgpu::Device,
     shadow_pass_layout: &wgpu::BindGroupLayout,
+    material_layout: &wgpu::BindGroupLayout,
     cull: Option<wgpu::Face>,
 ) -> Result<wgpu::RenderPipeline, String> {
     let src = crate::shader_source!("src/render/shadow.wgsl")?;
@@ -2066,9 +2074,11 @@ fn make_shadow_pipeline(
         label: Some("shadow_shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
     });
+    // group 0 = shadow_pass_layout (dynamic Lights), group 1 = material_layout
+    // (используется только skeleton для skinning).
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("shadow_pipeline_layout"),
-        bind_group_layouts: &[shadow_pass_layout],
+        bind_group_layouts: &[shadow_pass_layout, material_layout],
         push_constant_ranges: &[],
     });
     Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2459,7 +2469,8 @@ fn make_tonemap_pipeline(
             module: &shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
-                // tonemap всегда пишет в LDR (Rgba8UnormSrgb), не в swap.
+                // tonemap всегда пишет в LDR (Rgba8UnormSrgb).
+                // sRGB-энкодинг делает GPU — в шейдере pow(1/2.2) НЕ применяется.
                 format: LDR_FORMAT,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,

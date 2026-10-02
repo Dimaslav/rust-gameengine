@@ -74,8 +74,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     hdr = hdr * params.values.y;
 
-    let mapped = aces(hdr);
-    var out_rgb = pow(mapped, vec3<f32>(1.0 / 2.2));
+    // ACES tonemap → linear [0, 1].
+    // sRGB-энкодинг делает сам GPU (LDR_FORMAT = Rgba8UnormSrgb).
+    var out_rgb = aces(hdr);
 
     let vignette = params.effects.x;
     if (vignette > 0.0001) {

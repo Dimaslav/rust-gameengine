@@ -1,6 +1,8 @@
 //! Gizmo: 3D-манипулятор для translate / rotate / scale.
 //!
-//! Поддерживает single- и multi-select, а также Ctrl-snap.
+//! Hit-test делается в **экранном пространстве**: положение каждой оси
+//! проецируется через view-projection в пиксели, и расстояние до
+//! соответствующего отрезка сравнивается с порогом в пикселях.
 
 use glam::{Quat, Vec3};
 
@@ -8,7 +10,7 @@ use crate::ecs::{Entity, World};
 use crate::game::components::{MeshHandle, Transform};
 use crate::render::{Camera3D, LineBatch, Renderer};
 
-const PIXEL_THRESHOLD: f32 = 10.0;
+const PIXEL_THRESHOLD: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GizmoMode {
@@ -61,7 +63,6 @@ pub struct GizmoState {
     pub mode: GizmoMode,
     pub hovered: Option<Axis>,
     pub drag: Option<GizmoDrag>,
-    /// Если true — snap работает без Ctrl. Всё равно можно форсировать Ctrl.
     pub snap_enabled: bool,
 }
 
@@ -172,8 +173,8 @@ pub fn pick_axis(
     let view_proj = camera.view_projection();
     let screen_w = renderer.size.width as f32;
     let screen_h = renderer.size.height as f32;
-    let m = (sx, sy);
 
+    let m = (sx, sy);
     let mut best: Option<(Axis, f32)> = None;
 
     for axis in [Axis::X, Axis::Y, Axis::Z] {
@@ -197,13 +198,15 @@ pub fn pick_axis(
             }
             GizmoMode::Rotate => {
                 let (t1, t2) = ring_basis(a);
-                let segs = 24usize;
+                let segs = 32usize;
                 let mut best_d = f32::INFINITY;
                 let mut prev: Option<(f32, f32)> = None;
                 for i in 0..=segs {
                     let ang = i as f32 / segs as f32 * std::f32::consts::TAU;
                     let world_p = center + (t1 * ang.cos() + t2 * ang.sin()) * scale;
-                    let p = match project_to_screen(&view_proj, screen_w, screen_h, world_p) {
+                    let p = match project_to_screen(
+                        &view_proj, screen_w, screen_h, world_p,
+                    ) {
                         Some(p) => p,
                         None => { prev = None; continue; }
                     };
@@ -236,29 +239,48 @@ fn ring_basis(normal: Vec3) -> (Vec3, Vec3) {
 // Математика
 // ============================================================
 
-fn closest_point_on_axis(ro: Vec3, rd: Vec3, center: Vec3, axis: Vec3) -> Option<(Vec3, f32)> {
-    let rd = rd.normalize_or_zero();
-    let axis = axis.normalize_or_zero();
-
+fn closest_point_on_axis(
+    ro: Vec3,
+    rd: Vec3,
+    center: Vec3,
+    axis: Vec3,
+) -> Option<(Vec3, f32)> {
+    let d1 = rd.normalize_or_zero();
+    let d2 = axis.normalize_or_zero();
+    if d1.length_squared() < 1e-6 || d2.length_squared() < 1e-6 {
+        return None;
+    }
     let w0 = ro - center;
-    let a = rd.dot(rd);
-    let b = rd.dot(axis);
-    let c = axis.dot(axis);
-    let d = rd.dot(w0);
-    let e = axis.dot(w0);
+
+    let a = d1.dot(d1);
+    let b = d1.dot(d2);
+    let c = d2.dot(d2);
+    let d = d1.dot(w0);
+    let e = d2.dot(w0);
 
     let denom = a * c - b * b;
-    if denom.abs() < 1e-6 { return None; }
+    if denom.abs() < 1e-6 {
+        return None;
+    }
 
     let ray_t = (b * e - c * d) / denom;
     let axis_t = (a * e - b * d) / denom;
-    if ray_t < 0.0 { return None; }
 
-    Some((center + axis * axis_t, axis_t))
+    if ray_t < 0.0 {
+        return None;
+    }
+
+    Some((center + d2 * axis_t, axis_t))
 }
 
-fn intersect_plane(ro: Vec3, rd: Vec3, center: Vec3, normal: Vec3) -> Option<(Vec3, f32)> {
+fn intersect_plane(
+    ro: Vec3,
+    rd: Vec3,
+    center: Vec3,
+    normal: Vec3,
+) -> Option<(Vec3, f32)> {
     let n = normal.normalize_or_zero();
+    if n.length_squared() < 1e-6 { return None; }
     let denom = n.dot(rd);
     if denom.abs() < 1e-6 { return None; }
     let t = (center - ro).dot(n) / denom;
@@ -306,7 +328,13 @@ pub fn draw_gizmo(
     }
 }
 
-fn draw_ring(batch: &mut LineBatch, center: Vec3, normal: Vec3, radius: f32, color: [f32; 4]) {
+fn draw_ring(
+    batch: &mut LineBatch,
+    center: Vec3,
+    normal: Vec3,
+    radius: f32,
+    color: [f32; 4],
+) {
     let (t1, t2) = ring_basis(normal);
     let segs = 32;
     for i in 0..segs {
@@ -368,7 +396,9 @@ pub fn begin_drag(
         GizmoMode::Translate | GizmoMode::Scale => {
             closest_point_on_axis(origin, dir, center, a)?
         }
-        GizmoMode::Rotate => intersect_plane(origin, dir, center, a)?,
+        GizmoMode::Rotate => {
+            intersect_plane(origin, dir, center, a)?
+        }
     };
 
     let start_states: Vec<(Entity, Transform)> = selected
@@ -438,7 +468,6 @@ pub fn apply_drag_with_mode(
                 world.insert(*e, t);
             }
         }
-
         GizmoMode::Scale => {
             let Some((point, _)) = closest_point_on_axis(origin, dir, center, axis) else {
                 return;
@@ -461,7 +490,6 @@ pub fn apply_drag_with_mode(
                 world.insert(*e, t);
             }
         }
-
         GizmoMode::Rotate => {
             let Some((point, _)) = intersect_plane(origin, dir, center, axis) else {
                 return;

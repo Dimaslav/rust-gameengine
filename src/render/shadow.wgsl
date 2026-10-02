@@ -1,5 +1,9 @@
 // Shadow map pass: только глубина, без fragment shader.
 // Используется и для CSM (ortho), и для cube shadow (6 faces).
+//
+// Bind groups: 0 = Lights (dynamic offset), 1 = material_layout
+// (из которого берётся только skeleton). Остальные биндинги material_layout
+// в шейдере не используются — wgpu позволяет держать «лишние» entries.
 
 struct Lights {
     cascade_vp:      array<mat4x4<f32>, 3>,
@@ -16,7 +20,12 @@ struct Lights {
     cube_shadow_pos: array<vec4<f32>, 4>,
 };
 
+struct Skeleton {
+    joints: array<mat4x4<f32>, 64>,
+};
+
 @group(0) @binding(0) var<uniform> lights: Lights;
+@group(1) @binding(6) var<uniform> skeleton: Skeleton;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -39,9 +48,33 @@ struct InstanceInput {
     @location(14) inst_color: vec4<f32>,
 };
 
+fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
+    let w_sum = weights.x + weights.y + weights.z + weights.w;
+    if (w_sum < 0.0001) {
+        return mat4x4<f32>(
+            vec4<f32>(1.0, 0.0, 0.0, 0.0),
+            vec4<f32>(0.0, 1.0, 0.0, 0.0),
+            vec4<f32>(0.0, 0.0, 1.0, 0.0),
+            vec4<f32>(0.0, 0.0, 0.0, 1.0),
+        );
+    }
+    return weights.x * skeleton.joints[joints.x]
+         + weights.y * skeleton.joints[joints.y]
+         + weights.z * skeleton.joints[joints.z]
+         + weights.w * skeleton.joints[joints.w];
+}
+
 @vertex
 fn vs_main(in: VertexInput, inst: InstanceInput) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(inst.m0, inst.m1, inst.m2, inst.m3);
-    let world = model * vec4<f32>(in.position, 1.0);
+
+    var local_pos = vec4<f32>(in.position, 1.0);
+    let w_sum = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
+    if (w_sum > 0.0001) {
+        let sk = skin_matrix(in.joints, in.weights);
+        local_pos = sk * local_pos;
+    }
+
+    let world = model * local_pos;
     return lights.light_view_proj * world;
 }

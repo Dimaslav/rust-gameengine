@@ -43,7 +43,14 @@ impl System for RotationSystem {
         for e in entities {
             let spinner = world.get::<Spinner>(e).copied();
             if let (Some(s), Some(t)) = (spinner, world.get_mut::<Transform>(e)) {
-                let dq = Quat::from_axis_angle(s.axis.normalize_or_zero(), s.speed * dt);
+                // Защита от Vec3::ZERO: normalize_or_zero вернёт ZERO,
+                // а Quat::from_axis_angle(ZERO, _) даст NaN → Transform
+                // сломается, объект исчезнет из кадра.
+                let axis = s.axis.normalize_or_zero();
+                if axis.length_squared() < 1e-6 {
+                    continue;
+                }
+                let dq = Quat::from_axis_angle(axis, s.speed * dt);
                 t.rotation = dq * t.rotation;
             }
         }
@@ -241,9 +248,9 @@ impl Game for DemoGame {
     ) -> bool {
         use winit::keyboard::KeyCode;
 
-        if input.key_pressed(KeyCode::Escape) && !input.play_mode {
-            return false;
-        }
+        // Escape-выход теперь полностью на App: см. App::redraw.
+        // Здесь его нет — иначе Escape, закрывающий кисть/меню,
+        // одновременно закрывал бы приложение.
 
         if input.key_pressed(KeyCode::F12) {
             match renderer.reload_shaders() {
@@ -547,7 +554,6 @@ impl Game for DemoGame {
 
         let entities: Vec<_> = world.entities().to_vec();
         for e in entities {
-            // Невидимые — пропускаем.
             if let Some(v) = world.get::<Visible>(e) {
                 if !v.0 {
                     continue;
