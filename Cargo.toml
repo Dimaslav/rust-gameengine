@@ -11,7 +11,13 @@ bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.27", features = ["bytemuck", "serde"] }
 log = "0.4"
 env_logger = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+
+# 14 форматов картинок + HDR/EXR для IBL.
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "gif", "webp", "bmp", "tiff", "tga", "dds",
+    "hdr", "exr", "ico", "pnm", "qoi", "ff"
+] }
+
 anyhow = "1"
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,3 +26,9 @@ ron = "0.12"
 egui = "0.28"
 egui-wgpu = "0.28"
 egui-winit = "0.28"
+
+# Аудио (процедурный, без внешних ассетов).
+rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
+
+# Нативный диалог выбора файлов.
+rfd = "0.17.2"

@@ -5,7 +5,7 @@ mod passes;
 mod size_dep;
 
 pub use gpu_types::{
-    GpuLight, GpuPointLight, MeshDraw, PostFx, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
+    GpuLight, GpuPointLight, MeshDraw, ParticleInstance, PostFx, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
 };
 
 use std::collections::HashMap;
@@ -51,6 +51,7 @@ pub struct Renderer {
     tonemap_layout: wgpu::BindGroupLayout,
     debug_layout: wgpu::BindGroupLayout,
     debug_depth_layout: wgpu::BindGroupLayout,
+    skybox_layout: wgpu::BindGroupLayout,
 
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -87,6 +88,7 @@ pub struct Renderer {
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_pipeline_double_sided: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    particles_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     transparent_pipeline_double_sided: wgpu::RenderPipeline,
     lighting_pipeline: wgpu::RenderPipeline,
@@ -95,6 +97,8 @@ pub struct Renderer {
     bright_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
+    fxaa_pipeline: wgpu::RenderPipeline,
+    skybox_pipeline: wgpu::RenderPipeline,
 
     debug2d_pipeline: wgpu::RenderPipeline,
     debug_depth_pipeline: wgpu::RenderPipeline,
@@ -105,6 +109,9 @@ pub struct Renderer {
     bright_uniform: wgpu::Buffer,
     tonemap_uniform: wgpu::Buffer,
     ssao_uniform: wgpu::Buffer,
+
+    skybox_uniform: wgpu::Buffer,
+    skybox_bind_group: wgpu::BindGroup,
 
     _ssao_noise_tex: wgpu::Texture,
     ssao_noise_view: wgpu::TextureView,
@@ -117,10 +124,16 @@ pub struct Renderer {
     instance_capacity: u64,
     pub line_buffer: LineBuffer,
 
+    particles_instance_buffer: wgpu::Buffer,
+    particles_instance_capacity: u64,
+
     pub meshes: HashMap<String, Mesh>,
     pub materials: MaterialRegistry,
     pub textures: HashMap<String, Texture>,
     default_material: Material,
+
+    /// Время для анимации film grain.
+    skybox_time: f32,
 }
 
 impl Renderer {
@@ -160,9 +173,6 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
-        // FIFO — жёсткий vsync, ровные интервалы кадров.
-        // AutoVsync на Windows часто даёт jitter из-за драйверных
-        // подвыборок — это видно как «дёрганье» камеры.
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -650,6 +660,48 @@ impl Renderer {
             ],
         });
 
+        let skybox_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skybox_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         // ============================================================
         // Uniforms
         // ============================================================
@@ -726,13 +778,19 @@ impl Renderer {
         });
         let tonemap_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tonemap_uniform"),
-            size: std::mem::size_of::<PostParams>() as u64,
+            size: std::mem::size_of::<TonemapParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let ssao_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssao_uniform"),
             size: std::mem::size_of::<SsaoUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let skybox_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skybox_uniform"),
+            size: std::mem::size_of::<SkyboxParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -831,6 +889,31 @@ impl Renderer {
         let ibl = ibl::IblResources::load_or_default(&device, &queue, "assets/sky.hdr")
             .expect("IBL init failed");
 
+        // skybox_bind_group зависит только от camera_buffer + env cubemap,
+        // которые не пересоздаются при resize → создаём один раз.
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skybox_bind_group"),
+            layout: &skybox_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ibl.env_cube_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&ibl.env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: skybox_uniform.as_entire_binding(),
+                },
+            ],
+        });
+
         // ============================================================
         // Pipelines
         // ============================================================
@@ -858,6 +941,9 @@ impl Renderer {
 
         let line_pipeline =
             make_line_pipeline(&device, &camera_layout).expect("line pipeline");
+
+        let particles_pipeline =
+            make_particles_pipeline(&device, &camera_layout).expect("particles pipeline");
 
         let transparent_pipeline = make_transparent_pipeline(
             &device,
@@ -890,6 +976,10 @@ impl Renderer {
         let (debug2d_pipeline, debug_depth_pipeline) =
             make_debug_pipelines(&device, &config, &debug_layout, &debug_depth_layout)
                 .expect("debug pipelines");
+        let fxaa_pipeline =
+            make_fxaa_pipeline(&device, &config, &debug_layout).expect("fxaa pipeline");
+        let skybox_pipeline =
+            make_skybox_pipeline(&device, &skybox_layout).expect("skybox pipeline");
 
         // ============================================================
         // Noise
@@ -988,6 +1078,14 @@ impl Renderer {
 
         let line_buffer = LineBuffer::new(&device, 4096);
 
+        const INITIAL_PARTICLES_CAPACITY: u64 = 2048;
+        let particles_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("particles_instance_buffer"),
+            size: INITIAL_PARTICLES_CAPACITY * std::mem::size_of::<ParticleInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             surface,
             device,
@@ -1006,6 +1104,7 @@ impl Renderer {
             tonemap_layout,
             debug_layout,
             debug_depth_layout,
+            skybox_layout,
             camera_buffer,
             camera_bind_group,
             lights_buffer,
@@ -1032,6 +1131,7 @@ impl Renderer {
             shadow_pipeline,
             shadow_pipeline_double_sided,
             line_pipeline,
+            particles_pipeline,
             transparent_pipeline,
             transparent_pipeline_double_sided,
             lighting_pipeline,
@@ -1040,6 +1140,8 @@ impl Renderer {
             bright_pipeline,
             blur_pipeline,
             tonemap_pipeline,
+            fxaa_pipeline,
+            skybox_pipeline,
             debug2d_pipeline,
             debug_depth_pipeline,
             csm_debug_bind_group,
@@ -1048,6 +1150,8 @@ impl Renderer {
             bright_uniform,
             tonemap_uniform,
             ssao_uniform,
+            skybox_uniform,
+            skybox_bind_group,
             _ssao_noise_tex: ssao_noise_tex,
             ssao_noise_view,
             ibl: Some(ibl),
@@ -1055,10 +1159,13 @@ impl Renderer {
             instance_buffer,
             instance_capacity: INITIAL_INSTANCE_CAPACITY,
             line_buffer,
+            particles_instance_buffer,
+            particles_instance_capacity: INITIAL_PARTICLES_CAPACITY,
             meshes: HashMap::new(),
             materials: MaterialRegistry::new(),
             textures: HashMap::new(),
             default_material,
+            skybox_time: 0.0,
         }
     }
 
@@ -1086,6 +1193,7 @@ impl Renderer {
                     &self.device, &self.shadow_pass_layout, None,
                 )?,
                 line: make_line_pipeline(&self.device, &self.camera_layout)?,
+                particles: make_particles_pipeline(&self.device, &self.camera_layout)?,
                 transparent: make_transparent_pipeline(
                     &self.device,
                     &self.camera_layout,
@@ -1115,6 +1223,12 @@ impl Renderer {
                     &self.device, &self.config,
                     &self.debug_layout, &self.debug_depth_layout,
                 )?,
+                fxaa: make_fxaa_pipeline(
+                    &self.device, &self.config, &self.debug_layout,
+                )?,
+                skybox: make_skybox_pipeline(
+                    &self.device, &self.skybox_layout,
+                )?,
             })
         };
 
@@ -1135,6 +1249,7 @@ impl Renderer {
         self.shadow_pipeline = built.shadow;
         self.shadow_pipeline_double_sided = built.shadow_double_sided;
         self.line_pipeline = built.line;
+        self.particles_pipeline = built.particles;
         self.transparent_pipeline = built.transparent;
         self.transparent_pipeline_double_sided = built.transparent_double_sided;
         self.lighting_pipeline = built.lighting;
@@ -1145,6 +1260,8 @@ impl Renderer {
         self.tonemap_pipeline = built.tonemap;
         self.debug2d_pipeline = built.debug.0;
         self.debug_depth_pipeline = built.debug.1;
+        self.fxaa_pipeline = built.fxaa;
+        self.skybox_pipeline = built.skybox;
 
         Ok(())
     }
@@ -1170,6 +1287,27 @@ impl Renderer {
 
     pub fn material_names(&self) -> Vec<String> {
         self.materials.names()
+    }
+
+    /// Список имён загруженных текстур, отсортированный.
+    pub fn texture_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.textures.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Размеры текстуры в пикселях.
+    pub fn texture_size(&self, name: &str) -> Option<(u32, u32)> {
+        self.textures.get(name).map(|t| t.size)
+    }
+
+    /// Удалить текстуру из реестра.
+    /// Возвращает `true`, если текстура существовала.
+    ///
+    /// Материалы, ссылающиеся на неё через `Option<String>`, при следующем
+    /// `add_material` / `update_material` автоматически откатятся на fallback.
+    pub fn remove_texture(&mut self, name: &str) -> bool {
+        self.textures.remove(name).is_some()
     }
 
     pub fn load_texture_rgba(
@@ -1479,6 +1617,20 @@ impl Renderer {
         self.instance_capacity = new_cap;
     }
 
+    fn ensure_particles_capacity(&mut self, needed: u64) {
+        if needed <= self.particles_instance_capacity {
+            return;
+        }
+        let new_cap = (self.particles_instance_capacity * 2).max(needed);
+        self.particles_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("particles_instance_buffer"),
+            size: new_cap * std::mem::size_of::<ParticleInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.particles_instance_capacity = new_cap;
+    }
+
     // ============================================================
     // Render
     // ============================================================
@@ -1488,6 +1640,7 @@ impl Renderer {
         &mut self,
         camera: &Camera3D,
         draws: &[MeshDraw],
+        particle_instances: &[ParticleInstance],
         line_vertices: &[LineVertex],
         dir_lights: &[GpuLight],
         point_lights: &[GpuPointLight],
@@ -1495,6 +1648,8 @@ impl Renderer {
         postfx: PostFx,
         egui_data: Option<EguiFrameData<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
+        self.skybox_time += 1.0 / 60.0;
+
         let view = camera.view_matrix();
         let proj = camera.proj_matrix();
         let vp = proj * view;
@@ -1545,6 +1700,19 @@ impl Renderer {
         let ambient_color = [ambient[0], ambient[1], ambient[2], 1.0];
         let misc = [postfx.ibl_strength, 0.0, 0.0, 0.0];
 
+        let fog_params = [
+            postfx.fog_density,
+            postfx.fog_height_base,
+            postfx.fog_height_falloff,
+            0.0,
+        ];
+        let fog_color = [
+            postfx.fog_color[0],
+            postfx.fog_color[1],
+            postfx.fog_color[2],
+            0.0,
+        ];
+
         let lights_uniform = LightsUniform {
             cascade_vp: csm_packed,
             cascade_splits: [splits[1], splits[2], splits[3], 0.0],
@@ -1552,6 +1720,8 @@ impl Renderer {
             counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
             light_view_proj: cascade_vp[0].to_cols_array_2d(),
             misc,
+            fog_params,
+            fog_color,
             _pad1: [0.0; 4],
             dir_lights: dir_packed,
             point_lights: pt_packed,
@@ -1574,6 +1744,8 @@ impl Renderer {
                     counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
                     light_view_proj: mat.to_cols_array_2d(),
                     misc,
+                    fog_params,
+                    fog_color,
                     _pad1: [0.0; 4],
                     dir_lights: dir_packed,
                     point_lights: pt_packed,
@@ -1631,11 +1803,34 @@ impl Renderer {
         self.queue
             .write_buffer(&self.bloom_uniform_v, 0, bytemuck::bytes_of(&blur_v_params));
 
-        let tonemap_params = PostParams {
-            values: [postfx.bloom_strength, postfx.exposure, 0.0, 0.0],
+        let tonemap_params = TonemapParams {
+            values: [postfx.bloom_strength, postfx.exposure, self.skybox_time, 0.0],
+            effects: [
+                postfx.vignette_strength,
+                postfx.film_grain,
+                postfx.chromatic_aberration,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.tonemap_uniform, 0, bytemuck::bytes_of(&tonemap_params));
+
+        let skybox_params = SkyboxParams {
+            values: [
+                postfx.ibl_strength.max(0.01),
+                postfx.fog_density,
+                postfx.fog_height_base,
+                postfx.fog_height_falloff,
+            ],
+            fog_color: [
+                postfx.fog_color[0],
+                postfx.fog_color[1],
+                postfx.fog_color[2],
+                0.0,
+            ],
+        };
+        self.queue
+            .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox_params));
 
         let ssao_data = SsaoUniform {
             proj_scale: [
@@ -1654,6 +1849,17 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.sd.debug_uniform, 0, bytemuck::bytes_of(&debug_params));
+
+        let fxaa_params = FxaaParams {
+            values: [
+                1.0 / self.config.width as f32,
+                1.0 / self.config.height as f32,
+                postfx.fxaa_strength,
+                0.0,
+            ],
+        };
+        self.queue
+            .write_buffer(&self.sd.fxaa_uniform, 0, bytemuck::bytes_of(&fxaa_params));
 
         // === Instances ===
         let total_instances: u64 = draws.iter().map(|d| d.instances.len() as u64).sum();
@@ -1678,6 +1884,16 @@ impl Renderer {
         self.line_buffer
             .upload(&self.device, &self.queue, line_vertices);
 
+        // === Particle instances ===
+        if !particle_instances.is_empty() {
+            self.ensure_particles_capacity(particle_instances.len() as u64);
+            self.queue.write_buffer(
+                &self.particles_instance_buffer,
+                0,
+                bytemuck::cast_slice(particle_instances),
+            );
+        }
+
         // === Frame ===
         let frame = self.surface.get_current_texture()?;
         let swap_view = frame
@@ -1697,7 +1913,9 @@ impl Renderer {
         passes::encode_ssao_pass(self, &mut encoder);
         passes::encode_ssao_blur_pass(self, &mut encoder);
         passes::encode_lighting_pass(self, &mut encoder);
+        passes::encode_skybox_pass(self, &mut encoder);
         passes::encode_forward_pass(self, &mut encoder, line_vertices);
+        passes::encode_particles_pass(self, &mut encoder, particle_instances.len() as u32);
         passes::encode_transparent_pass(self, &mut encoder, draws);
 
         if postfx.debug_view.is_debug() {
@@ -1757,6 +1975,7 @@ struct BuiltPipelines {
     shadow: wgpu::RenderPipeline,
     shadow_double_sided: wgpu::RenderPipeline,
     line: wgpu::RenderPipeline,
+    particles: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     transparent_double_sided: wgpu::RenderPipeline,
     lighting: wgpu::RenderPipeline,
@@ -1764,6 +1983,8 @@ struct BuiltPipelines {
     bloom: (wgpu::RenderPipeline, wgpu::RenderPipeline),
     tonemap: wgpu::RenderPipeline,
     debug: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    fxaa: wgpu::RenderPipeline,
+    skybox: wgpu::RenderPipeline,
 }
 
 // ============================================================
@@ -1923,6 +2144,57 @@ fn make_line_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    }))
+}
+
+fn make_particles_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/particles.wgsl")?;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("particles_shader"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("particles_pipeline_layout"),
+        bind_group_layouts: &[camera_layout],
+        push_constant_ranges: &[],
+    });
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("particles_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[ParticleInstance::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -2161,7 +2433,7 @@ fn make_bloom_pipelines(
 
 fn make_tonemap_pipeline(
     device: &wgpu::Device,
-    config: &wgpu::SurfaceConfiguration,
+    _config: &wgpu::SurfaceConfiguration,
     tonemap_layout: &wgpu::BindGroupLayout,
 ) -> Result<wgpu::RenderPipeline, String> {
     let src = crate::shader_source!("src/render/tonemap.wgsl")?;
@@ -2187,6 +2459,48 @@ fn make_tonemap_pipeline(
             module: &shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
+                // tonemap всегда пишет в LDR (Rgba8UnormSrgb), не в swap.
+                format: LDR_FORMAT,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    }))
+}
+
+fn make_fxaa_pipeline(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    fxaa_layout: &wgpu::BindGroupLayout,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/fxaa.wgsl")?;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("fxaa_shader"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("fxaa_pipeline_layout"),
+        bind_group_layouts: &[fxaa_layout],
+        push_constant_ranges: &[],
+    });
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("fxaa_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
                 format: config.format,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
@@ -2195,6 +2509,52 @@ fn make_tonemap_pipeline(
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    }))
+}
+
+fn make_skybox_pipeline(
+    device: &wgpu::Device,
+    skybox_layout: &wgpu::BindGroupLayout,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/skybox.wgsl")?;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("skybox_shader"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("skybox_pipeline_layout"),
+        bind_group_layouts: &[skybox_layout],
+        push_constant_ranges: &[],
+    });
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("skybox_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Equal,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     }))

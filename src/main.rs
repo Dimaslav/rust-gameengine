@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
-    AnimationPlayer, MaterialHandle, MeshHandle, Name, Parent, SkeletonHandle, Spinner,
-    Transform, Velocity,
+    AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
+    SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
 };
 use glam::{Quat, Vec3};
 use render::{
@@ -120,6 +120,14 @@ impl DemoGame {
                 ssao_radius: 0.6,
                 ibl_strength: 0.35,
                 debug_view: DebugView::Final,
+                fxaa_strength: 1.0,
+                fog_color: [0.55, 0.62, 0.72],
+                fog_density: 0.0,
+                fog_height_base: 0.0,
+                fog_height_falloff: 0.05,
+                vignette_strength: 0.0,
+                film_grain: 0.0,
+                chromatic_aberration: 0.0,
             },
             spawned: false,
             dragging: false,
@@ -139,6 +147,10 @@ impl Game for DemoGame {
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
         renderer.add_mesh("quad", Mesh::plane(&renderer.device, 2.0, 1));
+
+        renderer.add_mesh("cylinder", Mesh::cylinder(&renderer.device, 0.5, 1.0, 24));
+        renderer.add_mesh("cone",     Mesh::cone(&renderer.device, 0.5, 1.0, 24));
+        renderer.add_mesh("capsule",  Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
@@ -170,6 +182,14 @@ impl Game for DemoGame {
             Material::new([0.35, 0.55, 1.0, 1.0])
                 .with_texture("checker")
                 .with_metallic_roughness(0.0, 0.5),
+        );
+        renderer.add_material(
+            "flat_red",
+            Material::new([1.0, 0.35, 0.35, 1.0]).with_metallic_roughness(0.0, 0.5),
+        );
+        renderer.add_material(
+            "flat_blue",
+            Material::new([0.35, 0.55, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5),
         );
         renderer.add_material(
             "gold",
@@ -279,10 +299,18 @@ impl Game for DemoGame {
 
             let speed = 8.0 * dt;
             let mut pan = (0.0, 0.0);
-            if input.key_down(KeyCode::KeyW) { pan.1 -= speed; }
-            if input.key_down(KeyCode::KeyS) { pan.1 += speed; }
-            if input.key_down(KeyCode::KeyA) { pan.0 -= speed; }
-            if input.key_down(KeyCode::KeyD) { pan.0 += speed; }
+            if input.key_down(KeyCode::KeyW) {
+                pan.1 -= speed;
+            }
+            if input.key_down(KeyCode::KeyS) {
+                pan.1 += speed;
+            }
+            if input.key_down(KeyCode::KeyA) {
+                pan.0 -= speed;
+            }
+            if input.key_down(KeyCode::KeyD) {
+                pan.0 += speed;
+            }
             if pan != (0.0, 0.0) {
                 self.camera.pan(pan.0, pan.1);
             }
@@ -376,6 +404,60 @@ impl Game for DemoGame {
                 world.insert(e, Spinner::new(Vec3::Y, 0.5));
             }
 
+            for i in 0..8 {
+                let angle = i as f32 / 8.0 * std::f32::consts::TAU;
+                let e = world.spawn();
+                world.insert(e, Name(format!("Enemy_{}", i)));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * 20.0, 0.9, angle.sin() * 20.0).with_scale(0.8),
+                );
+                world.insert(e, MeshHandle("sphere".into()));
+                world.insert(e, MaterialHandle("checker_red".into()));
+                world.insert(e, Health::new(50.0));
+                world.insert(e, Chase::new(3.0, 1.2));
+            }
+
+            for i in 0..5 {
+                let angle = i as f32 / 5.0 * std::f32::consts::TAU;
+                let e = world.spawn();
+                world.insert(e, Name(format!("Pickup_{}", i)));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * 6.0, 1.5, angle.sin() * 6.0).with_scale(0.4),
+                );
+                world.insert(e, MeshHandle("sphere".into()));
+                world.insert(e, MaterialHandle("emissive".into()));
+                world.insert(e, Interactable::Pickup);
+            }
+
+            for i in 0..3 {
+                let angle = i as f32 / 3.0 * std::f32::consts::TAU;
+                let e = world.spawn();
+                world.insert(e, Name(format!("Switch_{}", i)));
+                world.insert(
+                    e,
+                    Transform::new(angle.cos() * 10.0, 1.0, angle.sin() * 10.0),
+                );
+                world.insert(e, MeshHandle("cube".into()));
+                world.insert(e, MaterialHandle("checker_blue".into()));
+                world.insert(e, Interactable::Toggle);
+                world.insert(e, Spinner::new(Vec3::Y, 1.5));
+            }
+
+            let trig = world.spawn();
+            world.insert(trig, Name("Trigger_teleport".into()));
+            world.insert(
+                trig,
+                Transform::new(-15.0, 0.5, 0.0).with_scale_xyz(1.5, 1.0, 1.5),
+            );
+            world.insert(trig, MeshHandle("cube".into()));
+            world.insert(trig, MaterialHandle("glass".into()));
+            world.insert(
+                trig,
+                Trigger::new(2.5, TriggerAction::Teleport([0.0, 2.0, 0.0])),
+            );
+
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
@@ -465,7 +547,14 @@ impl Game for DemoGame {
 
         let entities: Vec<_> = world.entities().to_vec();
         for e in entities {
-            let (Some(t), Some(m), Some(mat)) = (
+            // Невидимые — пропускаем.
+            if let Some(v) = world.get::<Visible>(e) {
+                if !v.0 {
+                    continue;
+                }
+            }
+
+            let (Some(_t), Some(m), Some(mat)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
                 world.get::<MaterialHandle>(e),
@@ -492,14 +581,19 @@ impl Game for DemoGame {
             let blend = material.alpha_mode == AlphaMode::Blend;
             let double_sided = material.double_sided;
 
+            let color = world
+                .get::<Tint>(e)
+                .map(|t| t.0)
+                .unwrap_or(material.base_color);
+
             let key = (
                 m.0.clone(),
                 mat.0.clone(),
-                material.base_color.map(f32::to_bits),
+                color.map(f32::to_bits),
                 blend,
                 double_sided,
             );
-            let inst = InstanceData::new(model, material.base_color);
+            let inst = InstanceData::new(model, color);
             buckets.entry(key).or_default().push(inst);
         }
 
@@ -535,6 +629,12 @@ impl Game for DemoGame {
         }
 
         for &e in selected {
+            if let Some(v) = world.get::<Visible>(e) {
+                if !v.0 {
+                    continue;
+                }
+            }
+
             if let (Some(_t), Some(mh)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
@@ -542,12 +642,7 @@ impl Game for DemoGame {
                 if let Some(mesh) = renderer.meshes.get(&mh.0) {
                     let model = crate::game::world_matrix(world, e);
                     let (center, radius) = mesh.world_bounds(&model);
-                    batch.sphere_wireframe(
-                        center,
-                        radius * 1.05,
-                        [1.0, 0.85, 0.2, 1.0],
-                        24,
-                    );
+                    batch.sphere_wireframe(center, radius * 1.05, [1.0, 0.85, 0.2, 1.0], 24);
                 }
             }
         }

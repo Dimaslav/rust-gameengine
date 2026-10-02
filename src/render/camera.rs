@@ -231,4 +231,17 @@ impl Camera3D {
         let dir = (far_w - near_w).normalize();
         (origin, dir)
     }
+
+    /// Проекция мировой точки в экранные пиксели (верхний-левый угол — 0,0).
+    /// Возвращает `None`, если точка за камерой (w ≤ 0).
+    pub fn project_to_screen(&self, p: Vec3, width: f32, height: f32) -> Option<(f32, f32)> {
+        let clip = self.view_projection() * p.extend(1.0);
+        if clip.w <= 1e-6 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        let x = (ndc.x * 0.5 + 0.5) * width;
+        let y = (1.0 - (ndc.y * 0.5 + 0.5)) * height;
+        Some((x, y))
+    }
 }

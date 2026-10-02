@@ -4,8 +4,10 @@
 @group(0) @binding(3) var<uniform> params: Params;
 
 struct Params {
-    // x = bloom strength, y = exposure, zw = unused
+    // x = bloom strength, y = exposure, z = time (для grain), w = unused
     values: vec4<f32>,
+    // x = vignette_strength, y = grain_strength, z = chromatic_strength, w = unused
+    effects: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -40,18 +42,55 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn hash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, vec3<f32>(p3.y, p3.z, p3.x) + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var hdr = textureSample(t_hdr, s_lin, in.uv).rgb;
+    var uv = in.uv;
 
-    let bloom = textureSample(t_bloom, s_lin, in.uv).rgb;
+    let chromatic = params.effects.z;
+    var hdr: vec3<f32>;
+    if (chromatic > 0.0001) {
+        let center = vec2<f32>(0.5, 0.5);
+        let to_center = uv - center;
+        let r2 = dot(to_center, to_center);
+        let shift = chromatic * r2 * 0.02;
+        let dir = to_center;
+        let r = textureSample(t_hdr, s_lin, uv + dir * shift).r;
+        let g = textureSample(t_hdr, s_lin, uv).g;
+        let b = textureSample(t_hdr, s_lin, uv - dir * shift).b;
+        hdr = vec3<f32>(r, g, b);
+    } else {
+        hdr = textureSample(t_hdr, s_lin, uv).rgb;
+    }
+
+    let bloom = textureSample(t_bloom, s_lin, uv).rgb;
     let strength = params.values.x;
     hdr = hdr + bloom * strength;
 
-    // Exposure
     hdr = hdr * params.values.y;
 
     let mapped = aces(hdr);
-    let out = pow(mapped, vec3<f32>(1.0 / 2.2));
-    return vec4<f32>(out, 1.0);
+    var out_rgb = pow(mapped, vec3<f32>(1.0 / 2.2));
+
+    let vignette = params.effects.x;
+    if (vignette > 0.0001) {
+        let center = vec2<f32>(0.5, 0.5);
+        let d = distance(uv, center) * 1.4142;
+        let v = smoothstep(1.0, 0.3, d * (1.0 + vignette));
+        out_rgb = out_rgb * mix(1.0, v, vignette);
+    }
+
+    let grain = params.effects.y;
+    if (grain > 0.0001) {
+        let n = hash12(uv * 1024.0 + params.values.z);
+        let g = (n - 0.5) * grain * 0.15;
+        out_rgb = clamp(out_rgb + g, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+
+    return vec4<f32>(out_rgb, 1.0);
 }

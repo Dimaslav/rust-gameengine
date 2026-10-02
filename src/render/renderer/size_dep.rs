@@ -19,6 +19,11 @@ pub struct SizeDependent {
     pub blur_v_bind_group: wgpu::BindGroup,
     pub composite_bind_group: wgpu::BindGroup,
 
+    /// LDR-таргет после tonemap (перед FXAA).
+    pub ldr_view: wgpu::TextureView,
+    pub fxaa_uniform: wgpu::Buffer,
+    pub fxaa_bind_group: wgpu::BindGroup,
+
     // G-buffer: 3 MRT + depth
     pub gbuffer_albedo_view: wgpu::TextureView,
     pub gbuffer_normal_view: wgpu::TextureView,
@@ -69,6 +74,7 @@ pub fn build_size_dependent(
     let bh = (h / 2).max(1);
 
     let hdr_view = create_color_target(device, "hdr", w, h, HDR_FORMAT, 1, true);
+    let ldr_view = create_color_target(device, "ldr", w, h, LDR_FORMAT, 1, true);
     let bloom_a_view = create_color_target(device, "bloom_a", bw, bh, HDR_FORMAT, 1, true);
     let bloom_b_view = create_color_target(device, "bloom_b", bw, bh, HDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
@@ -302,6 +308,32 @@ pub fn build_size_dependent(
         mapped_at_creation: false,
     });
 
+    let fxaa_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fxaa_uniform"),
+        size: std::mem::size_of::<FxaaParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let fxaa_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("fxaa_bg"),
+        layout: debug_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&ldr_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&linear_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: fxaa_uniform.as_entire_binding(),
+            },
+        ],
+    });
+
     let make_debug_bg = |name: &str, view: &wgpu::TextureView| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(name),
@@ -332,6 +364,9 @@ pub fn build_size_dependent(
         hdr_view,
         bloom_a_view, bloom_b_view, linear_sampler,
         bright_bind_group, blur_h_bind_group, blur_v_bind_group, composite_bind_group,
+        ldr_view,
+        fxaa_uniform,
+        fxaa_bind_group,
         gbuffer_albedo_view, gbuffer_normal_view, gbuffer_emissive_view, gbuffer_depth_view,
         ssao_view, ssao_blur_view, ssao_bind_group, ssao_blur_bind_group,
         shadow2_bind_group, lighting_bind_group,

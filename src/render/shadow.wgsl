@@ -8,6 +8,8 @@ struct Lights {
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
     misc:            vec4<f32>,
+    fog_params:      vec4<f32>,
+    fog_color:       vec4<f32>,
     _pad1:           vec4<f32>,
     dir_lights:      array<vec4<f32>, 8>,
     point_lights:    array<vec4<f32>, 32>,

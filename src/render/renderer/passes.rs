@@ -17,13 +17,6 @@ fn fullscreen_triangle(pass: &mut wgpu::RenderPass<'_>) {
     pass.draw(0..3, 0..1);
 }
 
-/// Рисует инстансы бакетов. `include_blend` отбирает opaque или Blend.
-/// `pipeline_single` / `pipeline_double` — варианты пайплайна с culling
-/// и без (double-sided материалы).
-///
-/// Instance buffer залит в исходном порядке `draws`, поэтому offset
-/// продвигается всегда (даже для пропущенных бакетов) — иначе сломается
-/// соответствие.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn draw_all_instances<'a>(
@@ -134,8 +127,6 @@ pub(super) fn encode_shadow_pass(
     });
 
     pass.set_bind_group(0, &r.shadow_pass_bind_group, &[slot_offset]);
-    // Тени: только opaque. Mask-материалы бросают тень всегда (без учёта
-    // alpha-cutoff) — это упрощение, приемлемое для большинства сцен.
     draw_all_instances(
         &mut pass,
         r,
@@ -287,6 +278,35 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
 }
 
 // ============================================================
+// Skybox
+// ============================================================
+
+/// Рисует env cubemap на far-plane (depth == 1.0). Depth-write отключён,
+/// depth-compare = Equal → пишет только по небу, у которого G-buffer
+/// depth = 1.0.
+pub(super) fn encode_skybox_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("skybox_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_view,
+            resolve_target: None,
+            ops: load(),
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &r.sd.gbuffer_depth_view,
+            depth_ops: Some(depth_load()),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_pipeline(&r.skybox_pipeline);
+    pass.set_bind_group(0, &r.skybox_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
 // Forward (lines)
 // ============================================================
 
@@ -322,6 +342,42 @@ pub(super) fn encode_forward_pass(
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
     pass.set_vertex_buffer(0, r.line_buffer.buffer.slice(..));
     pass.draw(0..r.line_buffer.vertex_count, 0..1);
+}
+
+// ============================================================
+// Particles (billboard)
+// ============================================================
+
+pub(super) fn encode_particles_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    particle_count: u32,
+) {
+    if particle_count == 0 {
+        return;
+    }
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("particles_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_view,
+            resolve_target: None,
+            ops: load(),
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &r.sd.gbuffer_depth_view,
+            depth_ops: Some(depth_load()),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_pipeline(&r.particles_pipeline);
+    pass.set_bind_group(0, &r.camera_bind_group, &[]);
+    pass.set_vertex_buffer(0, r.particles_instance_buffer.slice(..));
+    // 6 вершин (2 треугольника) на инстанс, N инстансов.
+    pass.draw(0..6, 0..particle_count);
 }
 
 // ============================================================
@@ -422,15 +478,12 @@ pub(super) fn encode_blur_v_pass(r: &Renderer, encoder: &mut wgpu::CommandEncode
     fullscreen_triangle(&mut pass);
 }
 
-pub(super) fn encode_composite_pass(
-    r: &Renderer,
-    encoder: &mut wgpu::CommandEncoder,
-    swap_view: &wgpu::TextureView,
-) {
+/// Tonemap HDR+bloom → LDR target (не swap).
+pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("composite_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: swap_view,
+            view: &r.sd.ldr_view,
             resolve_target: None,
             ops: clear(wgpu::Color::BLACK),
         })],
@@ -443,6 +496,28 @@ pub(super) fn encode_composite_pass(
     fullscreen_triangle(&mut pass);
 }
 
+/// FXAA: LDR → swap.
+pub(super) fn encode_fxaa_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    swap_view: &wgpu::TextureView,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("fxaa_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: swap_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::BLACK),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.fxaa_pipeline);
+    pass.set_bind_group(0, &r.sd.fxaa_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
 pub(super) fn encode_post_processing(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -451,7 +526,8 @@ pub(super) fn encode_post_processing(
     encode_bright_pass(r, encoder);
     encode_blur_h_pass(r, encoder);
     encode_blur_v_pass(r, encoder);
-    encode_composite_pass(r, encoder, swap_view);
+    encode_composite_pass(r, encoder);
+    encode_fxaa_pass(r, encoder, swap_view);
 }
 
 // ============================================================

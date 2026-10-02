@@ -1,10 +1,14 @@
 //! Редактор.
 
 pub mod gizmo;
+pub mod palette;
 pub mod picking;
+pub mod placement;
 pub mod play;
 pub mod ui;
 pub mod undo;
+
+use std::path::PathBuf;
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_winit::State as EguiWinitState;
@@ -16,6 +20,7 @@ use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
 
 use gizmo::GizmoState;
+use palette::PaletteState;
 use play::PlayState;
 use undo::UndoStack;
 
@@ -27,27 +32,55 @@ pub struct Editor {
     pub state: EditorState,
 }
 
+/// Активный box-select (ЛКМ-протяжка по viewport).
+/// Координаты в физических пикселях (как `Input::mouse_pos`).
+#[derive(Debug, Clone, Copy)]
+pub struct BoxSelect {
+    pub start: (f32, f32),
+    pub current: (f32, f32),
+}
+
 pub struct EditorState {
     pub selected: Vec<Entity>,
     pub save_path: String,
     pub pending_action: Option<EditorAction>,
     pub gizmo: GizmoState,
-    pub dirty_materials: Vec<(String, Material)>,
+    /// Правки материалов: (entity-владелец, имя материала, новое значение).
+    /// Entity нужен, чтобы сделать материал unique, если он shared.
+    pub dirty_materials: Vec<(Entity, String, Material)>,
     pub undo: UndoStack,
     pub undo_requested: bool,
     pub search_filter: String,
     pub clipboard_transform: Option<Transform>,
     pub play: PlayState,
+    pub palette: PaletteState,
+
+    /// ЛКМ-протяжка по viewport.
+    pub box_select: Option<BoxSelect>,
+    /// Позиция открытого контекстного меню (physical pixels).
+    pub context_menu_pos: Option<(f32, f32)>,
+
+    /// Entity, для которой сейчас идёт inline-переименование в Hierarchy.
+    pub renaming: Option<Entity>,
+    /// Буфер для inline-редактирования имени.
+    pub rename_buffer: String,
+
+    // === Prefabs ===
+    /// Директория с файлами `.prefab.ron`.
+    pub prefabs_dir: String,
+    /// Кэш-список файлов.
+    pub prefab_list: Vec<PathBuf>,
+    /// Имя для сохранения текущего выделения.
+    pub prefab_save_name: String,
 
     pub flying: bool,
     pub fly_speed: f32,
     pub fly_sensitivity: f32,
 
-    /// Ctrl+C: снапшоты выделенных сущностей для последующей вставки.
     pub clipboard_entities: Vec<EntitySnapshot>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum EditorAction {
     Save,
     Load,
@@ -63,11 +96,27 @@ pub enum EditorAction {
     CopyEntity,
     PasteEntity,
     MakeMaterialUnique,
+    /// Спавн палитра-кистью в конкретной точке.
+    PlacePalette,
+    /// Сбросить активную кисть.
+    ClearPalette,
+    /// Новый пустой мир (сброс сцены).
+    NewScene,
+    /// Сохранить выделение как prefab.
+    SavePrefab,
+    /// Перечитать список файлов из `prefabs_dir`.
+    RefreshPrefabs,
+    /// Спавн инстанса префаба по индексу в `prefab_list`.
+    InstantiatePrefab(u32),
+    /// Открыть диалог выбора файлов и загрузить текстуры.
+    LoadTextures,
+    /// Удалить текстуру из реестра по имени.
+    RemoveTexture(String),
 }
 
 impl EditorState {
     pub fn new() -> Self {
-        Self {
+        let mut s = Self {
             selected: Vec::new(),
             save_path: "scene.ron".to_string(),
             pending_action: None,
@@ -78,11 +127,21 @@ impl EditorState {
             search_filter: String::new(),
             clipboard_transform: None,
             play: PlayState::default(),
+            palette: PaletteState::default(),
+            box_select: None,
+            context_menu_pos: None,
+            renaming: None,
+            rename_buffer: String::new(),
+            prefabs_dir: "prefabs".to_string(),
+            prefab_list: Vec::new(),
+            prefab_save_name: String::new(),
             flying: false,
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
             clipboard_entities: Vec::new(),
-        }
+        };
+        s.prefab_list = crate::scene::prefab::list_prefabs(&s.prefabs_dir);
+        s
     }
 
     pub fn is_selected(&self, e: Entity) -> bool {
@@ -127,7 +186,9 @@ impl EditorState {
 }
 
 impl Default for EditorState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Editor {
@@ -159,7 +220,9 @@ impl Editor {
     }
 
     pub fn on_window_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
-        if !self.enabled { return false; }
+        if !self.enabled {
+            return false;
+        }
         self.egui_state.on_window_event(window, event).consumed
     }
 }

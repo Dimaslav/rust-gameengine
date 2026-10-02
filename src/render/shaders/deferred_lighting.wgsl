@@ -16,6 +16,8 @@ struct Lights {
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
     misc:            vec4<f32>,   // x = ibl_strength
+    fog_params:      vec4<f32>,   // x=density, y=height_base, z=height_falloff
+    fog_color:       vec4<f32>,   // rgb = color
     _pad1:           vec4<f32>,
     dir_lights:      array<vec4<f32>, 8>,
     point_lights:    array<vec4<f32>, 32>,
@@ -165,11 +167,8 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth = textureSample(t_depth, s_lin, in.uv);
     if (depth >= 0.9999) {
-        let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, 1.0, 1.0);
-        let world_h = camera.inv_view_proj * ndc;
-        let world_far = world_h.xyz / max(world_h.w, 1e-6);
-        let sky_dir = normalize(world_far - camera.camera_pos.xyz);
-        return vec4<f32>(textureSampleLevel(t_env, s_env, sky_dir, 0.0).rgb, 1.0);
+        // Небо рисует отдельный skybox pass. Здесь — ничего.
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
     let g_albedo = textureSample(t_albedo, s_lin, in.uv);
@@ -223,6 +222,20 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             }
             color += pbr_light(n, v, l, albedo, metallic, roughness, col_i.rgb * col_i.a * atten * s);
         }
+    }
+
+    // === Height fog ===
+    let fog_density = lights.fog_params.x;
+    if (fog_density > 0.0) {
+        let fog_h_base  = lights.fog_params.y;
+        let fog_h_fall  = lights.fog_params.z;
+        let cam_pos     = camera.camera_pos.xyz;
+        let to_frag     = world_pos - cam_pos;
+        let dist        = length(to_frag);
+        let h           = max(0.0, world_pos.y - fog_h_base);
+        let h_factor    = exp(-h * fog_h_fall);
+        let fog_amount  = clamp(1.0 - exp(-dist * fog_density * h_factor), 0.0, 1.0);
+        color           = mix(color, lights.fog_color.rgb, fog_amount);
     }
 
     return vec4<f32>(color, 1.0);

@@ -19,6 +19,8 @@ struct Lights {
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
     misc:            vec4<f32>,   // x = ibl_strength
+    fog_params:      vec4<f32>,
+    fog_color:       vec4<f32>,
     _pad1:           vec4<f32>,
     dir_lights:      array<vec4<f32>, 8>,
     point_lights:    array<vec4<f32>, 32>,
@@ -189,7 +191,6 @@ fn fs_main(
         n_world = -n_world;
     }
 
-    // Normal map через derivative TBN.
     let n_sample = normal_sample.xyz * 2.0 - 1.0;
     let n_scaled = vec3<f32>(n_sample.xy * mat.params.z, n_sample.z);
     let tbn = cotangent_frame(n_world, in.world_pos, in.uv);
@@ -212,7 +213,18 @@ fn fs_main(
     }
 
     let diffuse = base.rgb;
-    let out_rgb = diffuse * (ambient + irr * ibl_strength + lit) + emissive_rgb;
+    var out_rgb = diffuse * (ambient + irr * ibl_strength + lit) + emissive_rgb;
+
+    // Fog для прозрачных — редкий случай, но пусть будет.
+    let fog_density = lights.fog_params.x;
+    if (fog_density > 0.0) {
+        let cam_pos = camera.camera_pos.xyz;
+        let dist = length(in.world_pos - cam_pos);
+        let h = max(0.0, in.world_pos.y - lights.fog_params.y);
+        let h_factor = exp(-h * lights.fog_params.z);
+        let fog_amount = clamp(1.0 - exp(-dist * fog_density * h_factor), 0.0, 1.0);
+        out_rgb = mix(out_rgb, lights.fog_color.rgb, fog_amount);
+    }
 
     return vec4<f32>(out_rgb, alpha);
 }

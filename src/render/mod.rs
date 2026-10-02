@@ -23,8 +23,8 @@ pub use material::{
 };
 pub use mesh::{InstanceData, Mesh};
 pub use renderer::{
-    EguiFrameData, GpuLight, GpuPointLight, MeshDraw, PostFx, Renderer, MAX_DIR_LIGHTS,
-    MAX_POINT_LIGHTS,
+    EguiFrameData, GpuLight, GpuPointLight, MeshDraw, ParticleInstance, PostFx, Renderer,
+    MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
 };
 pub use shadow_cube::CUBE_SIZE as POINT_SHADOW_SIZE;
 pub use skinning::{AnimationClip, Skeleton, MAX_JOINTS};

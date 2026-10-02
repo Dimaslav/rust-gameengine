@@ -1,11 +1,12 @@
 //! Undo/redo стек — снимки всей сцены (World) в RON.
 //!
-//! Снимок делается через `scene::save_scene_to_string`, восстановление —
+//! Снимок делается через `scene::save_scene_to_string`. Восстановление —
 //! через `scene::load_scene_from_str`. Восстановление создаёт **новый**
 //! World, старый молча заменяется.
 //!
-//! Ограничение: изменения `Renderer` (материалы, текстуры, скелеты)
-//! не входят в снимок. Откатывается только состояние ECS-мира.
+//! Ограничение: изменения `Renderer` (материалы, текстуры, скелеты) и
+//! `PlayState` (позиция игрока) не входят в снимок. Откатывается только
+//! состояние ECS-мира.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -13,8 +14,6 @@ use std::time::Instant;
 use crate::ecs::World;
 
 const MAX_UNDO: usize = 50;
-/// Минимальный интервал между пуш-снимками в миллисекундах.
-/// Защищает от «цунами» при быстром изменении DragValue/Slider.
 const PUSH_COOLDOWN_MS: u128 = 300;
 
 pub struct UndoStack {
@@ -28,7 +27,6 @@ impl UndoStack {
         Self {
             undo: VecDeque::with_capacity(MAX_UNDO),
             redo: Vec::new(),
-            // Чтобы самый первый push не отсеивался cooldown'ом.
             last_push: Instant::now() - std::time::Duration::from_secs(3600),
         }
     }
@@ -41,11 +39,8 @@ impl UndoStack {
         !self.redo.is_empty()
     }
 
-    /// Укладывает текущее состояние сцены в undo-стек.
-    ///
-    /// Возвращает `true`, если снимок сделан.
-    /// Может отсеять запрос, если с прошлого push прошло < `PUSH_COOLDOWN_MS`.
-    /// Форсировать можно через `push_forced`.
+    /// Кладёт снимок с cooldown'ом. `player_spawn` не сохраняем в undo —
+    /// для истории позиция игрока не важна.
     pub fn push(&mut self, world: &World) -> bool {
         if self.last_push.elapsed().as_millis() < PUSH_COOLDOWN_MS {
             return false;
@@ -53,10 +48,8 @@ impl UndoStack {
         self.push_forced(world)
     }
 
-    /// Кладёт снимок, игнорируя cooldown. Используется для явных действий
-    /// (Delete / Add / Duplicate / drag-start), где потеря снимка недопустима.
     pub fn push_forced(&mut self, world: &World) -> bool {
-        match crate::scene::save_scene_to_string(world) {
+        match crate::scene::save_scene_to_string(world, None) {
             Ok(s) => {
                 if self.undo.len() >= MAX_UNDO {
                     self.undo.pop_front();
@@ -77,13 +70,12 @@ impl UndoStack {
     pub fn undo(&mut self, world: &World) -> Option<World> {
         let prev = self.undo.pop_back()?;
 
-        // Текущее состояние — в redo.
-        if let Ok(current) = crate::scene::save_scene_to_string(world) {
+        if let Ok(current) = crate::scene::save_scene_to_string(world, None) {
             self.redo.push(current);
         }
 
         match crate::scene::load_scene_from_str(&prev) {
-            Ok(w) => Some(w),
+            Ok((w, _spawn)) => Some(w),
             Err(e) => {
                 log::warn!("undo load failed: {}", e);
                 None
@@ -95,7 +87,7 @@ impl UndoStack {
     pub fn redo(&mut self, world: &World) -> Option<World> {
         let next = self.redo.pop()?;
 
-        if let Ok(current) = crate::scene::save_scene_to_string(world) {
+        if let Ok(current) = crate::scene::save_scene_to_string(world, None) {
             if self.undo.len() >= MAX_UNDO {
                 self.undo.pop_front();
             }
@@ -103,7 +95,7 @@ impl UndoStack {
         }
 
         match crate::scene::load_scene_from_str(&next) {
-            Ok(w) => Some(w),
+            Ok((w, _spawn)) => Some(w),
             Err(e) => {
                 log::warn!("redo load failed: {}", e);
                 None

@@ -16,6 +16,8 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// LDR-таргет после tonemap (перед FXAA).
+pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
@@ -60,6 +62,10 @@ pub struct LightsUniform {
     pub light_view_proj: [[f32; 4]; 4],
     /// x = ibl_strength, y/z/w = зарезервировано.
     pub misc: [f32; 4],
+    /// x = fog_density, y = fog_height_base, z = fog_height_falloff, w = 0.
+    pub fog_params: [f32; 4],
+    /// rgb = fog_color, a = 0.
+    pub fog_color: [f32; 4],
     pub _pad1: [f32; 4],
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
@@ -70,6 +76,26 @@ pub struct LightsUniform {
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PostParams {
     pub values: [f32; 4],
+}
+
+/// Расширенный uniform для tonemap: values + effects.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct TonemapParams {
+    /// x = bloom strength, y = exposure, z = time (для grain), w = unused
+    pub values: [f32; 4],
+    /// x = vignette_strength, y = film_grain, z = chromatic_aberration, w = unused
+    pub effects: [f32; 4],
+}
+
+/// Uniform для skybox pass.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct SkyboxParams {
+    /// x = ibl_strength, y = fog_density, z = fog_height_base, w = fog_height_falloff
+    pub values: [f32; 4],
+    /// rgb = fog_color
+    pub fog_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -118,6 +144,38 @@ pub struct DebugParams {
     pub mode: [u32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct FxaaParams {
+    /// xy = inverse size, z = strength, w = unused
+    pub values: [f32; 4],
+}
+
+/// Инстанс частицы для billboard-рендера.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ParticleInstance {
+    /// xyz = позиция в мире, w = размер (world units).
+    pub position_size: [f32; 4],
+    /// rgba; alpha управляет затуханием.
+    pub color: [f32; 4],
+}
+
+impl ParticleInstance {
+    const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+        0 => Float32x4,
+        1 => Float32x4,
+    ];
+
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRS,
+        }
+    }
+}
+
 // ============================================================
 // Публичные типы
 // ============================================================
@@ -142,6 +200,26 @@ pub struct PostFx {
     /// Множитель IBL (diffuse + specular) в lighting и forward transparent.
     pub ibl_strength: f32,
     pub debug_view: DebugView,
+
+    /// FXAA strength: 0 — выключено, 1 — полное сглаживание.
+    pub fxaa_strength: f32,
+
+    /// Fog: цвет тумана в linear-space (обычно light-blue).
+    pub fog_color: [f32; 3],
+    /// Плотность: 0 — туман выключен.
+    pub fog_density: f32,
+    /// Базовая высота: ниже неё туман однородный.
+    pub fog_height_base: f32,
+    /// Падение плотности с высотой (exp(-h * falloff)).
+    pub fog_height_falloff: f32,
+
+    // === Пост-эффекты tonemap ===
+    /// Затемнение по краям экрана: 0 — выключено.
+    pub vignette_strength: f32,
+    /// Зерно: 0 — выключено.
+    pub film_grain: f32,
+    /// Хроматическая аберрация: 0 — выключено.
+    pub chromatic_aberration: f32,
 }
 
 impl Default for PostFx {
@@ -154,6 +232,14 @@ impl Default for PostFx {
             ssao_radius: 0.6,
             ibl_strength: 0.35,
             debug_view: DebugView::Final,
+            fxaa_strength: 1.0,
+            fog_color: [0.55, 0.62, 0.72],
+            fog_density: 0.0,
+            fog_height_base: 0.0,
+            fog_height_falloff: 0.05,
+            vignette_strength: 0.0,
+            film_grain: 0.0,
+            chromatic_aberration: 0.0,
         }
     }
 }

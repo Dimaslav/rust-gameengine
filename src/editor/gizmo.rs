@@ -61,6 +61,8 @@ pub struct GizmoState {
     pub mode: GizmoMode,
     pub hovered: Option<Axis>,
     pub drag: Option<GizmoDrag>,
+    /// Если true — snap работает без Ctrl. Всё равно можно форсировать Ctrl.
+    pub snap_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +428,6 @@ pub fn apply_drag_with_mode(
             };
             let mut delta = (point - drag.start_point).dot(axis);
             if snap {
-                // Шаг 0.5 м.
                 delta = (delta * 2.0).round() * 0.5;
             }
             let offset = axis * delta;
@@ -446,7 +447,6 @@ pub fn apply_drag_with_mode(
             let sensitivity = gizmo_scale(camera, center).max(0.001);
             let mut mul = 1.0 + delta / sensitivity;
             if snap {
-                // Шаг 0.1.
                 mul = (mul * 10.0).round() / 10.0;
             }
             mul = mul.clamp(0.01, 100.0);
@@ -477,7 +477,6 @@ pub fn apply_drag_with_mode(
             let cos = v0.dot(v1);
             let mut angle = sin.atan2(cos);
             if snap {
-                // Шаг 15° = π/12.
                 let step = std::f32::consts::PI / 12.0;
                 angle = (angle / step).round() * step;
             }

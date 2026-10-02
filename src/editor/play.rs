@@ -1,18 +1,15 @@
-//! Состояние Play-режима: игрок, параметры движения, настройки HUD.
+//! Состояние Play-режима.
 
+use crate::ecs::Entity;
 use glam::Vec3;
 
 pub struct PlayState {
     pub active: bool,
-
-    /// Позиция, с которой начнётся следующая Play-сессия.
     pub saved_position: Vec3,
-
-    /// Вертикальная скорость (для гравитации/прыжка).
     pub vertical_velocity: f32,
     pub on_ground: bool,
 
-    // === Параметры движения ===
+    // === Движение ===
     pub eye_height: f32,
     pub player_radius: f32,
     pub player_height: f32,
@@ -20,26 +17,50 @@ pub struct PlayState {
     pub run_speed: f32,
     pub jump_speed: f32,
     pub gravity: f32,
-
-    /// Уровень пола в мировых координатах. Ноги игрока не могут
-    /// опуститься ниже этой высоты. По умолчанию — верхняя грань
-    /// ground plane (y = 0).
     pub floor_y: f32,
-
-    /// Чувствительность мыши в Play.
     pub look_sensitivity: f32,
+
+    // === Crouch (приседание) ===
+    /// Высота глаз при приседании.
+    pub crouch_height: f32,
+    /// Множитель скорости при приседании.
+    pub crouch_speed_mult: f32,
+    /// Текущая интерполированная высота глаз (runtime).
+    pub current_eye_height: f32,
+    /// Нажат ли Ctrl в текущем кадре (runtime).
+    pub crouching: bool,
+
+    // === Бой / HUD ===
+    pub health: f32,
+    pub max_health: f32,
+    pub ammo: u32,
+    pub max_ammo: u32,
+    pub damage_per_shot: f32,
+    pub gun_range: f32,
+    /// Скорость пули в м/с. 0 → hit-scan (мгновенно).
+    pub bullet_speed: f32,
+    /// Текущий cooldown стрельбы в секундах.
+    pub fire_cooldown: f32,
+    pub fire_cooldown_max: f32,
+    /// Кулдаун E, чтобы не сработал несколько раз подряд.
+    pub interact_cooldown: f32,
+    pub interact_cooldown_max: f32,
+    pub interact_distance: f32,
+
+    /// Entity под прицелом (для подсветки и E).
+    pub highlight: Option<Entity>,
 
     // === Head bob ===
     pub bob_enabled: bool,
     pub bob_amplitude: f32,
-    /// Пройденное расстояние с момента старта bob-цикла.
     pub bob_distance: f32,
-    /// Текущий сдвиг по Y для bob (сглаженный).
     pub bob_current: f32,
 
     // === HUD ===
     pub show_crosshair: bool,
     pub show_hud: bool,
+    pub show_health: bool,
+    pub show_ammo: bool,
 }
 
 impl Default for PlayState {
@@ -49,6 +70,7 @@ impl Default for PlayState {
             saved_position: Vec3::new(0.0, 1.7, 45.0),
             vertical_velocity: 0.0,
             on_ground: true,
+
             eye_height: 1.7,
             player_radius: 0.35,
             player_height: 1.8,
@@ -58,12 +80,35 @@ impl Default for PlayState {
             gravity: 20.0,
             floor_y: 0.0,
             look_sensitivity: 0.0025,
+
+            crouch_height: 1.0,
+            crouch_speed_mult: 0.5,
+            current_eye_height: 1.7,
+            crouching: false,
+
+            health: 100.0,
+            max_health: 100.0,
+            ammo: 30,
+            max_ammo: 30,
+            damage_per_shot: 25.0,
+            gun_range: 100.0,
+            bullet_speed: 80.0,
+            fire_cooldown: 0.0,
+            fire_cooldown_max: 0.15,
+            interact_cooldown: 0.0,
+            interact_cooldown_max: 0.25,
+            interact_distance: 5.0,
+            highlight: None,
+
             bob_enabled: false,
             bob_amplitude: 0.03,
             bob_distance: 0.0,
             bob_current: 0.0,
+
             show_crosshair: true,
             show_hud: true,
+            show_health: true,
+            show_ammo: true,
         }
     }
 }

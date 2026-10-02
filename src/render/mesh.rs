@@ -92,8 +92,8 @@ pub struct Mesh {
     pub index_count: u32,
     pub bounds_center: Vec3,
     pub bounds_radius: f32,
-    /// Треугольники в **локальном** пространстве — для точного picking
-    /// (Möller–Trumbore). Строится из positions + indices при создании.
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
 }
 
@@ -128,8 +128,9 @@ impl Mesh {
             let p = Vec3::from(v.position);
             radius = radius.max((p - center).length());
         }
+        let aabb_min = min;
+        let aabb_max = max;
 
-        // Треугольники для CPU raycast.
         let mut triangles = Vec::with_capacity(indices.len() / 3);
         for tri in indices.chunks_exact(3) {
             let a = Vec3::from(vertices[tri[0] as usize].position);
@@ -144,6 +145,8 @@ impl Mesh {
             index_count: indices.len() as u32,
             bounds_center: center,
             bounds_radius: radius,
+            aabb_min,
+            aabb_max,
             triangles,
         }
     }
@@ -158,8 +161,33 @@ impl Mesh {
         (center_world, self.bounds_radius * scale)
     }
 
+    pub fn world_aabb(&self, model: &Mat4) -> (Vec3, Vec3) {
+        let mn = self.aabb_min;
+        let mx = self.aabb_max;
+
+        let corners = [
+            Vec3::new(mn.x, mn.y, mn.z),
+            Vec3::new(mx.x, mn.y, mn.z),
+            Vec3::new(mn.x, mx.y, mn.z),
+            Vec3::new(mx.x, mx.y, mn.z),
+            Vec3::new(mn.x, mn.y, mx.z),
+            Vec3::new(mx.x, mn.y, mx.z),
+            Vec3::new(mn.x, mx.y, mx.z),
+            Vec3::new(mx.x, mx.y, mx.z),
+        ];
+
+        let mut wmin = Vec3::splat(f32::INFINITY);
+        let mut wmax = Vec3::splat(f32::NEG_INFINITY);
+        for c in corners {
+            let w = model.transform_point3(c);
+            wmin = wmin.min(w);
+            wmax = wmax.max(w);
+        }
+        (wmin, wmax)
+    }
+
     // ============================================================
-    // Генераторы (без изменений)
+    // Генераторы
     // ============================================================
 
     pub fn cube(device: &wgpu::Device, size: f32) -> Self {
@@ -188,10 +216,7 @@ impl Mesh {
                     (base[2] + right[2] * cr + up[2] * cu) * h,
                 ];
                 vertices.push(Vertex3D::static_vertex(
-                    pos,
-                    *normal,
-                    [uvs[i].0, uvs[i].1],
-                    [1.0, 1.0, 1.0, 1.0],
+                    pos, *normal, [uvs[i].0, uvs[i].1], [1.0; 4],
                 ));
             }
             indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
@@ -217,7 +242,7 @@ impl Mesh {
                     [ct * r, y, st * r],
                     [ct * sp, cp, st * sp],
                     [seg as f32 / segments as f32, ring as f32 / rings as f32],
-                    [1.0, 1.0, 1.0, 1.0],
+                    [1.0; 4],
                 ));
             }
         }
@@ -248,7 +273,7 @@ impl Mesh {
                     [fx * size - h, 0.0, fz * size - h],
                     [0.0, 1.0, 0.0],
                     [fx, fz],
-                    [1.0, 1.0, 1.0, 1.0],
+                    [1.0; 4],
                 ));
             }
         }
@@ -263,5 +288,149 @@ impl Mesh {
         }
 
         Self::new(device, &vertices, &indices, "plane")
+    }
+
+    pub fn truncated_cone(
+        device: &wgpu::Device,
+        r_bottom: f32,
+        r_top: f32,
+        height: f32,
+        segments: u32,
+    ) -> Self {
+        let segs = segments.max(3);
+        let h2 = height * 0.5;
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let slope = (r_bottom - r_top) / height.max(1e-4);
+        for i in 0..=segs {
+            let theta = std::f32::consts::TAU * i as f32 / segs as f32;
+            let (st, ct) = theta.sin_cos();
+            let n_raw = Vec3::new(ct, slope, st).normalize_or_zero();
+
+            vertices.push(Vertex3D::static_vertex(
+                [ct * r_bottom, -h2, st * r_bottom],
+                n_raw.to_array(),
+                [i as f32 / segs as f32, 0.0],
+                [1.0; 4],
+            ));
+            vertices.push(Vertex3D::static_vertex(
+                [ct * r_top, h2, st * r_top],
+                n_raw.to_array(),
+                [i as f32 / segs as f32, 1.0],
+                [1.0; 4],
+            ));
+        }
+        for i in 0..segs {
+            let a = i * 2;
+            let b = a + 1;
+            let c = a + 2;
+            let d = a + 3;
+            indices.extend_from_slice(&[a, b, c, c, b, d]);
+        }
+
+        if r_bottom > 1e-6 {
+            let center = vertices.len() as u32;
+            vertices.push(Vertex3D::static_vertex(
+                [0.0, -h2, 0.0], [0.0, -1.0, 0.0], [0.5, 0.5], [1.0; 4],
+            ));
+            let start = vertices.len() as u32;
+            for i in 0..=segs {
+                let theta = std::f32::consts::TAU * i as f32 / segs as f32;
+                let (st, ct) = theta.sin_cos();
+                vertices.push(Vertex3D::static_vertex(
+                    [ct * r_bottom, -h2, st * r_bottom],
+                    [0.0, -1.0, 0.0],
+                    [ct * 0.5 + 0.5, st * 0.5 + 0.5],
+                    [1.0; 4],
+                ));
+            }
+            for i in 0..segs {
+                indices.extend_from_slice(&[center, start + i, start + i + 1]);
+            }
+        }
+
+        if r_top > 1e-6 {
+            let center = vertices.len() as u32;
+            vertices.push(Vertex3D::static_vertex(
+                [0.0, h2, 0.0], [0.0, 1.0, 0.0], [0.5, 0.5], [1.0; 4],
+            ));
+            let start = vertices.len() as u32;
+            for i in 0..=segs {
+                let theta = std::f32::consts::TAU * i as f32 / segs as f32;
+                let (st, ct) = theta.sin_cos();
+                vertices.push(Vertex3D::static_vertex(
+                    [ct * r_top, h2, st * r_top],
+                    [0.0, 1.0, 0.0],
+                    [ct * 0.5 + 0.5, st * 0.5 + 0.5],
+                    [1.0; 4],
+                ));
+            }
+            for i in 0..segs {
+                indices.extend_from_slice(&[center, start + i + 1, start + i]);
+            }
+        }
+
+        Self::new(device, &vertices, &indices, "cylinder")
+    }
+
+    pub fn cylinder(device: &wgpu::Device, radius: f32, height: f32, segments: u32) -> Self {
+        Self::truncated_cone(device, radius, radius, height, segments)
+    }
+
+    pub fn cone(device: &wgpu::Device, radius: f32, height: f32, segments: u32) -> Self {
+        Self::truncated_cone(device, radius, 0.0, height, segments)
+    }
+
+    pub fn capsule(
+        device: &wgpu::Device,
+        radius: f32,
+        cylinder_height: f32,
+        hemi_rings: u32,
+        segments: u32,
+    ) -> Self {
+        let segs = segments.max(3);
+        let hr = hemi_rings.max(2);
+        let h2 = cylinder_height * 0.5;
+        let total_rings = 2 * hr + 1;
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for ring in 0..=total_rings {
+            let (y, r_axis) = if ring <= hr {
+                let phi = std::f32::consts::PI * 0.5 * ring as f32 / hr as f32;
+                let (sp, cp) = phi.sin_cos();
+                (h2 + cp * radius, sp * radius)
+            } else {
+                let phi = std::f32::consts::PI * 0.5 * (total_rings - ring) as f32 / hr as f32;
+                let (sp, cp) = phi.sin_cos();
+                (-h2 - cp * radius, sp * radius)
+            };
+
+            for s in 0..=segs {
+                let theta = std::f32::consts::TAU * s as f32 / segs as f32;
+                let (st, ct) = theta.sin_cos();
+                let center_y = if ring <= hr { h2 } else { -h2 };
+                let n = Vec3::new(ct * r_axis, y - center_y, st * r_axis).normalize_or_zero();
+                vertices.push(Vertex3D::static_vertex(
+                    [ct * r_axis, y, st * r_axis],
+                    n.to_array(),
+                    [s as f32 / segs as f32, ring as f32 / total_rings as f32],
+                    [1.0; 4],
+                ));
+            }
+        }
+
+        let stride = segs + 1;
+        for ring in 0..total_rings {
+            for s in 0..segs {
+                let a = ring * stride + s;
+                let b = a + stride;
+                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            }
+        }
+
+        Self::new(device, &vertices, &indices, "capsule")
     }
 }
