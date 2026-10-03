@@ -16,6 +16,7 @@ use game::components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
     SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
 };
+use game::rpg::{self, RpgState};
 use glam::{Quat, Vec3};
 use physics::{Collider, PhysicsMaterial, RigidBody};
 use render::{
@@ -85,8 +86,10 @@ struct DemoGame {
     skeletons: HashMap<String, Skeleton>,
     animations: HashMap<String, AnimationClip>,
 
-    /// Сколько объектов на каждом LOD-уровне в последнем кадре.
     lod_stats: [usize; 4],
+
+    // === RPG ===
+    rpg: RpgState,
 }
 
 impl DemoGame {
@@ -155,6 +158,7 @@ impl DemoGame {
             skeletons: HashMap::new(),
             animations: HashMap::new(),
             lod_stats: [0; 4],
+            rpg: RpgState::new(),
         }
     }
 }
@@ -232,38 +236,8 @@ impl Game for DemoGame {
                 .with_double_sided(true),
         );
 
-        renderer.add_material(
-            "emissive_warm",
-            Material::new([1.0, 0.85, 0.4, 1.0])
-                .with_metallic_roughness(0.0, 0.4)
-                .with_emissive([3.5, 1.8, 0.4]),
-        );
-        renderer.add_material(
-            "emissive_cyan",
-            Material::new([0.5, 0.9, 1.0, 1.0])
-                .with_metallic_roughness(0.0, 0.4)
-                .with_emissive([0.5, 2.5, 3.2]),
-        );
-        renderer.add_material(
-            "emissive_red",
-            Material::new([1.0, 0.4, 0.4, 1.0])
-                .with_metallic_roughness(0.0, 0.4)
-                .with_emissive([3.0, 0.6, 0.6]),
-        );
-        renderer.add_material(
-            "silver",
-            Material::new([0.9, 0.9, 0.92, 1.0]).with_metallic_roughness(1.0, 0.15),
-        );
-        renderer.add_material(
-            "chocolate",
-            Material::new([0.28, 0.16, 0.10, 1.0]).with_metallic_roughness(0.0, 0.7),
-        );
-        renderer.add_material(
-            "brick",
-            Material::new([0.65, 0.28, 0.20, 1.0])
-                .with_texture("checker")
-                .with_metallic_roughness(0.0, 0.85),
-        );
+        // === RPG материалы ===
+        rpg::register_materials(renderer);
 
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             Ok(loaded) => {
@@ -353,223 +327,25 @@ impl Game for DemoGame {
         if !self.spawned {
             self.spawned = true;
 
-            // === 1. ПОЛ ===
-            let ground = world.spawn();
-            world.insert(ground, Name("Ground".into()));
-            world.insert(ground, Transform::new(0.0, 0.0, 0.0));
-            world.insert(ground, MeshHandle("ground".into()));
-            world.insert(ground, MaterialHandle("ground".into()));
-            world.insert(ground, RigidBody::static_body());
-            world.insert(ground, Collider::aabb(Vec3::new(60.0, 0.01, 60.0)));
-            world.insert(ground, PhysicsMaterial::concrete());
+            // === RPG-сцена ===
+            rpg::spawn_scene(world);
 
-            // === 2. КОЛОННЫ ===
-            for (i, (x, z)) in [(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)]
-                .into_iter()
-                .enumerate()
-            {
-                let col = world.spawn();
-                world.insert(col, Name(format!("Column_{}", i)));
-                world.insert(col, Transform::new(x, 4.0, z).with_scale_xyz(1.5, 8.0, 1.5));
-                world.insert(col, MeshHandle("cube".into()));
-                world.insert(col, MaterialHandle("gold".into()));
-                world.insert(col, RigidBody::static_body());
-                world.insert(col, Collider::aabb(Vec3::splat(0.5)));
-                world.insert(col, PhysicsMaterial::metal());
-            }
-
-            // === 3. АЛТАРЬ + 3 ЭМИССИВНЫХ ШАРА ===
-            let altar = world.spawn();
-            world.insert(altar, Name("Altar".into()));
-            world.insert(altar, Transform::new(0.0, 1.5, 0.0).with_scale_xyz(3.0, 3.0, 3.0));
-            world.insert(altar, MeshHandle("cube".into()));
-            world.insert(altar, MaterialHandle("silver".into()));
-            world.insert(altar, Spinner::new(Vec3::Y, 0.4));
-            world.insert(altar, RigidBody::static_body());
-            world.insert(altar, Collider::aabb(Vec3::splat(0.5)));
-
-            let emissive_colors = [
-                ("emissive_warm", Vec3::new(0.0, 1.0, 0.0)),
-                ("emissive_cyan", Vec3::new(0.9, 0.0, 0.5)),
-                ("emissive_red",  Vec3::new(-0.9, 0.0, -0.5)),
-            ];
-            for (i, (mat, axis)) in emissive_colors.into_iter().enumerate() {
-                let s = world.spawn();
-                world.insert(s, Name(format!("AltarOrb_{}", i)));
-                let angle = i as f32 * std::f32::consts::TAU / 3.0;
-                world.insert(
-                    s,
-                    Transform::new(angle.cos() * 2.0, 6.0 + (i as f32) * 0.6, angle.sin() * 2.0)
-                        .with_scale(0.8),
-                );
-                world.insert(s, MeshHandle("sphere".into()));
-                world.insert(s, MaterialHandle(mat.into()));
-                world.insert(s, Spinner::new(axis.normalize_or_zero(), 1.5));
-            }
-
-            // === 4. КОЛЬЦО КУБОВ ===
-            let ring_materials = [
-                "checker_red", "checker_blue", "gold", "silver",
-                "flat_red", "flat_blue", "chocolate", "brick",
-            ];
-            for i in 0..16 {
-                let angle = i as f32 / 16.0 * std::f32::consts::TAU;
-                let r = 14.0;
-                let e = world.spawn();
-                world.insert(e, Name(format!("RingCube_{:02}", i)));
-                world.insert(
-                    e,
-                    Transform::new(angle.cos() * r, 2.0, angle.sin() * r)
-                        .with_rotation(Quat::from_axis_angle(Vec3::Y, angle))
-                        .with_scale(0.9),
-                );
-                world.insert(e, MeshHandle("cube".into()));
-                world.insert(e, MaterialHandle(ring_materials[i % ring_materials.len()].into()));
-                let axis = if i % 2 == 0 { Vec3::Y } else { Vec3::new(0.3, 1.0, 0.4).normalize() };
-                world.insert(e, Spinner::new(axis, 0.7 + (i as f32) * 0.15));
-            }
-
-            // === 5. СТЕКЛО ===
-            for i in 0..8 {
-                let angle = i as f32 / 8.0 * std::f32::consts::TAU;
-                let e = world.spawn();
-                world.insert(e, Name(format!("Glass_{}", i)));
-                world.insert(
-                    e,
-                    Transform::new(angle.cos() * 6.0, 3.5, angle.sin() * 6.0).with_scale(1.6),
-                );
-                world.insert(e, MeshHandle("sphere".into()));
-                world.insert(e, MaterialHandle("glass".into()));
-                world.insert(e, Spinner::new(Vec3::Y, 0.3 + i as f32 * 0.1));
-            }
-
-            // === 6. ФИЗИКА: ПАДАЮЩИЕ КУБЫ ===
-            for i in 0..12 {
-                let e = world.spawn();
-                world.insert(e, Name(format!("FallingCube_{:02}", i)));
-                let x = -8.0 + (i % 3) as f32 * 1.1;
-                let z = -8.0 + (i / 3) as f32 * 1.1;
-                let y = 6.0 + (i / 3) as f32 * 1.4;
-                world.insert(e, Transform::at(Vec3::new(x, y, z)).with_scale(1.0));
-                world.insert(e, MeshHandle("cube".into()));
-                world.insert(e, MaterialHandle(["flat_red", "flat_blue", "gold"][i % 3].into()));
-                world.insert(e, RigidBody::dynamic(1.0));
-                world.insert(e, Collider::aabb(Vec3::splat(0.5)));
-                world.insert(e, PhysicsMaterial::wood());
-            }
-
-            // === 7. ФИЗИКА: ШАРЫ ===
-            for i in 0..6 {
-                let e = world.spawn();
-                world.insert(e, Name(format!("BouncingBall_{}", i)));
-                world.insert(
-                    e,
-                    Transform::at(Vec3::new(8.0 + i as f32 * 0.9, 5.0 + (i as f32) * 0.7, 8.0)),
-                );
-                world.insert(e, MeshHandle("sphere".into()));
-                world.insert(
-                    e,
-                    MaterialHandle(["checker_red", "gold", "emissive_red"][i % 3].into()),
-                );
-                world.insert(e, RigidBody::dynamic(0.5));
-                world.insert(e, Collider::sphere(0.5));
-                world.insert(e, PhysicsMaterial::rubber());
-            }
-
-            // === 8. ЛИФТЫ ===
-            for i in 0..2 {
-                let e = world.spawn();
-                world.insert(e, Name(format!("Lift_{}", i)));
-                world.insert(
-                    e,
-                    Transform::new(-12.0 + i as f32 * 24.0, 2.0, 0.0)
-                        .with_scale_xyz(2.5, 0.3, 2.5),
-                );
-                world.insert(e, MeshHandle("cube".into()));
-                world.insert(e, MaterialHandle("chocolate".into()));
-                world.insert(e, RigidBody::kinematic());
-                world.insert(e, Collider::aabb(Vec3::splat(0.5)));
-                world.insert(e, PhysicsMaterial::concrete());
-            }
-
-            // === 9. ВРАГИ ===
-            for i in 0..8 {
-                let angle = i as f32 / 8.0 * std::f32::consts::TAU;
-                let e = world.spawn();
-                world.insert(e, Name(format!("Enemy_{}", i)));
-                world.insert(
-                    e,
-                    Transform::new(angle.cos() * 18.0, 0.8, angle.sin() * 18.0).with_scale(0.8),
-                );
-                world.insert(e, MeshHandle("sphere".into()));
-                world.insert(e, MaterialHandle("brick".into()));
-                world.insert(e, Health::new(50.0));
-                world.insert(e, Chase::new(3.0, 1.5));
-            }
-
-            // === 10. PICKUPS + SWITCH ===
-            for i in 0..5 {
-                let angle = i as f32 / 5.0 * std::f32::consts::TAU;
-                let e = world.spawn();
-                world.insert(e, Name(format!("Pickup_{}", i)));
-                world.insert(
-                    e,
-                    Transform::new(angle.cos() * 5.0, 1.2, angle.sin() * 5.0).with_scale(0.4),
-                );
-                world.insert(e, MeshHandle("sphere".into()));
-                world.insert(e, MaterialHandle("emissive_warm".into()));
-                world.insert(e, Interactable::Pickup);
-                world.insert(e, Spinner::new(Vec3::Y, 2.0));
-            }
-            for i in 0..3 {
-                let angle = i as f32 / 3.0 * std::f32::consts::TAU;
-                let e = world.spawn();
-                world.insert(e, Name(format!("Switch_{}", i)));
-                world.insert(e, Transform::new(angle.cos() * 10.0, 1.2, angle.sin() * 10.0));
-                world.insert(e, MeshHandle("cylinder".into()));
-                world.insert(e, MaterialHandle("emissive_cyan".into()));
-                world.insert(e, Interactable::Toggle);
-                world.insert(e, Spinner::new(Vec3::Y, 1.5));
-            }
-
-            // === 11. ПОРТАЛ ===
-            let portal = world.spawn();
-            world.insert(portal, Name("Portal".into()));
-            world.insert(
-                portal,
-                Transform::new(-16.0, 2.0, -16.0).with_scale_xyz(2.0, 4.0, 2.0),
-            );
-            world.insert(portal, MeshHandle("cube".into()));
-            world.insert(portal, MaterialHandle("glass".into()));
-            world.insert(portal, Trigger::new(3.0, TriggerAction::Teleport([0.0, 2.0, 0.0])));
-
-            // === 12. ЛЕС ===
-            for i in 0..12 {
-                let angle = i as f32 / 12.0 * std::f32::consts::TAU;
-                let r = 26.0 + (i % 3) as f32 * 1.5;
-                let e = world.spawn();
-                world.insert(e, Name(format!("Tree_{:02}", i)));
-                world.insert(
-                    e,
-                    Transform::new(angle.cos() * r, 3.0, angle.sin() * r)
-                        .with_rotation(Quat::from_axis_angle(Vec3::Y, angle))
-                        .with_scale_xyz(3.0, 6.0, 1.0),
-                );
-                world.insert(e, MeshHandle("quad".into()));
-                world.insert(e, MaterialHandle("foliage".into()));
-            }
-
-            // === 13. glTF ===
+            // === glTF-модели (если загрузились) ===
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
-                let node_label = inst.node_name.clone().unwrap_or_else(|| format!("Gltf_{}", index));
+                let node_label = inst
+                    .node_name
+                    .clone()
+                    .unwrap_or_else(|| format!("Gltf_{}", index));
                 world.insert(e, Name(node_label));
                 let (scale, rot, trans) = inst.model.to_scale_rotation_translation();
-                let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 12.0);
+                let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 30.0);
                 world.insert(
                     e,
-                    Transform::at(trans + offset).with_rotation(rot).with_scale(scale.x),
+                    Transform::at(trans + offset)
+                        .with_rotation(rot)
+                        .with_scale(scale.x),
                 );
                 world.insert(e, MeshHandle(inst.mesh_name.clone()));
                 world.insert(e, MaterialHandle(inst.material_name.clone()));
@@ -582,25 +358,29 @@ impl Game for DemoGame {
                 index += 1;
             }
 
-            log::info!("Spawned demo arena with LOD-enabled meshes");
+            log::info!(
+                "Spawned RPG scene: village + forest + dungeon + boss + quests"
+            );
         }
 
-        // Лифты.
+        // === RPG tick: диалог, двери ===
         if self.spawned {
-            let t = self.orbit_phase * 2.0;
-            let entities: Vec<Entity> = world.entities().to_vec();
-            for e in entities {
-                if let Some(Name(n)) = world.get::<Name>(e) {
-                    let base_y = if n == "Lift_0" { Some((2.0_f32, 0.0_f32)) }
-                        else if n == "Lift_1" { Some((3.5_f32, 1.5_f32)) }
-                        else { None };
-                    if let Some((base, phase)) = base_y {
-                        if let Some(tf) = world.get_mut::<Transform>(e) {
-                            tf.position.y = base + ((t + phase) * 1.2).sin() * 2.0;
-                        }
-                        if let Some(rb) = world.get_mut::<RigidBody>(e) {
-                            rb.wake();
-                        }
+            let player_pos = self.camera.position();
+            rpg::tick(&mut self.rpg, world, player_pos, dt);
+
+            // Взаимодействие E в Play-режиме — перехватывает только если
+            // обычный обработчик App не сработал.
+            if input.play_mode && input.key_pressed(KeyCode::KeyE) {
+                let origin = self.camera.position();
+                let dir = self.camera.forward();
+                if let Some((target, dist)) = crate::editor::picking::pick_ray(
+                    world,
+                    renderer,
+                    origin,
+                    dir,
+                ) {
+                    if dist < 4.0 {
+                        rpg::try_interact(world, &mut self.rpg, target);
                     }
                 }
             }
@@ -654,7 +434,6 @@ impl Game for DemoGame {
         let lod_bias = self.postfx.lod_bias.max(0.01);
         let lod_dists = self.postfx.lod_distances;
 
-        // Сколько LOD было выбрано за этот кадр.
         let mut lod_counts = [0usize; 4];
 
         let entities: Vec<_> = world.entities().to_vec();
@@ -680,12 +459,8 @@ impl Game for DemoGame {
                 }
             }
 
-            // === LOD выбор ===
             let (world_center, world_radius) = mesh.world_bounds(&model);
             let dist = (world_center - cam_pos).length();
-
-            // Порог LOD скорректирован на радиус: крупные объекты
-            // переключаются позже.
             let dist_effective = (dist - world_radius).max(0.0) / lod_bias;
 
             let lod_level = if mesh.lods.is_empty() {
@@ -732,7 +507,6 @@ impl Game for DemoGame {
             buckets.entry(key).or_default().push(inst);
         }
 
-        // Сохраняем статистику LOD.
         self.lod_stats = lod_counts;
 
         buckets
@@ -786,6 +560,14 @@ impl Game for DemoGame {
     fn postfx(&self) -> PostFx { self.postfx }
     fn camera(&self) -> &Camera3D { &self.camera }
     fn camera_mut(&mut self) -> &mut Camera3D { &mut self.camera }
+
+    fn rpg_hud(&self) -> Vec<(String, String)> {
+        self.rpg.hud_lines()
+    }
+
+    fn on_kill(&mut self, world: &mut World, target: Entity) {
+        rpg::on_kill(world, &mut self.rpg, target);
+    }
 }
 
 fn main() {

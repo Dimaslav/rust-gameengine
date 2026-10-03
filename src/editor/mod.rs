@@ -1,5 +1,6 @@
 //! Редактор.
 
+pub mod camera_bookmarks;
 pub mod gizmo;
 pub mod palette;
 pub mod picking;
@@ -107,6 +108,18 @@ pub enum EditorAction {
     ImportFbx,
     /// Загрузить конкретный путь (из Recent Files).
     LoadPath(String),
+
+    // === Команды из Command Palette ===
+    SaveCameraBookmark(usize),
+    GotoCameraBookmark(usize),
+    /// 0=front, 1=back, 2=right, 3=left, 4=top, 5=bottom, 6=iso.
+    CameraPreset(u8),
+
+    // === Дополнительные действия ===
+    DeselectAll,
+    InvertSelection,
+    SelectAll,
+    CleanupEmptyEntities,
 }
 
 impl EditorState {

@@ -1,4 +1,5 @@
 pub mod components;
+pub mod rpg;
 
 pub use components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,

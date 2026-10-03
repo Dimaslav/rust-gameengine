@@ -15,4 +15,7 @@
     palette_snap_to_grid: true,
     palette_grid_step: 0.5,
     recent_scenes: [],
+    camera_bookmarks: (
+        slots: (None, None, None, None, None, None, None, None, None),
+    ),
 )

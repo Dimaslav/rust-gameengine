@@ -19,14 +19,18 @@ pub struct UiState {
     pub show_stats_panel: bool,
     pub show_hierarchy_panel: bool,
     pub show_inspector_panel: bool,
-    /// Ширина левой панели (Hierarchy + Stats).
     pub left_panel_width: f32,
-    /// Ширина правой панели (Inspector + Renderer).
     pub right_panel_width: f32,
-    /// Фильтр по тегам компонентов в Hierarchy ("ph", "t", "sk" и т.д.).
     pub component_filter: String,
-    /// Флаг «настройки применены при первом кадре».
     pub initialized: bool,
+
+    // === Command Palette ===
+    pub command_palette_open: bool,
+    pub command_palette_query: String,
+    pub command_palette_selected: usize,
+
+    // === Bookmarks panel ===
+    pub show_bookmarks_panel: bool,
 }
 
 impl UiState {
@@ -40,6 +44,10 @@ impl UiState {
             right_panel_width: 340.0,
             component_filter: String::new(),
             initialized: false,
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
+            show_bookmarks_panel: false,
         }
     }
 }
@@ -55,6 +63,11 @@ pub struct Stats {
     pub point_lights: usize,
     pub lod_counts: [usize; 4],
     pub lod_triangles: [usize; 4],
+    pub sel_entities: usize,
+    pub sel_triangles: usize,
+    pub sel_vertices: usize,
+    /// Дополнительные строки HUD от игры (label, value).
+    pub extra_lines: Vec<(String, String)>,
 }
 
 pub struct UiAssets<'a> {
@@ -75,7 +88,7 @@ pub fn draw(
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
 
-    // === Применяем настройки к UI state один раз при старте ===
+    // Применяем настройки к UI state один раз при старте.
     if !state.initialized {
         let s = &editor.settings;
         state.show_renderer_panel = s.show_renderer_panel;
@@ -88,7 +101,12 @@ pub fn draw(
     }
 
     if editor.play.active {
-        draw_play_hud(ctx, &editor.play, stats.fps);
+        draw_play_hud(ctx, &editor.play, stats);
+    }
+
+    // === Command Palette (Ctrl+P) ===
+    if state.command_palette_open {
+        draw_command_palette(ctx, state, &mut action);
     }
 
     // ===== Box-select overlay =====
@@ -202,6 +220,15 @@ pub fn draw(
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Rust Engine 3D");
+            if ui
+                .button("⌘")
+                .on_hover_text("Command palette (Ctrl+P)")
+                .clicked()
+            {
+                state.command_palette_open = true;
+                state.command_palette_query.clear();
+                state.command_palette_selected = 0;
+            }
             ui.separator();
 
             if ui
@@ -248,10 +275,7 @@ pub fn draw(
             }
 
             if ui
-                .add_enabled(
-                    !editor.selected.is_empty(),
-                    egui::Button::new("Copy (Ctrl+C)"),
-                )
+                .add_enabled(!editor.selected.is_empty(), egui::Button::new("Copy (Ctrl+C)"))
                 .clicked()
             {
                 action = Some(EditorAction::CopyEntity);
@@ -416,6 +440,12 @@ pub fn draw(
                         ui.separator();
                         ui.label(format!("Dir lights: {}", stats.dir_lights));
                         ui.label(format!("Point lights: {}", stats.point_lights));
+
+                        ui.separator();
+                        ui.label("Selection");
+                        ui.label(format!("Entities: {}", stats.sel_entities));
+                        ui.label(format!("Triangles: {}", stats.sel_triangles));
+                        ui.label(format!("Vertices: {}", stats.sel_vertices));
 
                         ui.separator();
                         ui.label("LOD");
@@ -627,9 +657,7 @@ pub fn draw(
                                                     egui::Rounding::same(2.0),
                                                     egui::Stroke::new(
                                                         2.0_f32,
-                                                        egui::Color32::from_rgb(
-                                                            255, 210, 90,
-                                                        ),
+                                                        egui::Color32::from_rgb(255, 210, 90),
                                                     ),
                                                 );
                                             }
@@ -639,9 +667,7 @@ pub fn draw(
                                             {
                                                 let child = *child_arc;
                                                 if child != e
-                                                    && !would_create_cycle(
-                                                        world, child, e,
-                                                    )
+                                                    && !would_create_cycle(world, child, e)
                                                 {
                                                     editor.undo_requested = true;
                                                     world.insert(child, Parent(e));
@@ -661,29 +687,23 @@ pub fn draw(
                                                 }
                                                 if ui.button("Focus (F)").clicked() {
                                                     editor.select_single(e);
-                                                    action =
-                                                        Some(EditorAction::FocusSelected);
+                                                    action = Some(EditorAction::FocusSelected);
                                                     ui.close_menu();
                                                 }
                                                 if ui.button("Duplicate").clicked() {
                                                     editor.select_single(e);
-                                                    action =
-                                                        Some(EditorAction::Duplicate);
+                                                    action = Some(EditorAction::Duplicate);
                                                     ui.close_menu();
                                                 }
                                                 if ui.button("Delete").clicked() {
                                                     editor.select_single(e);
-                                                    action = Some(
-                                                        EditorAction::DeleteSelected,
-                                                    );
+                                                    action = Some(EditorAction::DeleteSelected);
                                                     ui.close_menu();
                                                 }
                                                 ui.separator();
                                                 if ui.button("Export FBX…").clicked() {
                                                     editor.select_single(e);
-                                                    action = Some(
-                                                        EditorAction::ExportFbxSelected,
-                                                    );
+                                                    action = Some(EditorAction::ExportFbxSelected);
                                                     ui.close_menu();
                                                 }
                                                 ui.separator();
@@ -720,19 +740,14 @@ pub fn draw(
                         ui.horizontal(|ui| {
                             ui.label("Name:");
                             ui.add(
-                                egui::TextEdit::singleline(
-                                    &mut editor.prefab_save_name,
-                                )
-                                .desired_width(120.0)
-                                .hint_text("my_prefab"),
+                                egui::TextEdit::singleline(&mut editor.prefab_save_name)
+                                    .desired_width(120.0)
+                                    .hint_text("my_prefab"),
                             );
                             let can_save = !editor.selected.is_empty()
                                 && !editor.prefab_save_name.trim().is_empty();
                             if ui
-                                .add_enabled(
-                                    can_save,
-                                    egui::Button::new("💾 Save Sel"),
-                                )
+                                .add_enabled(can_save, egui::Button::new("💾 Save Sel"))
                                 .on_hover_text("Сохранить выделение как .prefab.ron")
                                 .clicked()
                             {
@@ -744,17 +759,11 @@ pub fn draw(
 
                         let prefab_count = editor.prefab_list.len();
                         if prefab_count == 0 {
+                            ui.label(egui::RichText::new("no prefabs found").weak().italics());
                             ui.label(
-                                egui::RichText::new("no prefabs found")
-                                    .weak()
-                                    .italics(),
-                            );
-                            ui.label(
-                                egui::RichText::new(
-                                    "Выдели объекты → введи имя → Save Sel",
-                                )
-                                .small()
-                                .weak(),
+                                egui::RichText::new("Выдели объекты → введи имя → Save Sel")
+                                    .small()
+                                    .weak(),
                             );
                         } else {
                             ui.label(format!("{} files", prefab_count));
@@ -762,32 +771,21 @@ pub fn draw(
                                 .auto_shrink([false; 2])
                                 .max_height(200.0)
                                 .show(ui, |ui| {
-                                    for (idx, path) in
-                                        editor.prefab_list.iter().enumerate()
-                                    {
+                                    for (idx, path) in editor.prefab_list.iter().enumerate() {
                                         let display =
-                                            crate::scene::prefab::prefab_display_name(
-                                                path,
-                                            );
+                                            crate::scene::prefab::prefab_display_name(path);
                                         let resp = ui
                                             .button(format!("📦 {}", display))
-                                            .on_hover_text(format!(
-                                                "Spawn {}",
-                                                path.display()
-                                            ));
+                                            .on_hover_text(format!("Spawn {}", path.display()));
                                         if resp.clicked() {
-                                            action = Some(
-                                                EditorAction::InstantiatePrefab(
-                                                    idx as u32,
-                                                ),
-                                            );
+                                            action = Some(EditorAction::InstantiatePrefab(
+                                                idx as u32,
+                                            ));
                                         }
                                         resp.context_menu(|ui| {
                                             if ui.button("Spawn here").clicked() {
                                                 action = Some(
-                                                    EditorAction::InstantiatePrefab(
-                                                        idx as u32,
-                                                    ),
+                                                    EditorAction::InstantiatePrefab(idx as u32),
                                                 );
                                                 ui.close_menu();
                                             }
@@ -800,7 +798,7 @@ pub fn draw(
                                 });
                         }
 
-                        // === Assets (текстуры) ===
+                        // === Assets ===
                         ui.separator();
                         ui.heading("Assets");
                         ui.separator();
@@ -820,11 +818,7 @@ pub fn draw(
 
                         let tex_count = assets.texture_list.len();
                         if tex_count == 0 {
-                            ui.label(
-                                egui::RichText::new("no textures loaded")
-                                    .weak()
-                                    .italics(),
-                            );
+                            ui.label(egui::RichText::new("no textures loaded").weak().italics());
                         } else {
                             ui.label(format!("{} textures", tex_count));
                             egui::ScrollArea::vertical()
@@ -840,11 +834,9 @@ pub fn draw(
                                             ));
                                         resp.context_menu(|ui| {
                                             if ui.button("Remove texture").clicked() {
-                                                action = Some(
-                                                    EditorAction::RemoveTexture(
-                                                        name.clone(),
-                                                    ),
-                                                );
+                                                action = Some(EditorAction::RemoveTexture(
+                                                    name.clone(),
+                                                ));
                                                 ui.close_menu();
                                             }
                                             if ui.button("Copy name").clicked() {
@@ -875,22 +867,13 @@ pub fn draw(
                         ui.horizontal(|ui| {
                             ui.label("Gizmo:");
                             let m = &mut editor.gizmo.mode;
-                            if ui
-                                .selectable_label(*m == GizmoMode::Translate, "T (1)")
-                                .clicked()
-                            {
+                            if ui.selectable_label(*m == GizmoMode::Translate, "T (1)").clicked() {
                                 *m = GizmoMode::Translate;
                             }
-                            if ui
-                                .selectable_label(*m == GizmoMode::Rotate, "R (2)")
-                                .clicked()
-                            {
+                            if ui.selectable_label(*m == GizmoMode::Rotate, "R (2)").clicked() {
                                 *m = GizmoMode::Rotate;
                             }
-                            if ui
-                                .selectable_label(*m == GizmoMode::Scale, "S (3)")
-                                .clicked()
-                            {
+                            if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() {
                                 *m = GizmoMode::Scale;
                             }
                             ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap");
@@ -946,70 +929,46 @@ pub fn draw(
                             .show(ui, |ui| {
                                 ui.label("Post-processing");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.bloom_threshold,
-                                        0.1..=5.0,
-                                    )
-                                    .text("Bloom threshold"),
+                                    egui::Slider::new(&mut postfx.bloom_threshold, 0.1..=5.0)
+                                        .text("Bloom threshold"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.bloom_strength,
-                                        0.0..=3.0,
-                                    )
-                                    .text("Bloom strength"),
+                                    egui::Slider::new(&mut postfx.bloom_strength, 0.0..=3.0)
+                                        .text("Bloom strength"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.bloom_knee,
-                                        0.01..=2.0,
-                                    )
-                                    .text("Bloom knee"),
+                                    egui::Slider::new(&mut postfx.bloom_knee, 0.01..=2.0)
+                                        .text("Bloom knee"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.bloom_radius,
-                                        0.5..=3.0,
-                                    )
-                                    .text("Bloom radius"),
+                                    egui::Slider::new(&mut postfx.bloom_radius, 0.5..=3.0)
+                                        .text("Bloom radius"),
                                 );
                                 ui.add(
                                     egui::Slider::new(&mut postfx.exposure, 0.1..=3.0)
                                         .text("Exposure"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.fxaa_strength,
-                                        0.0..=1.0,
-                                    )
-                                    .text("FXAA strength"),
+                                    egui::Slider::new(&mut postfx.fxaa_strength, 0.0..=1.0)
+                                        .text("FXAA strength"),
                                 );
 
                                 ui.separator();
                                 ui.label("SSAO");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.ssao_strength,
-                                        0.0..=2.0,
-                                    )
-                                    .text("Strength"),
+                                    egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0)
+                                        .text("Strength"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.ssao_radius,
-                                        0.05..=2.0,
-                                    )
-                                    .text("Radius"),
+                                    egui::Slider::new(&mut postfx.ssao_radius, 0.05..=2.0)
+                                        .text("Radius"),
                                 );
 
                                 ui.separator();
                                 ui.label("IBL");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.ibl_strength,
-                                        0.0..=3.0,
-                                    )
-                                    .text("IBL strength"),
+                                    egui::Slider::new(&mut postfx.ibl_strength, 0.0..=3.0)
+                                        .text("IBL strength"),
                                 );
 
                                 ui.separator();
@@ -1019,153 +978,81 @@ pub fn draw(
                                     postfx.fog_color = c;
                                 }
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.fog_density,
-                                        0.0..=0.2,
-                                    )
-                                    .text("Density"),
+                                    egui::Slider::new(&mut postfx.fog_density, 0.0..=0.2)
+                                        .text("Density"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.fog_height_base,
-                                        -10.0..=20.0,
-                                    )
-                                    .text("Height base"),
+                                    egui::Slider::new(&mut postfx.fog_height_base, -10.0..=20.0)
+                                        .text("Height base"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.fog_height_falloff,
-                                        0.0..=0.5,
-                                    )
-                                    .text("Height falloff"),
+                                    egui::Slider::new(&mut postfx.fog_height_falloff, 0.0..=0.5)
+                                        .text("Height falloff"),
                                 );
 
                                 ui.separator();
                                 ui.label("Screen effects");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.vignette_strength,
-                                        0.0..=1.0,
-                                    )
-                                    .text("Vignette"),
+                                    egui::Slider::new(&mut postfx.vignette_strength, 0.0..=1.0)
+                                        .text("Vignette"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.film_grain,
-                                        0.0..=1.0,
-                                    )
-                                    .text("Film grain"),
+                                    egui::Slider::new(&mut postfx.film_grain, 0.0..=1.0)
+                                        .text("Film grain"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.chromatic_aberration,
-                                        0.0..=1.0,
-                                    )
-                                    .text("Chromatic ab."),
+                                    egui::Slider::new(&mut postfx.chromatic_aberration, 0.0..=1.0)
+                                        .text("Chromatic ab."),
                                 );
 
                                 ui.separator();
                                 ui.label("Shadows");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.shadow_bias,
-                                        0.0..=0.01,
-                                    )
-                                    .text("Depth bias"),
+                                    egui::Slider::new(&mut postfx.shadow_bias, 0.0..=0.01)
+                                        .text("Depth bias"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.shadow_normal_bias,
-                                        0.0..=10.0,
-                                    )
-                                    .text("Slope bias"),
+                                    egui::Slider::new(&mut postfx.shadow_normal_bias, 0.0..=10.0)
+                                        .text("Slope bias"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.shadow_fade_start,
-                                        50.0..=250.0,
-                                    )
-                                    .text("Fade start"),
+                                    egui::Slider::new(&mut postfx.shadow_fade_start, 50.0..=250.0)
+                                        .text("Fade start"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.shadow_fade_end,
-                                        60.0..=300.0,
-                                    )
-                                    .text("Fade end"),
+                                    egui::Slider::new(&mut postfx.shadow_fade_end, 60.0..=300.0)
+                                        .text("Fade end"),
                                 );
 
                                 ui.separator();
                                 ui.label("LOD");
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.lod_bias,
-                                        0.2..=4.0,
-                                    )
-                                    .logarithmic(true)
-                                    .text("LOD bias"),
+                                    egui::Slider::new(&mut postfx.lod_bias, 0.2..=4.0)
+                                        .logarithmic(true)
+                                        .text("LOD bias"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.lod_distances[0],
-                                        5.0..=200.0,
-                                    )
-                                    .text("Distance LOD0→1"),
+                                    egui::Slider::new(&mut postfx.lod_distances[0], 5.0..=200.0)
+                                        .text("Distance LOD0→1"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.lod_distances[1],
-                                        20.0..=500.0,
-                                    )
-                                    .text("Distance LOD1→2"),
+                                    egui::Slider::new(&mut postfx.lod_distances[1], 20.0..=500.0)
+                                        .text("Distance LOD1→2"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(
-                                        &mut postfx.lod_distances[2],
-                                        50.0..=1000.0,
-                                    )
-                                    .text("Distance LOD2→3"),
+                                    egui::Slider::new(&mut postfx.lod_distances[2], 50.0..=1000.0)
+                                        .text("Distance LOD2→3"),
                                 );
 
                                 ui.separator();
                                 ui.label("Debug view");
                                 ui.horizontal_wrapped(|ui| {
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::Final,
-                                        "Final",
-                                    );
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::Ssao,
-                                        "SSAO",
-                                    );
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::GbufferNormal,
-                                        "Normal",
-                                    );
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::GbufferDepth,
-                                        "Depth",
-                                    );
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::HdrPreBloom,
-                                        "HDR",
-                                    );
-                                    debug_button(
-                                        ui,
-                                        &mut postfx.debug_view,
-                                        crate::render::DebugView::CsmCascade0,
-                                        "CSM",
-                                    );
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Final, "Final");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::Ssao, "SSAO");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferNormal, "Normal");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::GbufferDepth, "Depth");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::HdrPreBloom, "HDR");
+                                    debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::CsmCascade0, "CSM");
                                 });
 
                                 ui.separator();
@@ -1173,113 +1060,35 @@ pub fn draw(
                                     .default_open(false)
                                     .show(ui, |ui| {
                                         let p = &mut editor.play;
+                                        ui.add(egui::Slider::new(&mut p.walk_speed, 0.5..=20.0).text("Walk speed"));
+                                        ui.add(egui::Slider::new(&mut p.run_speed, 1.0..=40.0).text("Run speed"));
+                                        ui.add(egui::Slider::new(&mut p.jump_speed, 1.0..=20.0).text("Jump"));
+                                        ui.add(egui::Slider::new(&mut p.gravity, 1.0..=60.0).text("Gravity"));
+                                        ui.add(egui::Slider::new(&mut p.eye_height, 0.5..=3.0).text("Eye height"));
                                         ui.add(
-                                            egui::Slider::new(&mut p.walk_speed, 0.5..=20.0)
-                                                .text("Walk speed"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.run_speed, 1.0..=40.0)
-                                                .text("Run speed"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.jump_speed, 1.0..=20.0)
-                                                .text("Jump"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.gravity, 1.0..=60.0)
-                                                .text("Gravity"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.eye_height, 0.5..=3.0)
-                                                .text("Eye height"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.look_sensitivity,
-                                                0.0005..=0.01,
-                                            )
-                                            .text("Look sensitivity"),
+                                            egui::Slider::new(&mut p.look_sensitivity, 0.0005..=0.01)
+                                                .text("Look sensitivity"),
                                         );
                                         ui.separator();
                                         ui.label("Player capsule");
-                                        ui.add(
-                                            egui::Slider::new(&mut p.player_radius, 0.1..=1.0)
-                                                .text("Radius"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.player_height, 0.5..=3.0)
-                                                .text("Height"),
-                                        );
+                                        ui.add(egui::Slider::new(&mut p.player_radius, 0.1..=1.0).text("Radius"));
+                                        ui.add(egui::Slider::new(&mut p.player_height, 0.5..=3.0).text("Height"));
                                         ui.separator();
                                         ui.label("Crouch (Ctrl)");
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.crouch_height,
-                                                0.5..=1.7,
-                                            )
-                                            .text("Eye height"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.crouch_speed_mult,
-                                                0.1..=1.0,
-                                            )
-                                            .text("Speed mult"),
-                                        );
+                                        ui.add(egui::Slider::new(&mut p.crouch_height, 0.5..=1.7).text("Eye height"));
+                                        ui.add(egui::Slider::new(&mut p.crouch_speed_mult, 0.1..=1.0).text("Speed mult"));
                                         ui.separator();
                                         ui.label("Combat");
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.max_health,
-                                                10.0..=500.0,
-                                            )
-                                            .text("Max HP"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.max_ammo, 0..=500)
-                                                .text("Max ammo"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.damage_per_shot,
-                                                1.0..=200.0,
-                                            )
-                                            .text("Damage"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut p.gun_range, 5.0..=500.0)
-                                                .text("Range"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.bullet_speed,
-                                                0.0..=300.0,
-                                            )
-                                            .text("Bullet speed"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.fire_cooldown_max,
-                                                0.02..=1.0,
-                                            )
-                                            .text("Fire cd"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.interact_distance,
-                                                1.0..=20.0,
-                                            )
-                                            .text("Interact dist"),
-                                        );
+                                        ui.add(egui::Slider::new(&mut p.max_health, 10.0..=500.0).text("Max HP"));
+                                        ui.add(egui::Slider::new(&mut p.max_ammo, 0..=500).text("Max ammo"));
+                                        ui.add(egui::Slider::new(&mut p.damage_per_shot, 1.0..=200.0).text("Damage"));
+                                        ui.add(egui::Slider::new(&mut p.gun_range, 5.0..=500.0).text("Range"));
+                                        ui.add(egui::Slider::new(&mut p.bullet_speed, 0.0..=300.0).text("Bullet speed"));
+                                        ui.add(egui::Slider::new(&mut p.fire_cooldown_max, 0.02..=1.0).text("Fire cd"));
+                                        ui.add(egui::Slider::new(&mut p.interact_distance, 1.0..=20.0).text("Interact dist"));
                                         ui.separator();
                                         ui.checkbox(&mut p.bob_enabled, "Head bob");
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut p.bob_amplitude,
-                                                0.0..=0.15,
-                                            )
-                                            .text("Bob amplitude"),
-                                        );
+                                        ui.add(egui::Slider::new(&mut p.bob_amplitude, 0.0..=0.15).text("Bob amplitude"));
                                         ui.separator();
                                         ui.checkbox(&mut p.show_crosshair, "Show crosshair");
                                         ui.checkbox(&mut p.show_hud, "Show HUD");
@@ -1295,21 +1104,46 @@ pub fn draw(
                                         ui.label("Shift — faster, Ctrl — slower");
                                         ui.label("Scroll during fly — fly speed");
                                         ui.separator();
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut editor.fly_speed,
-                                                1.0..=100.0,
-                                            )
-                                            .text("Fly speed"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut editor.fly_sensitivity,
-                                                0.0005..=0.01,
-                                            )
-                                            .text("Fly sensitivity"),
+                                        ui.add(egui::Slider::new(&mut editor.fly_speed, 1.0..=100.0).text("Fly speed"));
+                                        ui.add(egui::Slider::new(&mut editor.fly_sensitivity, 0.0005..=0.01).text("Fly sensitivity"));
+                                    });
+                            });
+
+                        // === Camera Bookmarks ===
+                        ui.separator();
+                        egui::CollapsingHeader::new("Camera Bookmarks")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new("Ctrl+1..9 — save · Alt+1..9 — goto")
+                                        .small()
+                                        .weak(),
+                                );
+                                for i in 0..9 {
+                                    ui.horizontal(|ui| {
+                                        let label = format!("Slot {}:", i + 1);
+                                        ui.label(label);
+                                        if editor.settings.camera_bookmarks.is_empty(i) {
+                                            ui.label(
+                                                egui::RichText::new("(empty)").weak().italics(),
+                                            );
+                                        } else if ui.small_button("↺").on_hover_text("Goto").clicked() {
+                                            action = Some(EditorAction::GotoCameraBookmark(i));
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .small_button("💾")
+                                                    .on_hover_text("Save here")
+                                                    .clicked()
+                                                {
+                                                    action = Some(EditorAction::SaveCameraBookmark(i));
+                                                }
+                                            },
                                         );
                                     });
+                                }
                             });
                     }
                 });
@@ -1318,6 +1152,167 @@ pub fn draw(
     }
 
     action
+}
+
+// ============================================================
+// Command Palette
+// ============================================================
+
+#[derive(Clone)]
+struct PaletteCommand {
+    label: &'static str,
+    action: EditorAction,
+}
+
+fn palette_commands() -> Vec<PaletteCommand> {
+    vec![
+        PaletteCommand { label: "File · Save scene", action: EditorAction::Save },
+        PaletteCommand { label: "File · Load scene", action: EditorAction::Load },
+        PaletteCommand { label: "File · New scene", action: EditorAction::NewScene },
+        PaletteCommand { label: "FBX · Export all", action: EditorAction::ExportFbxAll },
+        PaletteCommand { label: "FBX · Export selected", action: EditorAction::ExportFbxSelected },
+        PaletteCommand { label: "FBX · Import…", action: EditorAction::ImportFbx },
+        PaletteCommand { label: "Textures · Load images…", action: EditorAction::LoadTextures },
+
+        PaletteCommand { label: "Scene · Add cube", action: EditorAction::AddCube },
+        PaletteCommand { label: "Scene · Add sphere", action: EditorAction::AddSphere },
+        PaletteCommand { label: "Scene · Duplicate selection", action: EditorAction::Duplicate },
+        PaletteCommand { label: "Scene · Delete selection", action: EditorAction::DeleteSelected },
+        PaletteCommand { label: "Scene · Select all", action: EditorAction::SelectAll },
+        PaletteCommand { label: "Scene · Deselect all", action: EditorAction::DeselectAll },
+        PaletteCommand { label: "Scene · Invert selection", action: EditorAction::InvertSelection },
+        PaletteCommand { label: "Scene · Cleanup empty entities", action: EditorAction::CleanupEmptyEntities },
+        PaletteCommand { label: "Scene · Copy selection", action: EditorAction::CopyEntity },
+        PaletteCommand { label: "Scene · Paste", action: EditorAction::PasteEntity },
+
+        PaletteCommand { label: "Camera · Focus on selection", action: EditorAction::FocusSelected },
+        PaletteCommand { label: "Camera · Front view", action: EditorAction::CameraPreset(0) },
+        PaletteCommand { label: "Camera · Back view", action: EditorAction::CameraPreset(1) },
+        PaletteCommand { label: "Camera · Right view", action: EditorAction::CameraPreset(2) },
+        PaletteCommand { label: "Camera · Left view", action: EditorAction::CameraPreset(3) },
+        PaletteCommand { label: "Camera · Top view", action: EditorAction::CameraPreset(4) },
+        PaletteCommand { label: "Camera · Bottom view", action: EditorAction::CameraPreset(5) },
+        PaletteCommand { label: "Camera · Isometric view", action: EditorAction::CameraPreset(6) },
+
+        PaletteCommand { label: "Edit · Undo", action: EditorAction::Undo },
+        PaletteCommand { label: "Edit · Redo", action: EditorAction::Redo },
+
+        PaletteCommand { label: "Play · Toggle play mode", action: EditorAction::TogglePlay },
+        PaletteCommand { label: "Play · Spawn player here", action: EditorAction::SpawnPlayerHere },
+
+        PaletteCommand { label: "Prefab · Save selection…", action: EditorAction::SavePrefab },
+        PaletteCommand { label: "Prefab · Refresh list", action: EditorAction::RefreshPrefabs },
+    ]
+}
+
+fn fuzzy_match(query: &str, label: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let q = query.to_lowercase();
+    let l = label.to_lowercase();
+    l.find(&q)
+}
+
+fn draw_command_palette(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    action: &mut Option<EditorAction>,
+) {
+    let mut close = false;
+
+    egui::Area::new(egui::Id::new("command_palette"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(
+            ctx.screen_rect().center().x - 250.0,
+            ctx.screen_rect().top() + 100.0,
+        ))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(12.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(500.0);
+                    ui.set_max_width(500.0);
+
+                    ui.label(egui::RichText::new("Command palette").strong().small());
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut state.command_palette_query)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Type to filter commands…"),
+                    );
+                    response.request_focus();
+
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                    let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+
+                    let commands = palette_commands();
+                    let query = state.command_palette_query.clone();
+                    let mut filtered: Vec<(usize, &PaletteCommand)> = commands
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, c)| fuzzy_match(&query, c.label).map(|pos| (pos, c)))
+                        .collect();
+                    filtered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
+
+                    if !filtered.is_empty() {
+                        if up {
+                            state.command_palette_selected =
+                                state.command_palette_selected.saturating_sub(1);
+                        }
+                        if down {
+                            state.command_palette_selected =
+                                (state.command_palette_selected + 1).min(filtered.len() - 1);
+                        }
+                        if state.command_palette_selected >= filtered.len() {
+                            state.command_palette_selected = filtered.len() - 1;
+                        }
+                    } else {
+                        state.command_palette_selected = 0;
+                    }
+
+                    if enter && !filtered.is_empty() {
+                        let cmd = filtered[state.command_palette_selected].1.clone();
+                        *action = Some(cmd.action);
+                        close = true;
+                    }
+                    if esc {
+                        close = true;
+                    }
+
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            if filtered.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("no matching commands")
+                                        .weak()
+                                        .italics(),
+                                );
+                            }
+                            for (idx, (_, cmd)) in filtered.iter().enumerate() {
+                                let selected = idx == state.command_palette_selected;
+                                let resp = ui.selectable_label(selected, cmd.label);
+                                if resp.clicked() {
+                                    *action = Some(cmd.action.clone());
+                                    close = true;
+                                }
+                                if resp.hovered() {
+                                    state.command_palette_selected = idx;
+                                }
+                            }
+                        });
+                });
+        });
+
+    if close {
+        state.command_palette_open = false;
+        state.command_palette_query.clear();
+        state.command_palette_selected = 0;
+    }
 }
 
 // ============================================================
@@ -1455,10 +1450,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         }
     }
 
-    if !world.has::<Health>(e)
-        || !world.has::<Interactable>(e)
-        || !world.has::<Trigger>(e)
-    {
+    if !world.has::<Health>(e) || !world.has::<Interactable>(e) || !world.has::<Trigger>(e) {
         ui.separator();
     }
 
@@ -1496,18 +1488,12 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         any = true;
         ui.menu_button("Trigger", |ui| {
             if ui.button("Teleport to (0, 2, 0)").clicked() {
-                world.insert(
-                    e,
-                    Trigger::new(2.5, TriggerAction::Teleport([0.0, 2.0, 0.0])),
-                );
+                world.insert(e, Trigger::new(2.5, TriggerAction::Teleport([0.0, 2.0, 0.0])));
                 editor.undo_requested = true;
                 ui.close_menu();
             }
             if ui.button("Tint (green)").clicked() {
-                world.insert(
-                    e,
-                    Trigger::new(2.5, TriggerAction::Tint([0.2, 1.0, 0.2, 1.0])),
-                );
+                world.insert(e, Trigger::new(2.5, TriggerAction::Tint([0.2, 1.0, 0.2, 1.0])));
                 editor.undo_requested = true;
                 ui.close_menu();
             }
@@ -1647,11 +1633,7 @@ fn texture_picker(
                     changed = true;
                 }
                 if textures.is_empty() {
-                    ui.label(
-                        egui::RichText::new("(no textures loaded)")
-                            .weak()
-                            .italics(),
-                    );
+                    ui.label(egui::RichText::new("(no textures loaded)").weak().italics());
                 }
                 for (name, w, h) in textures {
                     let selected = current.as_deref() == Some(name.as_str());
@@ -1697,9 +1679,7 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         return;
     }
 
-    ui.label(
-        egui::RichText::new(format!("Group Transform ({} objects)", with_tf.len())).strong(),
-    );
+    ui.label(egui::RichText::new(format!("Group Transform ({} objects)", with_tf.len())).strong());
 
     fn common_vec3<I: Iterator<Item = Vec3>>(mut it: I) -> Option<Vec3> {
         let first = it.next()?;
@@ -1711,7 +1691,6 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         Some(first)
     }
 
-    // Position
     let pos_common = common_vec3(with_tf.iter().map(|(_, t)| t.position));
     let mixed_pos = pos_common.is_none();
     let mut pos = pos_common.unwrap_or(Vec3::ZERO).to_array();
@@ -1748,7 +1727,6 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         }
     }
 
-    // Rotation
     let eulers: Vec<Vec3> = with_tf
         .iter()
         .map(|(_, t)| {
@@ -1797,7 +1775,6 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         }
     }
 
-    // Scale
     let scale_common = common_vec3(with_tf.iter().map(|(_, t)| t.scale));
     let mixed_scale = scale_common.is_none();
     let mut scale = scale_common.unwrap_or(Vec3::ONE).to_array();
@@ -1839,7 +1816,9 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
 // Play HUD
 // ============================================================
 
-fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
+fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
+    let fps = stats.fps;
+
     if play.show_crosshair {
         let screen = ctx.screen_rect();
         let center = screen.center();
@@ -1960,10 +1939,7 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                                 .color(egui::Color32::from_rgb(230, 230, 230)),
                             );
                             let desired = egui::vec2(160.0, 10.0);
-                            let (rect, _) = ui.allocate_exact_size(
-                                desired,
-                                egui::Sense::hover(),
-                            );
+                            let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
                             let painter = ui.painter();
                             painter.rect_filled(
                                 rect,
@@ -2002,10 +1978,7 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                                 0.0
                             };
                             let desired = egui::vec2(160.0, 10.0);
-                            let (rect, _) = ui.allocate_exact_size(
-                                desired,
-                                egui::Sense::hover(),
-                            );
+                            let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
                             let painter = ui.painter();
                             painter.rect_filled(
                                 rect,
@@ -2025,13 +1998,42 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                     });
             });
     }
+
+    // === RPG HUD ===
+    if !stats.extra_lines.is_empty() {
+        egui::Area::new(egui::Id::new("rpg_hud_area"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160))
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(220.0);
+                        for (label, value) in &stats.extra_lines {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(label)
+                                        .monospace()
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(230, 220, 180)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(value)
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                                );
+                            });
+                        }
+                    });
+            });
+    }
 }
 
 // ============================================================
 // Helpers
 // ============================================================
 
-/// Компактные метки компонентов для Hierarchy.
 fn component_badges(world: &World, e: Entity) -> String {
     let mut s = String::with_capacity(24);
 
@@ -2175,10 +2177,7 @@ fn draw_inspector(
                             editor.clipboard_transform = Some(*t);
                         }
                         let paste_enabled = editor.clipboard_transform.is_some();
-                        if ui
-                            .add_enabled(paste_enabled, egui::Button::new("Paste"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(paste_enabled, egui::Button::new("Paste")).clicked() {
                             if let Some(src) = editor.clipboard_transform {
                                 editor.undo_requested = true;
                                 *t = src;
@@ -2238,8 +2237,7 @@ fn draw_inspector(
                         }
                     });
                     if changed_rot {
-                        t.rotation =
-                            glam::Quat::from_euler(glam::EulerRot::YXZ, ry, rx, rz);
+                        t.rotation = glam::Quat::from_euler(glam::EulerRot::YXZ, ry, rx, rz);
                     }
 
                     let mut scale = t.scale.to_array();

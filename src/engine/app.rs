@@ -77,6 +77,14 @@ pub trait Game: 'static {
     fn lod_stats(&self) -> [usize; 4] {
         [0; 4]
     }
+
+    /// Строки дополнительного HUD (RPG gold, quests, dialogue).
+    fn rpg_hud(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Игрок убил entity. Хук для квестов и дропа.
+    fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +139,30 @@ impl<G: Game> Drop for App<G> {
 }
 
 impl<G: Game> App<G> {
+    fn apply_camera_preset(&mut self, preset: u8) {
+        let cam = self.game.camera_mut();
+        let t = cam.target;
+        let r = cam.distance;
+
+        match preset {
+            0 => { cam.yaw = -std::f32::consts::FRAC_PI_2; cam.pitch = 0.0; }
+            1 => { cam.yaw = std::f32::consts::FRAC_PI_2; cam.pitch = 0.0; }
+            2 => { cam.yaw = std::f32::consts::PI; cam.pitch = 0.0; }
+            3 => { cam.yaw = 0.0; cam.pitch = 0.0; }
+            4 => { cam.pitch = -std::f32::consts::FRAC_PI_2 + 0.001; }
+            5 => { cam.pitch = std::f32::consts::FRAC_PI_2 - 0.001; }
+            6 => {
+                cam.yaw = -std::f32::consts::FRAC_PI_4;
+                cam.pitch = std::f32::consts::FRAC_PI_6;
+            }
+            _ => {}
+        }
+
+        cam.target = t;
+        cam.distance = r;
+        log::info!("Camera preset {} applied", preset);
+    }
+
     fn update_player(&mut self, dt: f32) {
         {
             let sens = self.editor.state.play.look_sensitivity;
@@ -309,6 +341,7 @@ impl<G: Game> App<G> {
                             if let Some(audio) = &self.audio {
                                 audio.play("explosion");
                             }
+                            self.game.on_kill(&mut self.world, target);
                             self.world.despawn(target);
                         }
                     }
@@ -562,6 +595,7 @@ impl<G: Game> App<G> {
                     if let Some(audio) = &self.audio {
                         audio.play("explosion");
                     }
+                    self.game.on_kill(&mut self.world, e);
                     self.world.despawn(e);
                 }
             }
@@ -586,6 +620,7 @@ impl<G: Game> App<G> {
         if !self.editor.state.play.active
             && !self.editor.state.flying
             && self.input.key_pressed(KeyCode::Escape)
+            && !self.ui_state.command_palette_open
         {
             let mut consumed = false;
             if self.editor.state.palette.active.is_some() {
@@ -683,6 +718,50 @@ impl<G: Game> App<G> {
         if !self.editor.state.play.active {
             let ctrl = self.input.key_down(KeyCode::ControlLeft)
                 || self.input.key_down(KeyCode::ControlRight);
+            let alt = self.input.key_down(KeyCode::AltLeft)
+                || self.input.key_down(KeyCode::AltRight);
+            let shift = self.input.key_down(KeyCode::ShiftLeft)
+                || self.input.key_down(KeyCode::ShiftRight);
+
+            if ctrl && !shift && !alt && self.input.key_pressed(KeyCode::KeyP) {
+                self.ui_state.command_palette_open = true;
+                self.ui_state.command_palette_query.clear();
+                self.ui_state.command_palette_selected = 0;
+            }
+
+            if self.ui_state.command_palette_open
+                && self.input.key_pressed(KeyCode::Escape)
+            {
+                self.ui_state.command_palette_open = false;
+                self.ui_state.command_palette_query.clear();
+            }
+
+            if ctrl && !shift && !alt {
+                for (i, key) in [
+                    KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+                    KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6,
+                    KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
+                ].iter().enumerate() {
+                    if self.input.key_pressed(*key) {
+                        self.editor.state.pending_action =
+                            Some(EditorAction::SaveCameraBookmark(i));
+                    }
+                }
+            }
+
+            if alt && !ctrl && !shift {
+                for (i, key) in [
+                    KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+                    KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6,
+                    KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
+                ].iter().enumerate() {
+                    if self.input.key_pressed(*key) {
+                        self.editor.state.pending_action =
+                            Some(EditorAction::GotoCameraBookmark(i));
+                    }
+                }
+            }
+
             if ctrl && self.input.key_pressed(KeyCode::KeyZ) {
                 self.editor.state.pending_action = Some(EditorAction::Undo);
             }
@@ -695,15 +774,21 @@ impl<G: Game> App<G> {
             if ctrl && self.input.key_pressed(KeyCode::KeyV) {
                 self.editor.state.pending_action = Some(EditorAction::PasteEntity);
             }
+            if ctrl && !shift && self.input.key_pressed(KeyCode::KeyA) {
+                self.editor.state.pending_action = Some(EditorAction::SelectAll);
+            }
+            if ctrl && self.input.key_pressed(KeyCode::KeyI) {
+                self.editor.state.pending_action = Some(EditorAction::InvertSelection);
+            }
 
             if !self.editor.state.selected.is_empty() {
-                if self.input.key_pressed(KeyCode::Digit1) {
+                if self.input.key_pressed(KeyCode::Digit1) && !ctrl && !alt {
                     self.editor.state.gizmo.mode = GizmoMode::Translate;
                 }
-                if self.input.key_pressed(KeyCode::Digit2) {
+                if self.input.key_pressed(KeyCode::Digit2) && !ctrl && !alt {
                     self.editor.state.gizmo.mode = GizmoMode::Rotate;
                 }
-                if self.input.key_pressed(KeyCode::Digit3) {
+                if self.input.key_pressed(KeyCode::Digit3) && !ctrl && !alt {
                     self.editor.state.gizmo.mode = GizmoMode::Scale;
                 }
                 if self.input.key_pressed(KeyCode::KeyF) && !ctrl {
@@ -748,6 +833,24 @@ impl<G: Game> App<G> {
         let raw_input = self.editor.egui_state.take_egui_input(&self.window);
 
         let lod_counts = self.game.lod_stats();
+
+        let mut sel_triangles = 0usize;
+        let mut sel_vertices = 0usize;
+        for &e in &self.editor.state.selected {
+            if let Some(mh) = self.world.get::<MeshHandle>(e) {
+                if let Some(mesh) = self.renderer.meshes.get(&mh.0) {
+                    sel_triangles += mesh.cpu_indices.len() / 3;
+                    sel_vertices += mesh.cpu_vertices.len();
+                }
+            }
+        }
+
+        let extra_lines = if self.editor.state.play.active {
+            self.game.rpg_hud()
+        } else {
+            Vec::new()
+        };
+
         let stats = Stats {
             fps: self.time.fps(),
             frame_time_max_ms: self.time.frame_time_max_ms(),
@@ -759,6 +862,10 @@ impl<G: Game> App<G> {
             point_lights: 0,
             lod_counts,
             lod_triangles: [0; 4],
+            sel_entities: self.editor.state.selected.len(),
+            sel_triangles,
+            sel_vertices,
+            extra_lines,
         };
 
         let egui_ctx = self.editor.egui_ctx.clone();
@@ -1577,6 +1684,71 @@ impl<G: Game> App<G> {
                     }
                     Err(e) => log::error!("FBX import failed: {:#}", e),
                 }
+            }
+            EditorAction::SaveCameraBookmark(slot) => {
+                use crate::editor::camera_bookmarks::CameraBookmark;
+                let cam = self.game.camera();
+                let bm = CameraBookmark {
+                    target: cam.target.to_array(),
+                    distance: cam.distance,
+                    yaw: cam.yaw,
+                    pitch: cam.pitch,
+                };
+                self.editor.state.settings.camera_bookmarks.save(slot, bm);
+                log::info!("Camera bookmark saved to slot {}", slot + 1);
+            }
+            EditorAction::GotoCameraBookmark(slot) => {
+                if let Some(bm) = self.editor.state.settings.camera_bookmarks.get(slot) {
+                    let cam = self.game.camera_mut();
+                    cam.target = Vec3::from_array(bm.target);
+                    cam.distance = bm.distance;
+                    cam.yaw = bm.yaw;
+                    cam.pitch = bm.pitch;
+                    log::info!("Camera bookmark goto slot {}", slot + 1);
+                } else {
+                    log::warn!("Camera bookmark slot {} is empty", slot + 1);
+                }
+            }
+            EditorAction::CameraPreset(preset) => {
+                self.apply_camera_preset(preset);
+            }
+            EditorAction::DeselectAll => {
+                self.editor.state.selected.clear();
+            }
+            EditorAction::SelectAll => {
+                self.editor.state.selected = self.world.entities().to_vec();
+            }
+            EditorAction::InvertSelection => {
+                let current: std::collections::HashSet<Entity> =
+                    self.editor.state.selected.iter().copied().collect();
+                let inverted: Vec<Entity> = self
+                    .world
+                    .entities()
+                    .iter()
+                    .copied()
+                    .filter(|e| !current.contains(e))
+                    .collect();
+                self.editor.state.selected = inverted;
+            }
+            EditorAction::CleanupEmptyEntities => {
+                self.editor.state.undo.push_forced(&self.world);
+                let mut removed = 0usize;
+                let victims: Vec<Entity> = self
+                    .world
+                    .entities()
+                    .iter()
+                    .copied()
+                    .filter(|&e| {
+                        !self.world.has::<Transform>(e)
+                            && !self.world.has::<MeshHandle>(e)
+                            && !self.world.has::<crate::physics::RigidBody>(e)
+                    })
+                    .collect();
+                for e in victims {
+                    self.world.despawn(e);
+                    removed += 1;
+                }
+                log::info!("Cleaned up {} empty entities", removed);
             }
             EditorAction::PlacePalette | EditorAction::ClearPalette => {}
         }

@@ -5,6 +5,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::camera_bookmarks::CameraBookmarks;
+
 const MAX_RECENT: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,10 @@ pub struct EditorSettings {
 
     // === Recent ===
     pub recent_scenes: Vec<String>,
+
+    /// Закладки камеры (9 слотов).
+    #[serde(default)]
+    pub camera_bookmarks: CameraBookmarks,
 }
 
 impl Default for EditorSettings {
@@ -55,6 +61,7 @@ impl Default for EditorSettings {
             palette_snap_to_grid: true,
             palette_grid_step: 0.5,
             recent_scenes: Vec::new(),
+            camera_bookmarks: CameraBookmarks::new(),
         }
     }
 }
