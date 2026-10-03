@@ -5,6 +5,7 @@ pub mod palette;
 pub mod picking;
 pub mod placement;
 pub mod play;
+pub mod settings;
 pub mod ui;
 pub mod undo;
 
@@ -22,6 +23,7 @@ use crate::scene::serialize::EntitySnapshot;
 use gizmo::GizmoState;
 use palette::PaletteState;
 use play::PlayState;
+use settings::EditorSettings;
 use undo::UndoStack;
 
 pub struct Editor {
@@ -33,7 +35,6 @@ pub struct Editor {
 }
 
 /// Активный box-select (ЛКМ-протяжка по viewport).
-/// Координаты в физических пикселях (как `Input::mouse_pos`).
 #[derive(Debug, Clone, Copy)]
 pub struct BoxSelect {
     pub start: (f32, f32),
@@ -45,8 +46,6 @@ pub struct EditorState {
     pub save_path: String,
     pub pending_action: Option<EditorAction>,
     pub gizmo: GizmoState,
-    /// Правки материалов: (entity-владелец, имя материала, новое значение).
-    /// Entity нужен, чтобы сделать материал unique, если он shared.
     pub dirty_materials: Vec<(Entity, String, Material)>,
     pub undo: UndoStack,
     pub undo_requested: bool,
@@ -55,22 +54,15 @@ pub struct EditorState {
     pub play: PlayState,
     pub palette: PaletteState,
 
-    /// ЛКМ-протяжка по viewport.
     pub box_select: Option<BoxSelect>,
-    /// Позиция открытого контекстного меню (physical pixels).
     pub context_menu_pos: Option<(f32, f32)>,
 
-    /// Entity, для которой сейчас идёт inline-переименование в Hierarchy.
     pub renaming: Option<Entity>,
-    /// Буфер для inline-редактирования имени.
     pub rename_buffer: String,
 
     // === Prefabs ===
-    /// Директория с файлами `.prefab.ron`.
     pub prefabs_dir: String,
-    /// Кэш-список файлов.
     pub prefab_list: Vec<PathBuf>,
-    /// Имя для сохранения текущего выделения.
     pub prefab_save_name: String,
 
     pub flying: bool,
@@ -80,8 +72,10 @@ pub struct EditorState {
     pub clipboard_entities: Vec<EntitySnapshot>,
 
     // === FBX ===
-    /// Путь/имя по умолчанию для экспорта FBX (кэш последнего выбора).
     pub fbx_export_path: String,
+
+    /// Настройки редактора (сохраняются при выходе в `editor.ron`).
+    pub settings: EditorSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -100,30 +94,19 @@ pub enum EditorAction {
     CopyEntity,
     PasteEntity,
     MakeMaterialUnique,
-    /// Спавн палитра-кистью в конкретной точке.
     PlacePalette,
-    /// Сбросить активную кисть.
     ClearPalette,
-    /// Новый пустой мир (сброс сцены).
     NewScene,
-    /// Сохранить выделение как prefab.
     SavePrefab,
-    /// Перечитать список файлов из `prefabs_dir`.
     RefreshPrefabs,
-    /// Спавн инстанса префаба по индексу в `prefab_list`.
     InstantiatePrefab(u32),
-    /// Открыть диалог выбора файлов и загрузить текстуры.
     LoadTextures,
-    /// Удалить текстуру из реестра по имени.
     RemoveTexture(String),
-
-    // === FBX ===
-    /// Экспортировать всю сцену в `.fbx`.
     ExportFbxAll,
-    /// Экспортировать только выделение.
     ExportFbxSelected,
-    /// Импортировать ASCII FBX (Blender/Maya/Unity).
     ImportFbx,
+    /// Загрузить конкретный путь (из Recent Files).
+    LoadPath(String),
 }
 
 impl EditorState {
@@ -152,8 +135,51 @@ impl EditorState {
             fly_sensitivity: 0.0025,
             clipboard_entities: Vec::new(),
             fbx_export_path: "scene.fbx".to_string(),
+            settings: EditorSettings::load("editor.ron"),
         };
+
+        // Синхронизируем поля из настроек.
+        s.save_path = s.settings.save_path.clone();
+        s.prefabs_dir = s.settings.prefabs_dir.clone();
+        s.fbx_export_path = s.settings.fbx_export_path.clone();
+        s.fly_speed = s.settings.fly_speed;
+        s.fly_sensitivity = s.settings.fly_sensitivity;
+        s.gizmo.snap_enabled = s.settings.gizmo_snap;
+        s.palette.keep_active = s.settings.palette_keep_active;
+        s.palette.snap_to_grid = s.settings.palette_snap_to_grid;
+        s.palette.grid_step = s.settings.palette_grid_step;
+
         s.prefab_list = crate::scene::prefab::list_prefabs(&s.prefabs_dir);
+        s
+    }
+
+    /// Собрать актуальные настройки из текущего состояния.
+    pub fn collect_settings(
+        &self,
+        ui_show_renderer: bool,
+        ui_show_stats: bool,
+        ui_show_hierarchy: bool,
+        ui_show_inspector: bool,
+        left_panel_width: f32,
+        right_panel_width: f32,
+    ) -> EditorSettings {
+        let mut s = self.settings.clone();
+        s.save_path = self.save_path.clone();
+        s.prefabs_dir = self.prefabs_dir.clone();
+        s.fbx_export_path = self.fbx_export_path.clone();
+        s.fly_speed = self.fly_speed;
+        s.fly_sensitivity = self.fly_sensitivity;
+        s.gizmo_snap = self.gizmo.snap_enabled;
+        s.palette_keep_active = self.palette.keep_active;
+        s.palette_snap_to_grid = self.palette.snap_to_grid;
+        s.palette_grid_step = self.palette.grid_step;
+
+        s.show_renderer_panel = ui_show_renderer;
+        s.show_stats_panel = ui_show_stats;
+        s.show_hierarchy_panel = ui_show_hierarchy;
+        s.show_inspector_panel = ui_show_inspector;
+        s.left_panel_width = left_panel_width;
+        s.right_panel_width = right_panel_width;
         s
     }
 

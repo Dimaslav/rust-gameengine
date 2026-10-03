@@ -1,0 +1,18 @@
+(
+    show_renderer_panel: true,
+    show_stats_panel: true,
+    show_hierarchy_panel: true,
+    show_inspector_panel: true,
+    left_panel_width: 264.0,
+    right_panel_width: 475.0,
+    save_path: "scene.ron",
+    prefabs_dir: "prefabs",
+    fbx_export_path: "scene.fbx",
+    fly_speed: 15.0,
+    fly_sensitivity: 0.0025,
+    gizmo_snap: false,
+    palette_keep_active: true,
+    palette_snap_to_grid: true,
+    palette_grid_step: 0.5,
+    recent_scenes: [],
+)

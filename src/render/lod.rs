@@ -124,9 +124,9 @@ pub fn generate_lods(
         // Ремап индексов + выброс вырожденных треугольников.
         let mut new_indices: Vec<u32> = Vec::with_capacity(base_indices.len());
         for tri in base_indices.chunks_exact(3) {
-            let a = remap_index(tri[0], base_vertices, &cluster_map, &min, inv_size, res);
-            let b = remap_index(tri[1], base_vertices, &cluster_map, &min, inv_size, res);
-            let c = remap_index(tri[2], base_vertices, &cluster_map, &min, inv_size, res);
+            let a = remap_index(tri[0], base_vertices, &cluster_map, min, inv_size, res);
+            let b = remap_index(tri[1], base_vertices, &cluster_map, min, inv_size, res);
+            let c = remap_index(tri[2], base_vertices, &cluster_map, min, inv_size, res);
             if a == b || b == c || a == c {
                 continue; // вырожденный
             }

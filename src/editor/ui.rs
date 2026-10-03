@@ -19,6 +19,14 @@ pub struct UiState {
     pub show_stats_panel: bool,
     pub show_hierarchy_panel: bool,
     pub show_inspector_panel: bool,
+    /// Ширина левой панели (Hierarchy + Stats).
+    pub left_panel_width: f32,
+    /// Ширина правой панели (Inspector + Renderer).
+    pub right_panel_width: f32,
+    /// Фильтр по тегам компонентов в Hierarchy ("ph", "t", "sk" и т.д.).
+    pub component_filter: String,
+    /// Флаг «настройки применены при первом кадре».
+    pub initialized: bool,
 }
 
 impl UiState {
@@ -28,6 +36,10 @@ impl UiState {
             show_stats_panel: true,
             show_hierarchy_panel: true,
             show_inspector_panel: true,
+            left_panel_width: 260.0,
+            right_panel_width: 340.0,
+            component_filter: String::new(),
+            initialized: false,
         }
     }
 }
@@ -41,7 +53,6 @@ pub struct Stats {
     pub instances: usize,
     pub dir_lights: usize,
     pub point_lights: usize,
-    // === LOD ===
     pub lod_counts: [usize; 4],
     pub lod_triangles: [usize; 4],
 }
@@ -49,7 +60,6 @@ pub struct Stats {
 pub struct UiAssets<'a> {
     pub mesh_names: &'a [String],
     pub material_names: &'a [String],
-    /// Список текстур: (имя, ширина, высота). Уже отсортирован.
     pub texture_list: &'a [(String, u32, u32)],
     pub selected_material: Option<(String, Material)>,
 }
@@ -64,6 +74,18 @@ pub fn draw(
     assets: &UiAssets<'_>,
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
+
+    // === Применяем настройки к UI state один раз при старте ===
+    if !state.initialized {
+        let s = &editor.settings;
+        state.show_renderer_panel = s.show_renderer_panel;
+        state.show_stats_panel = s.show_stats_panel;
+        state.show_hierarchy_panel = s.show_hierarchy_panel;
+        state.show_inspector_panel = s.show_inspector_panel;
+        state.left_panel_width = s.left_panel_width;
+        state.right_panel_width = s.right_panel_width;
+        state.initialized = true;
+    }
 
     if editor.play.active {
         draw_play_hud(ctx, &editor.play, stats.fps);
@@ -260,6 +282,28 @@ pub fn draw(
                     .hint_text("scene.ron"),
             );
 
+            // === Recent files ===
+            let recents = editor.settings.recent_scenes.clone();
+            ui.menu_button("⏷", |ui| {
+                if recents.is_empty() {
+                    ui.label(egui::RichText::new("no recent scenes").weak().italics());
+                } else {
+                    for p in &recents {
+                        if ui.button(p).clicked() {
+                            action = Some(EditorAction::LoadPath(p.clone()));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Clear list").clicked() {
+                        editor.settings.recent_scenes.clear();
+                        ui.close_menu();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Recent scenes");
+
             ui.separator();
             if ui.button("FBX All").on_hover_text("Экспорт всей сцены в .fbx").clicked() {
                 action = Some(EditorAction::ExportFbxAll);
@@ -351,210 +395,220 @@ pub fn draw(
     if !editor.play.active {
         // ===== Левая панель =====
         if state.show_stats_panel || state.show_hierarchy_panel {
-            egui::SidePanel::left("left_panel").default_width(260.0).show(ctx, |ui| {
-                if state.show_stats_panel {
-                    ui.heading("Stats");
-                    ui.separator();
-                    ui.label(format!("FPS: {:.1}", stats.fps));
-                    ui.label(format!(
-                        "Frame: {:.2} ms",
-                        if stats.fps > 0.1 { 1000.0 / stats.fps } else { 0.0 }
-                    ));
-                    ui.label(format!("Frame max: {:.2} ms", stats.frame_time_max_ms));
-                    ui.label(format!("Hitches: {}", stats.hitches));
-                    ui.separator();
-                    ui.label(format!("Entities: {}", stats.entities));
-                    ui.label(format!("Draws: {}", stats.draws));
-                    ui.label(format!("Instances: {}", stats.instances));
-                    ui.separator();
-                    ui.label(format!("Dir lights: {}", stats.dir_lights));
-                    ui.label(format!("Point lights: {}", stats.point_lights));
+            let panel_response = egui::SidePanel::left("left_panel")
+                .default_width(state.left_panel_width)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if state.show_stats_panel {
+                        ui.heading("Stats");
+                        ui.separator();
+                        ui.label(format!("FPS: {:.1}", stats.fps));
+                        ui.label(format!(
+                            "Frame: {:.2} ms",
+                            if stats.fps > 0.1 { 1000.0 / stats.fps } else { 0.0 }
+                        ));
+                        ui.label(format!("Frame max: {:.2} ms", stats.frame_time_max_ms));
+                        ui.label(format!("Hitches: {}", stats.hitches));
+                        ui.separator();
+                        ui.label(format!("Entities: {}", stats.entities));
+                        ui.label(format!("Draws: {}", stats.draws));
+                        ui.label(format!("Instances: {}", stats.instances));
+                        ui.separator();
+                        ui.label(format!("Dir lights: {}", stats.dir_lights));
+                        ui.label(format!("Point lights: {}", stats.point_lights));
 
-                    ui.separator();
-                    ui.label("LOD");
-                    ui.label(format!(
-                        "LOD0: {} · LOD1: {} · LOD2: {} · LOD3: {}",
-                        stats.lod_counts[0],
-                        stats.lod_counts[1],
-                        stats.lod_counts[2],
-                        stats.lod_counts[3],
-                    ));
-                }
-
-                if state.show_hierarchy_panel {
-                    ui.separator();
-                    ui.heading("Hierarchy");
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        if ui.button("+ Cube").clicked() {
-                            action = Some(EditorAction::AddCube);
-                        }
-                        if ui.button("+ Sphere").clicked() {
-                            action = Some(EditorAction::AddSphere);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !editor.selected.is_empty(),
-                                egui::Button::new("Duplicate (Ctrl+D)"),
-                            )
-                            .clicked()
-                        {
-                            action = Some(EditorAction::Duplicate);
-                        }
-                        if ui
-                            .add_enabled(!editor.selected.is_empty(), egui::Button::new("Delete"))
-                            .clicked()
-                        {
-                            action = Some(EditorAction::DeleteSelected);
-                        }
-                    });
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("🔍");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.search_filter)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("filter by name…"),
-                        );
-                    });
-                    ui.separator();
-
-                    let filter_lower = editor.search_filter.to_lowercase();
-                    let all_entities: Vec<Entity> = world.entities().to_vec();
-                    let filtered: Vec<Entity> = all_entities
-                        .into_iter()
-                        .filter(|&e| {
-                            if filter_lower.is_empty() {
-                                return true;
-                            }
-                            entity_display_name(world, e)
-                                .to_lowercase()
-                                .contains(&filter_lower)
-                        })
-                        .collect();
-
-                    let total = filtered.len();
-                    let sel_count = editor.selected.len();
-                    if sel_count > 1 {
-                        ui.label(format!("{} shown · {} selected", total, sel_count));
-                    } else {
-                        ui.label(format!("{} shown", total));
+                        ui.separator();
+                        ui.label("LOD");
+                        ui.label(format!(
+                            "LOD0: {} · LOD1: {} · LOD2: {} · LOD3: {}",
+                            stats.lod_counts[0],
+                            stats.lod_counts[1],
+                            stats.lod_counts[2],
+                            stats.lod_counts[3],
+                        ));
                     }
 
-                    let anchor = editor.primary();
+                    if state.show_hierarchy_panel {
+                        ui.separator();
+                        ui.heading("Hierarchy");
+                        ui.separator();
 
-                    let row_height = 22.0;
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .max_height(300.0)
-                        .show_rows(ui, row_height, total, |ui, row_range| {
-                            for i in row_range {
-                                let e = filtered[i];
-                                let is_selected = editor.is_selected(e);
+                        ui.horizontal(|ui| {
+                            if ui.button("+ Cube").clicked() {
+                                action = Some(EditorAction::AddCube);
+                            }
+                            if ui.button("+ Sphere").clicked() {
+                                action = Some(EditorAction::AddSphere);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !editor.selected.is_empty(),
+                                    egui::Button::new("Duplicate (Ctrl+D)"),
+                                )
+                                .clicked()
+                            {
+                                action = Some(EditorAction::Duplicate);
+                            }
+                            if ui
+                                .add_enabled(
+                                    !editor.selected.is_empty(),
+                                    egui::Button::new("Delete"),
+                                )
+                                .clicked()
+                            {
+                                action = Some(EditorAction::DeleteSelected);
+                            }
+                        });
+                        ui.separator();
 
-                                ui.horizontal(|ui| {
-                                    // Eye icon
-                                    let visible = world
-                                        .get::<Visible>(e)
-                                        .map(|v| v.0)
-                                        .unwrap_or(true);
-                                    let eye_label = if visible { "👁" } else { "✖" };
-                                    let eye_resp = ui
-                                        .add(egui::Button::new(eye_label).frame(false))
-                                        .on_hover_text("Toggle visibility");
-                                    if eye_resp.clicked() {
-                                        editor.undo_requested = true;
-                                        if visible {
-                                            world.insert(e, Visible(false));
-                                        } else {
-                                            world.remove::<Visible>(e);
-                                        }
+                        ui.horizontal(|ui| {
+                            ui.label("🔍");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut editor.search_filter)
+                                    .desired_width(140.0)
+                                    .hint_text("name…"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.component_filter)
+                                    .desired_width(70.0)
+                                    .hint_text("comp…"),
+                            );
+                        });
+                        ui.separator();
+
+                        let filter_lower = editor.search_filter.to_lowercase();
+                        let comp_lower = state.component_filter.to_lowercase();
+                        let all_entities: Vec<Entity> = world.entities().to_vec();
+                        let filtered: Vec<Entity> = all_entities
+                            .into_iter()
+                            .filter(|&e| {
+                                if !filter_lower.is_empty() {
+                                    let name = entity_display_name(world, e).to_lowercase();
+                                    if !name.contains(&filter_lower) {
+                                        return false;
                                     }
+                                }
+                                if !comp_lower.is_empty() {
+                                    let badges = component_badges(world, e).to_lowercase();
+                                    if !badges.contains(&comp_lower) {
+                                        return false;
+                                    }
+                                }
+                                true
+                            })
+                            .collect();
 
-                                    // Rename mode
-                                    if editor.renaming == Some(e) {
-                                        let response = ui.add(
-                                            egui::TextEdit::singleline(&mut editor.rename_buffer)
-                                                .desired_width(160.0),
-                                        );
-                                        response.request_focus();
+                        let total = filtered.len();
+                        let sel_count = editor.selected.len();
+                        if sel_count > 1 {
+                            ui.label(format!("{} shown · {} selected", total, sel_count));
+                        } else {
+                            ui.label(format!("{} shown", total));
+                        }
 
-                                        let enter =
-                                            ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                        let esc =
-                                            ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        let anchor = editor.primary();
 
-                                        if enter || response.lost_focus() {
-                                            let new_name =
-                                                editor.rename_buffer.trim().to_string();
-                                            if !new_name.is_empty() {
-                                                editor.undo_requested = true;
-                                                world.insert(e, Name(new_name));
-                                            }
-                                            editor.renaming = None;
-                                            editor.rename_buffer.clear();
-                                        } else if esc {
-                                            editor.renaming = None;
-                                            editor.rename_buffer.clear();
-                                        }
-                                    } else {
-                                        let label = entity_display_name(world, e);
-                                        let drag_id = egui::Id::new(("hier_drag", e));
-                                        let inner = ui.dnd_drag_source(drag_id, e, |ui| {
-                                            ui.selectable_label(is_selected, &label)
-                                        });
-                                        let label_resp = inner.inner;
-                                        let drag_resp = inner.response;
+                        let row_height = 22.0;
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .max_height(300.0)
+                            .show_rows(ui, row_height, total, |ui, row_range| {
+                                for i in row_range {
+                                    let e = filtered[i];
+                                    let is_selected = editor.is_selected(e);
 
-                                        if label_resp.clicked() {
-                                            let modifiers = ui.input(|i| i.modifiers);
-                                            if modifiers.ctrl || modifiers.command {
-                                                editor.toggle_select(e);
-                                            } else if modifiers.shift {
-                                                let anchor_e = anchor.unwrap_or(e);
-                                                editor.select_range(&filtered, anchor_e, e);
+                                    ui.horizontal(|ui| {
+                                        // Eye icon
+                                        let visible = world
+                                            .get::<Visible>(e)
+                                            .map(|v| v.0)
+                                            .unwrap_or(true);
+                                        let eye_label = if visible { "👁" } else { "✖" };
+                                        let eye_resp = ui
+                                            .add(egui::Button::new(eye_label).frame(false))
+                                            .on_hover_text("Toggle visibility");
+                                        if eye_resp.clicked() {
+                                            editor.undo_requested = true;
+                                            if visible {
+                                                world.insert(e, Visible(false));
                                             } else {
-                                                editor.select_single(e);
+                                                world.remove::<Visible>(e);
                                             }
                                         }
-                                        if label_resp.double_clicked() {
-                                            editor.select_single(e);
-                                            editor.renaming = Some(e);
-                                            editor.rename_buffer = world
-                                                .get::<Name>(e)
-                                                .map(|n| n.0.clone())
-                                                .unwrap_or_else(|| {
-                                                    entity_display_name(world, e)
-                                                });
-                                        }
 
-                                        if drag_resp.dnd_hover_payload::<Entity>().is_some() {
-                                            ui.painter().rect_stroke(
-                                                drag_resp.rect,
-                                                egui::Rounding::same(2.0),
-                                                egui::Stroke::new(
-                                                    2.0_f32,
-                                                    egui::Color32::from_rgb(255, 210, 90),
-                                                ),
+                                        if editor.renaming == Some(e) {
+                                            let response = ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut editor.rename_buffer,
+                                                )
+                                                .desired_width(160.0),
                                             );
-                                        }
+                                            response.request_focus();
 
-                                        if let Some(child_arc) =
-                                            drag_resp.dnd_release_payload::<Entity>()
-                                        {
-                                            let child = *child_arc;
-                                            if child != e && !would_create_cycle(world, child, e) {
-                                                editor.undo_requested = true;
-                                                world.insert(child, Parent(e));
+                                            let enter =
+                                                ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                            let esc =
+                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                                            if enter || response.lost_focus() {
+                                                let new_name =
+                                                    editor.rename_buffer.trim().to_string();
+                                                if !new_name.is_empty() {
+                                                    editor.undo_requested = true;
+                                                    world.insert(e, Name(new_name));
+                                                }
+                                                editor.renaming = None;
+                                                editor.rename_buffer.clear();
+                                            } else if esc {
+                                                editor.renaming = None;
+                                                editor.rename_buffer.clear();
                                             }
-                                        }
+                                        } else {
+                                            let label = entity_display_name(world, e);
+                                            let badges = component_badges(world, e);
+                                            let drag_id = egui::Id::new(("hier_drag", e));
 
-                                        label_resp.context_menu(|ui| {
-                                            if ui.button("Rename").clicked() {
+                                            let inner = ui.dnd_drag_source(
+                                                drag_id,
+                                                e,
+                                                |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        let resp = ui.selectable_label(
+                                                            is_selected,
+                                                            &label,
+                                                        );
+                                                        if !badges.is_empty() {
+                                                            ui.add_space(2.0);
+                                                            ui.label(
+                                                                egui::RichText::new(&badges)
+                                                                    .small()
+                                                                    .weak()
+                                                                    .monospace(),
+                                                            );
+                                                        }
+                                                        resp
+                                                    })
+                                                    .inner
+                                                },
+                                            );
+                                            let label_resp = inner.inner;
+                                            let drag_resp = inner.response;
+
+                                            if label_resp.clicked() {
+                                                let modifiers = ui.input(|i| i.modifiers);
+                                                if modifiers.ctrl || modifiers.command {
+                                                    editor.toggle_select(e);
+                                                } else if modifiers.shift {
+                                                    let anchor_e = anchor.unwrap_or(e);
+                                                    editor.select_range(&filtered, anchor_e, e);
+                                                } else {
+                                                    editor.select_single(e);
+                                                }
+                                            }
+                                            if label_resp.double_clicked() {
+                                                editor.select_single(e);
                                                 editor.renaming = Some(e);
                                                 editor.rename_buffer = world
                                                     .get::<Name>(e)
@@ -562,462 +616,704 @@ pub fn draw(
                                                     .unwrap_or_else(|| {
                                                         entity_display_name(world, e)
                                                     });
-                                                ui.close_menu();
                                             }
-                                            if ui.button("Focus (F)").clicked() {
-                                                editor.select_single(e);
-                                                action = Some(EditorAction::FocusSelected);
-                                                ui.close_menu();
+
+                                            if drag_resp
+                                                .dnd_hover_payload::<Entity>()
+                                                .is_some()
+                                            {
+                                                ui.painter().rect_stroke(
+                                                    drag_resp.rect,
+                                                    egui::Rounding::same(2.0),
+                                                    egui::Stroke::new(
+                                                        2.0_f32,
+                                                        egui::Color32::from_rgb(
+                                                            255, 210, 90,
+                                                        ),
+                                                    ),
+                                                );
                                             }
-                                            if ui.button("Duplicate").clicked() {
-                                                editor.select_single(e);
-                                                action = Some(EditorAction::Duplicate);
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Delete").clicked() {
-                                                editor.select_single(e);
-                                                action = Some(EditorAction::DeleteSelected);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if ui.button("Export FBX…").clicked() {
-                                                editor.select_single(e);
-                                                action = Some(EditorAction::ExportFbxSelected);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if world.has::<Parent>(e) {
-                                                if ui.button("Clear Parent").clicked() {
+
+                                            if let Some(child_arc) =
+                                                drag_resp.dnd_release_payload::<Entity>()
+                                            {
+                                                let child = *child_arc;
+                                                if child != e
+                                                    && !would_create_cycle(
+                                                        world, child, e,
+                                                    )
+                                                {
                                                     editor.undo_requested = true;
-                                                    world.remove::<Parent>(e);
+                                                    world.insert(child, Parent(e));
+                                                }
+                                            }
+
+                                            label_resp.context_menu(|ui| {
+                                                if ui.button("Rename").clicked() {
+                                                    editor.renaming = Some(e);
+                                                    editor.rename_buffer = world
+                                                        .get::<Name>(e)
+                                                        .map(|n| n.0.clone())
+                                                        .unwrap_or_else(|| {
+                                                            entity_display_name(world, e)
+                                                        });
                                                     ui.close_menu();
                                                 }
+                                                if ui.button("Focus (F)").clicked() {
+                                                    editor.select_single(e);
+                                                    action =
+                                                        Some(EditorAction::FocusSelected);
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Duplicate").clicked() {
+                                                    editor.select_single(e);
+                                                    action =
+                                                        Some(EditorAction::Duplicate);
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Delete").clicked() {
+                                                    editor.select_single(e);
+                                                    action = Some(
+                                                        EditorAction::DeleteSelected,
+                                                    );
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                if ui.button("Export FBX…").clicked() {
+                                                    editor.select_single(e);
+                                                    action = Some(
+                                                        EditorAction::ExportFbxSelected,
+                                                    );
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                if world.has::<Parent>(e) {
+                                                    if ui.button("Clear Parent").clicked() {
+                                                        editor.undo_requested = true;
+                                                        world.remove::<Parent>(e);
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+
+                        // === Prefabs ===
+                        ui.separator();
+                        ui.heading("Prefabs");
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label("📁");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut editor.prefabs_dir)
+                                    .desired_width(140.0)
+                                    .hint_text("prefabs"),
+                            );
+                            if ui.small_button("⟳").on_hover_text("Refresh list").clicked() {
+                                action = Some(EditorAction::RefreshPrefabs);
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            ui.add(
+                                egui::TextEdit::singleline(
+                                    &mut editor.prefab_save_name,
+                                )
+                                .desired_width(120.0)
+                                .hint_text("my_prefab"),
+                            );
+                            let can_save = !editor.selected.is_empty()
+                                && !editor.prefab_save_name.trim().is_empty();
+                            if ui
+                                .add_enabled(
+                                    can_save,
+                                    egui::Button::new("💾 Save Sel"),
+                                )
+                                .on_hover_text("Сохранить выделение как .prefab.ron")
+                                .clicked()
+                            {
+                                action = Some(EditorAction::SavePrefab);
+                            }
+                        });
+
+                        ui.separator();
+
+                        let prefab_count = editor.prefab_list.len();
+                        if prefab_count == 0 {
+                            ui.label(
+                                egui::RichText::new("no prefabs found")
+                                    .weak()
+                                    .italics(),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Выдели объекты → введи имя → Save Sel",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        } else {
+                            ui.label(format!("{} files", prefab_count));
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false; 2])
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    for (idx, path) in
+                                        editor.prefab_list.iter().enumerate()
+                                    {
+                                        let display =
+                                            crate::scene::prefab::prefab_display_name(
+                                                path,
+                                            );
+                                        let resp = ui
+                                            .button(format!("📦 {}", display))
+                                            .on_hover_text(format!(
+                                                "Spawn {}",
+                                                path.display()
+                                            ));
+                                        if resp.clicked() {
+                                            action = Some(
+                                                EditorAction::InstantiatePrefab(
+                                                    idx as u32,
+                                                ),
+                                            );
+                                        }
+                                        resp.context_menu(|ui| {
+                                            if ui.button("Spawn here").clicked() {
+                                                action = Some(
+                                                    EditorAction::InstantiatePrefab(
+                                                        idx as u32,
+                                                    ),
+                                                );
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Show path").clicked() {
+                                                log::info!("{}", path.display());
+                                                ui.close_menu();
                                             }
                                         });
                                     }
                                 });
-                            }
-                        });
-
-                    // Prefabs
-                    ui.separator();
-                    ui.heading("Prefabs");
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("📁");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.prefabs_dir)
-                                .desired_width(140.0)
-                                .hint_text("prefabs"),
-                        );
-                        if ui.small_button("⟳").on_hover_text("Refresh list").clicked() {
-                            action = Some(EditorAction::RefreshPrefabs);
                         }
-                    });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.prefab_save_name)
-                                .desired_width(120.0)
-                                .hint_text("my_prefab"),
-                        );
-                        let can_save = !editor.selected.is_empty()
-                            && !editor.prefab_save_name.trim().is_empty();
+                        // === Assets (текстуры) ===
+                        ui.separator();
+                        ui.heading("Assets");
+                        ui.separator();
+
                         if ui
-                            .add_enabled(can_save, egui::Button::new("💾 Save Sel"))
-                            .on_hover_text("Сохранить выделение как .prefab.ron")
+                            .button("➕ Load Texture(s)…")
+                            .on_hover_text(
+                                "PNG, JPEG, GIF, WebP, BMP, TIFF, TGA, DDS, \
+                                 HDR, EXR, ICO, PNM, QOI, Farbfeld",
+                            )
                             .clicked()
                         {
-                            action = Some(EditorAction::SavePrefab);
+                            action = Some(EditorAction::LoadTextures);
                         }
-                    });
 
-                    ui.separator();
+                        ui.separator();
 
-                    let prefab_count = editor.prefab_list.len();
-                    if prefab_count == 0 {
-                        ui.label(egui::RichText::new("no prefabs found").weak().italics());
-                        ui.label(
-                            egui::RichText::new("Выдели объекты → введи имя → Save Sel")
-                                .small()
-                                .weak(),
-                        );
-                    } else {
-                        ui.label(format!("{} files", prefab_count));
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .max_height(200.0)
-                            .show(ui, |ui| {
-                                for (idx, path) in editor.prefab_list.iter().enumerate() {
-                                    let display = crate::scene::prefab::prefab_display_name(path);
-                                    let resp = ui
-                                        .button(format!("📦 {}", display))
-                                        .on_hover_text(format!("Spawn {}", path.display()));
-                                    if resp.clicked() {
-                                        action = Some(EditorAction::InstantiatePrefab(idx as u32));
+                        let tex_count = assets.texture_list.len();
+                        if tex_count == 0 {
+                            ui.label(
+                                egui::RichText::new("no textures loaded")
+                                    .weak()
+                                    .italics(),
+                            );
+                        } else {
+                            ui.label(format!("{} textures", tex_count));
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false; 2])
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    for (name, w, h) in assets.texture_list {
+                                        let resp = ui
+                                            .button(format!("🖼 {}", name))
+                                            .on_hover_text(format!(
+                                                "{} × {} pixels\nRight-click to remove",
+                                                w, h
+                                            ));
+                                        resp.context_menu(|ui| {
+                                            if ui.button("Remove texture").clicked() {
+                                                action = Some(
+                                                    EditorAction::RemoveTexture(
+                                                        name.clone(),
+                                                    ),
+                                                );
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Copy name").clicked() {
+                                                ui.output_mut(|o| {
+                                                    o.copied_text = name.clone();
+                                                });
+                                                ui.close_menu();
+                                            }
+                                        });
                                     }
-                                    resp.context_menu(|ui| {
-                                        if ui.button("Spawn here").clicked() {
-                                            action = Some(EditorAction::InstantiatePrefab(
-                                                idx as u32,
-                                            ));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Show path").clicked() {
-                                            log::info!("{}", path.display());
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                            });
+                                });
+                        }
                     }
-
-                    // Assets
-                    ui.separator();
-                    ui.heading("Assets");
-                    ui.separator();
-
-                    if ui
-                        .button("➕ Load Texture(s)…")
-                        .on_hover_text(
-                            "PNG, JPEG, GIF, WebP, BMP, TIFF, TGA, DDS, \
-                             HDR, EXR, ICO, PNM, QOI, Farbfeld",
-                        )
-                        .clicked()
-                    {
-                        action = Some(EditorAction::LoadTextures);
-                    }
-
-                    ui.separator();
-
-                    let tex_count = assets.texture_list.len();
-                    if tex_count == 0 {
-                        ui.label(egui::RichText::new("no textures loaded").weak().italics());
-                    } else {
-                        ui.label(format!("{} textures", tex_count));
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .max_height(180.0)
-                            .show(ui, |ui| {
-                                for (name, w, h) in assets.texture_list {
-                                    let resp = ui
-                                        .button(format!("🖼 {}", name))
-                                        .on_hover_text(format!(
-                                            "{} × {} pixels\nRight-click to remove",
-                                            w, h
-                                        ));
-                                    resp.context_menu(|ui| {
-                                        if ui.button("Remove texture").clicked() {
-                                            action = Some(EditorAction::RemoveTexture(
-                                                name.clone(),
-                                            ));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Copy name").clicked() {
-                                            ui.output_mut(|o| {
-                                                o.copied_text = name.clone();
-                                            });
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                            });
-                    }
-                }
-            });
+                });
+            state.left_panel_width = panel_response.response.rect.width();
         }
 
         // ===== Правая панель =====
         if state.show_inspector_panel || state.show_renderer_panel {
-            egui::SidePanel::right("right_panel").default_width(340.0).show(ctx, |ui| {
-                if state.show_inspector_panel {
-                    ui.heading("Inspector");
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("Gizmo:");
-                        let m = &mut editor.gizmo.mode;
-                        if ui.selectable_label(*m == GizmoMode::Translate, "T (1)").clicked() {
-                            *m = GizmoMode::Translate;
-                        }
-                        if ui.selectable_label(*m == GizmoMode::Rotate, "R (2)").clicked() {
-                            *m = GizmoMode::Rotate;
-                        }
-                        if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() {
-                            *m = GizmoMode::Scale;
-                        }
-                        ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap");
-                    });
-                    ui.label(
-                        egui::RichText::new("Alt+drag: duplicate · Ctrl: snap")
-                            .small()
-                            .weak(),
-                    );
-                    ui.separator();
-
-                    let n = editor.selected.len();
-                    if n == 0 {
-                        ui.label("Nothing selected");
-                    } else if n > 1 {
-                        ui.label(format!("{} objects selected", n));
+            let panel_response = egui::SidePanel::right("right_panel")
+                .default_width(state.right_panel_width)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if state.show_inspector_panel {
+                        ui.heading("Inspector");
                         ui.separator();
+
                         ui.horizontal(|ui| {
-                            if ui.button("Focus (F)").clicked() {
-                                action = Some(EditorAction::FocusSelected);
+                            ui.label("Gizmo:");
+                            let m = &mut editor.gizmo.mode;
+                            if ui
+                                .selectable_label(*m == GizmoMode::Translate, "T (1)")
+                                .clicked()
+                            {
+                                *m = GizmoMode::Translate;
                             }
-                            if ui.button("Duplicate").clicked() {
-                                action = Some(EditorAction::Duplicate);
+                            if ui
+                                .selectable_label(*m == GizmoMode::Rotate, "R (2)")
+                                .clicked()
+                            {
+                                *m = GizmoMode::Rotate;
                             }
-                            if ui.button("Delete").clicked() {
-                                action = Some(EditorAction::DeleteSelected);
+                            if ui
+                                .selectable_label(*m == GizmoMode::Scale, "S (3)")
+                                .clicked()
+                            {
+                                *m = GizmoMode::Scale;
                             }
-                            if ui.button("FBX Sel").clicked() {
-                                action = Some(EditorAction::ExportFbxSelected);
-                            }
+                            ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap");
                         });
+                        ui.label(
+                            egui::RichText::new("Alt+drag: duplicate · Ctrl: snap")
+                                .small()
+                                .weak(),
+                        );
                         ui.separator();
-                        draw_multi_edit(ui, world, editor);
-                        ui.separator();
-                        if ui.button("Deselect all").clicked() {
-                            editor.selected.clear();
-                        }
-                    } else {
-                        let e = editor.selected[0];
-                        if !world.entities().contains(&e) {
-                            editor.selected.clear();
-                            ui.label("Selection removed");
+
+                        let n = editor.selected.len();
+                        if n == 0 {
+                            ui.label("Nothing selected");
+                        } else if n > 1 {
+                            ui.label(format!("{} objects selected", n));
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                if ui.button("Focus (F)").clicked() {
+                                    action = Some(EditorAction::FocusSelected);
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    action = Some(EditorAction::Duplicate);
+                                }
+                                if ui.button("Delete").clicked() {
+                                    action = Some(EditorAction::DeleteSelected);
+                                }
+                                if ui.button("FBX Sel").clicked() {
+                                    action = Some(EditorAction::ExportFbxSelected);
+                                }
+                            });
+                            ui.separator();
+                            draw_multi_edit(ui, world, editor);
+                            ui.separator();
+                            if ui.button("Deselect all").clicked() {
+                                editor.selected.clear();
+                            }
                         } else {
-                            draw_inspector(ui, world, e, editor, assets, &mut action);
+                            let e = editor.selected[0];
+                            if !world.entities().contains(&e) {
+                                editor.selected.clear();
+                                ui.label("Selection removed");
+                            } else {
+                                draw_inspector(ui, world, e, editor, assets, &mut action);
+                            }
                         }
                     }
-                }
 
-                if state.show_renderer_panel {
-                    ui.separator();
-                    egui::CollapsingHeader::new("Renderer")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.label("Post-processing");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_threshold, 0.1..=5.0)
+                    if state.show_renderer_panel {
+                        ui.separator();
+                        egui::CollapsingHeader::new("Renderer")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.label("Post-processing");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.bloom_threshold,
+                                        0.1..=5.0,
+                                    )
                                     .text("Bloom threshold"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_strength, 0.0..=3.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.bloom_strength,
+                                        0.0..=3.0,
+                                    )
                                     .text("Bloom strength"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_knee, 0.01..=2.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.bloom_knee,
+                                        0.01..=2.0,
+                                    )
                                     .text("Bloom knee"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.bloom_radius, 0.5..=3.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.bloom_radius,
+                                        0.5..=3.0,
+                                    )
                                     .text("Bloom radius"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.exposure, 0.1..=3.0)
-                                    .text("Exposure"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.fxaa_strength, 0.0..=1.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut postfx.exposure, 0.1..=3.0)
+                                        .text("Exposure"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.fxaa_strength,
+                                        0.0..=1.0,
+                                    )
                                     .text("FXAA strength"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("SSAO");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0)
+                                ui.separator();
+                                ui.label("SSAO");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.ssao_strength,
+                                        0.0..=2.0,
+                                    )
                                     .text("Strength"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ssao_radius, 0.05..=2.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.ssao_radius,
+                                        0.05..=2.0,
+                                    )
                                     .text("Radius"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("IBL");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.ibl_strength, 0.0..=3.0)
+                                ui.separator();
+                                ui.label("IBL");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.ibl_strength,
+                                        0.0..=3.0,
+                                    )
                                     .text("IBL strength"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("Fog");
-                            let mut c = postfx.fog_color;
-                            if ui.color_edit_button_rgb(&mut c).changed() {
-                                postfx.fog_color = c;
-                            }
-                            ui.add(
-                                egui::Slider::new(&mut postfx.fog_density, 0.0..=0.2)
+                                ui.separator();
+                                ui.label("Fog");
+                                let mut c = postfx.fog_color;
+                                if ui.color_edit_button_rgb(&mut c).changed() {
+                                    postfx.fog_color = c;
+                                }
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.fog_density,
+                                        0.0..=0.2,
+                                    )
                                     .text("Density"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.fog_height_base, -10.0..=20.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.fog_height_base,
+                                        -10.0..=20.0,
+                                    )
                                     .text("Height base"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.fog_height_falloff, 0.0..=0.5)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.fog_height_falloff,
+                                        0.0..=0.5,
+                                    )
                                     .text("Height falloff"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("Screen effects");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.vignette_strength, 0.0..=1.0)
+                                ui.separator();
+                                ui.label("Screen effects");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.vignette_strength,
+                                        0.0..=1.0,
+                                    )
                                     .text("Vignette"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.film_grain, 0.0..=1.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.film_grain,
+                                        0.0..=1.0,
+                                    )
                                     .text("Film grain"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.chromatic_aberration, 0.0..=1.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.chromatic_aberration,
+                                        0.0..=1.0,
+                                    )
                                     .text("Chromatic ab."),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("Shadows");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.shadow_bias, 0.0..=0.01)
+                                ui.separator();
+                                ui.label("Shadows");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.shadow_bias,
+                                        0.0..=0.01,
+                                    )
                                     .text("Depth bias"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.shadow_normal_bias, 0.0..=10.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.shadow_normal_bias,
+                                        0.0..=10.0,
+                                    )
                                     .text("Slope bias"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.shadow_fade_start, 50.0..=250.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.shadow_fade_start,
+                                        50.0..=250.0,
+                                    )
                                     .text("Fade start"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.shadow_fade_end, 60.0..=300.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.shadow_fade_end,
+                                        60.0..=300.0,
+                                    )
                                     .text("Fade end"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("LOD");
-                            ui.add(
-                                egui::Slider::new(&mut postfx.lod_bias, 0.2..=4.0)
+                                ui.separator();
+                                ui.label("LOD");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.lod_bias,
+                                        0.2..=4.0,
+                                    )
                                     .logarithmic(true)
                                     .text("LOD bias"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.lod_distances[0], 5.0..=200.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.lod_distances[0],
+                                        5.0..=200.0,
+                                    )
                                     .text("Distance LOD0→1"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.lod_distances[1], 20.0..=500.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.lod_distances[1],
+                                        20.0..=500.0,
+                                    )
                                     .text("Distance LOD1→2"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut postfx.lod_distances[2], 50.0..=1000.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut postfx.lod_distances[2],
+                                        50.0..=1000.0,
+                                    )
                                     .text("Distance LOD2→3"),
-                            );
+                                );
 
-                            ui.separator();
-                            ui.label("Debug view");
-                            ui.horizontal_wrapped(|ui| {
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::Final, "Final",
-                                );
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::Ssao, "SSAO",
-                                );
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::GbufferNormal, "Normal",
-                                );
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::GbufferDepth, "Depth",
-                                );
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::HdrPreBloom, "HDR",
-                                );
-                                debug_button(
-                                    ui, &mut postfx.debug_view,
-                                    crate::render::DebugView::CsmCascade0, "CSM",
-                                );
-                            });
+                                ui.separator();
+                                ui.label("Debug view");
+                                ui.horizontal_wrapped(|ui| {
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::Final,
+                                        "Final",
+                                    );
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::Ssao,
+                                        "SSAO",
+                                    );
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::GbufferNormal,
+                                        "Normal",
+                                    );
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::GbufferDepth,
+                                        "Depth",
+                                    );
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::HdrPreBloom,
+                                        "HDR",
+                                    );
+                                    debug_button(
+                                        ui,
+                                        &mut postfx.debug_view,
+                                        crate::render::DebugView::CsmCascade0,
+                                        "CSM",
+                                    );
+                                });
 
-                            ui.separator();
-                            egui::CollapsingHeader::new("Play")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    let p = &mut editor.play;
-                                    ui.add(egui::Slider::new(&mut p.walk_speed, 0.5..=20.0).text("Walk speed"));
-                                    ui.add(egui::Slider::new(&mut p.run_speed, 1.0..=40.0).text("Run speed"));
-                                    ui.add(egui::Slider::new(&mut p.jump_speed, 1.0..=20.0).text("Jump"));
-                                    ui.add(egui::Slider::new(&mut p.gravity, 1.0..=60.0).text("Gravity"));
-                                    ui.add(egui::Slider::new(&mut p.eye_height, 0.5..=3.0).text("Eye height"));
-                                    ui.add(
-                                        egui::Slider::new(&mut p.look_sensitivity, 0.0005..=0.01)
+                                ui.separator();
+                                egui::CollapsingHeader::new("Play")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        let p = &mut editor.play;
+                                        ui.add(
+                                            egui::Slider::new(&mut p.walk_speed, 0.5..=20.0)
+                                                .text("Walk speed"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.run_speed, 1.0..=40.0)
+                                                .text("Run speed"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.jump_speed, 1.0..=20.0)
+                                                .text("Jump"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.gravity, 1.0..=60.0)
+                                                .text("Gravity"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.eye_height, 0.5..=3.0)
+                                                .text("Eye height"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.look_sensitivity,
+                                                0.0005..=0.01,
+                                            )
                                             .text("Look sensitivity"),
-                                    );
-                                    ui.separator();
-                                    ui.label("Player capsule");
-                                    ui.add(egui::Slider::new(&mut p.player_radius, 0.1..=1.0).text("Radius"));
-                                    ui.add(egui::Slider::new(&mut p.player_height, 0.5..=3.0).text("Height"));
-                                    ui.separator();
-                                    ui.label("Crouch (Ctrl)");
-                                    ui.add(
-                                        egui::Slider::new(&mut p.crouch_height, 0.5..=1.7)
+                                        );
+                                        ui.separator();
+                                        ui.label("Player capsule");
+                                        ui.add(
+                                            egui::Slider::new(&mut p.player_radius, 0.1..=1.0)
+                                                .text("Radius"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.player_height, 0.5..=3.0)
+                                                .text("Height"),
+                                        );
+                                        ui.separator();
+                                        ui.label("Crouch (Ctrl)");
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.crouch_height,
+                                                0.5..=1.7,
+                                            )
                                             .text("Eye height"),
-                                    );
-                                    ui.add(
-                                        egui::Slider::new(&mut p.crouch_speed_mult, 0.1..=1.0)
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.crouch_speed_mult,
+                                                0.1..=1.0,
+                                            )
                                             .text("Speed mult"),
-                                    );
-                                    ui.separator();
-                                    ui.label("Combat");
-                                    ui.add(egui::Slider::new(&mut p.max_health, 10.0..=500.0).text("Max HP"));
-                                    ui.add(egui::Slider::new(&mut p.max_ammo, 0..=500).text("Max ammo"));
-                                    ui.add(egui::Slider::new(&mut p.damage_per_shot, 1.0..=200.0).text("Damage"));
-                                    ui.add(egui::Slider::new(&mut p.gun_range, 5.0..=500.0).text("Range"));
-                                    ui.add(
-                                        egui::Slider::new(&mut p.bullet_speed, 0.0..=300.0)
+                                        );
+                                        ui.separator();
+                                        ui.label("Combat");
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.max_health,
+                                                10.0..=500.0,
+                                            )
+                                            .text("Max HP"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.max_ammo, 0..=500)
+                                                .text("Max ammo"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.damage_per_shot,
+                                                1.0..=200.0,
+                                            )
+                                            .text("Damage"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut p.gun_range, 5.0..=500.0)
+                                                .text("Range"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.bullet_speed,
+                                                0.0..=300.0,
+                                            )
                                             .text("Bullet speed"),
-                                    );
-                                    ui.add(egui::Slider::new(&mut p.fire_cooldown_max, 0.02..=1.0).text("Fire cd"));
-                                    ui.add(egui::Slider::new(&mut p.interact_distance, 1.0..=20.0).text("Interact dist"));
-                                    ui.separator();
-                                    ui.checkbox(&mut p.bob_enabled, "Head bob");
-                                    ui.add(
-                                        egui::Slider::new(&mut p.bob_amplitude, 0.0..=0.15)
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.fire_cooldown_max,
+                                                0.02..=1.0,
+                                            )
+                                            .text("Fire cd"),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.interact_distance,
+                                                1.0..=20.0,
+                                            )
+                                            .text("Interact dist"),
+                                        );
+                                        ui.separator();
+                                        ui.checkbox(&mut p.bob_enabled, "Head bob");
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut p.bob_amplitude,
+                                                0.0..=0.15,
+                                            )
                                             .text("Bob amplitude"),
-                                    );
-                                    ui.separator();
-                                    ui.checkbox(&mut p.show_crosshair, "Show crosshair");
-                                    ui.checkbox(&mut p.show_hud, "Show HUD");
-                                    ui.checkbox(&mut p.show_health, "Show health bar");
-                                    ui.checkbox(&mut p.show_ammo, "Show ammo bar");
-                                });
+                                        );
+                                        ui.separator();
+                                        ui.checkbox(&mut p.show_crosshair, "Show crosshair");
+                                        ui.checkbox(&mut p.show_hud, "Show HUD");
+                                        ui.checkbox(&mut p.show_health, "Show health bar");
+                                        ui.checkbox(&mut p.show_ammo, "Show ammo bar");
+                                    });
 
-                            ui.separator();
-                            egui::CollapsingHeader::new("Fly (RMB)")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.label("WASD — move, E/Q or Space — up/down");
-                                    ui.label("Shift — faster, Ctrl — slower");
-                                    ui.label("Scroll during fly — fly speed");
-                                    ui.separator();
-                                    ui.add(
-                                        egui::Slider::new(&mut editor.fly_speed, 1.0..=100.0)
+                                ui.separator();
+                                egui::CollapsingHeader::new("Fly (RMB)")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        ui.label("WASD — move, E/Q or Space — up/down");
+                                        ui.label("Shift — faster, Ctrl — slower");
+                                        ui.label("Scroll during fly — fly speed");
+                                        ui.separator();
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut editor.fly_speed,
+                                                1.0..=100.0,
+                                            )
                                             .text("Fly speed"),
-                                    );
-                                    ui.add(
-                                        egui::Slider::new(&mut editor.fly_sensitivity, 0.0005..=0.01)
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut editor.fly_sensitivity,
+                                                0.0005..=0.01,
+                                            )
                                             .text("Fly sensitivity"),
-                                    );
-                                });
-                        });
-                }
-            });
+                                        );
+                                    });
+                            });
+                    }
+                });
+            state.right_panel_width = panel_response.response.rect.width();
         }
     }
 
@@ -1200,12 +1496,18 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         any = true;
         ui.menu_button("Trigger", |ui| {
             if ui.button("Teleport to (0, 2, 0)").clicked() {
-                world.insert(e, Trigger::new(2.5, TriggerAction::Teleport([0.0, 2.0, 0.0])));
+                world.insert(
+                    e,
+                    Trigger::new(2.5, TriggerAction::Teleport([0.0, 2.0, 0.0])),
+                );
                 editor.undo_requested = true;
                 ui.close_menu();
             }
             if ui.button("Tint (green)").clicked() {
-                world.insert(e, Trigger::new(2.5, TriggerAction::Tint([0.2, 1.0, 0.2, 1.0])));
+                world.insert(
+                    e,
+                    Trigger::new(2.5, TriggerAction::Tint([0.2, 1.0, 0.2, 1.0])),
+                );
                 editor.undo_requested = true;
                 ui.close_menu();
             }
@@ -1345,7 +1647,11 @@ fn texture_picker(
                     changed = true;
                 }
                 if textures.is_empty() {
-                    ui.label(egui::RichText::new("(no textures loaded)").weak().italics());
+                    ui.label(
+                        egui::RichText::new("(no textures loaded)")
+                            .weak()
+                            .italics(),
+                    );
                 }
                 for (name, w, h) in textures {
                     let selected = current.as_deref() == Some(name.as_str());
@@ -1654,7 +1960,10 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                                 .color(egui::Color32::from_rgb(230, 230, 230)),
                             );
                             let desired = egui::vec2(160.0, 10.0);
-                            let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+                            let (rect, _) = ui.allocate_exact_size(
+                                desired,
+                                egui::Sense::hover(),
+                            );
                             let painter = ui.painter();
                             painter.rect_filled(
                                 rect,
@@ -1693,7 +2002,10 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                                 0.0
                             };
                             let desired = egui::vec2(160.0, 10.0);
-                            let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+                            let (rect, _) = ui.allocate_exact_size(
+                                desired,
+                                egui::Sense::hover(),
+                            );
                             let painter = ui.painter();
                             painter.rect_filled(
                                 rect,
@@ -1713,6 +2025,35 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, fps: f32) {
                     });
             });
     }
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+/// Компактные метки компонентов для Hierarchy.
+fn component_badges(world: &World, e: Entity) -> String {
+    let mut s = String::with_capacity(24);
+
+    if world.has::<Transform>(e) { s.push_str("T "); }
+    if world.has::<MeshHandle>(e) { s.push_str("M "); }
+    if world.has::<MaterialHandle>(e) { s.push_str("Mat "); }
+    if world.has::<Parent>(e) { s.push_str("P "); }
+    if world.has::<SkeletonHandle>(e) { s.push_str("Sk "); }
+    if world.has::<AnimationPlayer>(e) { s.push_str("A "); }
+    if world.has::<Spinner>(e) { s.push_str("Sp "); }
+    if world.has::<Velocity>(e) { s.push_str("V "); }
+    if world.has::<Tint>(e) { s.push_str("Ti "); }
+    if world.has::<Visible>(e) { s.push_str("Vi "); }
+    if world.has::<Health>(e) { s.push_str("H "); }
+    if world.has::<Chase>(e) { s.push_str("Ch "); }
+    if world.has::<Interactable>(e) { s.push_str("In "); }
+    if world.has::<Trigger>(e) { s.push_str("Tr "); }
+    if world.has::<RigidBody>(e) { s.push_str("Ph "); }
+    if world.has::<Collider>(e) { s.push_str("C "); }
+    if world.has::<PhysicsMaterial>(e) { s.push_str("PM "); }
+
+    s.trim_end().to_string()
 }
 
 fn entity_display_name(world: &World, e: Entity) -> String {
@@ -1834,7 +2175,10 @@ fn draw_inspector(
                             editor.clipboard_transform = Some(*t);
                         }
                         let paste_enabled = editor.clipboard_transform.is_some();
-                        if ui.add_enabled(paste_enabled, egui::Button::new("Paste")).clicked() {
+                        if ui
+                            .add_enabled(paste_enabled, egui::Button::new("Paste"))
+                            .clicked()
+                        {
                             if let Some(src) = editor.clipboard_transform {
                                 editor.undo_requested = true;
                                 *t = src;
@@ -1894,7 +2238,8 @@ fn draw_inspector(
                         }
                     });
                     if changed_rot {
-                        t.rotation = glam::Quat::from_euler(glam::EulerRot::YXZ, ry, rx, rz);
+                        t.rotation =
+                            glam::Quat::from_euler(glam::EulerRot::YXZ, ry, rx, rz);
                     }
 
                     let mut scale = t.scale.to_array();
