@@ -1,10 +1,10 @@
 (
-    show_renderer_panel: true,
-    show_stats_panel: true,
+    show_renderer_panel: false,
+    show_stats_panel: false,
     show_hierarchy_panel: true,
     show_inspector_panel: true,
     left_panel_width: 264.0,
-    right_panel_width: 475.0,
+    right_panel_width: 482.0,
     save_path: "scene.ron",
     prefabs_dir: "prefabs",
     fbx_export_path: "scene.fbx",

@@ -48,6 +48,30 @@ pub struct Tint(pub [f32; 4]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Visible(pub bool);
 
+/// Размер одного тайла текстуры в мировых единицах.
+///
+/// `1.0` (default) — один тайл на 1 unit world space.
+/// Меньше значение — текстура мельче (чаще повторяется).
+/// Больше значение — текстура крупнее (реже повторяется).
+///
+/// При масштабировании объекта размер тайла в мире остаётся постоянным:
+/// текстура не растягивается, а тайлится многократно. Значение
+/// автоматически умножается на world scale в `collect_draws`.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureTiling {
+    pub size: f32,
+}
+
+impl Default for TextureTiling {
+    fn default() -> Self { Self { size: 1.0 } }
+}
+
+impl TextureTiling {
+    pub fn new(size: f32) -> Self {
+        Self { size: size.max(0.001) }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AnimationPlayer {
     pub clip: String,

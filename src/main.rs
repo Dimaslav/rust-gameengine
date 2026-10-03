@@ -14,7 +14,8 @@ use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
+    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
+    Visible,
 };
 use game::rpg::{self, RpgState};
 use glam::{Quat, Vec3};
@@ -33,6 +34,48 @@ fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> boo
         }
     }
     true
+}
+
+// ============================================================
+// UV scale helper
+// ============================================================
+
+/// Вычислить множитель UV для инстанса — **раздельно по осям**.
+///
+/// U масштабируется по максимальному из **горизонтальных** extent'ов
+/// (`x` vs `z`), V — по вертикальному (`y`). Это устраняет растяжение
+/// текстуры на вытянутых объектах: у куба scale `(1, 3, 1)` боковая
+/// грань имеет физический размер 1×3, и без раздельных UV-множителей
+/// текстура растягивалась бы по вертикали.
+///
+/// Для плоских мешей (`extent.y ≈ 0`, например `plane`) V-множитель
+/// наследует U. Если горизонтальные оси вырождены (вертикальный
+/// стержень) — наоборот, U наследует V.
+fn compute_uv_scale(mesh: &Mesh, model: &glam::Mat4, tiling_size: f32) -> [f32; 2] {
+    let local_extent = (mesh.aabb_max - mesh.aabb_min).abs();
+    let (scale, _, _) = model.to_scale_rotation_translation();
+    let scale_abs = scale.abs();
+    let world_extent = local_extent * scale_abs; // покомпонентно
+
+    let tile = tiling_size.max(0.001);
+
+    // U — горизонтальная ось. Для +Z/-Z граней куба физическая ширина
+    // идёт по X, для +X/-X — по Z. Берём максимум, чтобы обе пары
+    // боковых граней тайлились одинаково.
+    let mut uv_x = world_extent.x.max(world_extent.z) / tile;
+    let mut uv_y = world_extent.y / tile;
+
+    // Плоский меш (plane, quad) — V вырожден, используем U.
+    if uv_y < 0.001 {
+        uv_y = uv_x;
+    }
+    // Если горизонтальные оси вырождены (тонкий вертикальный стержень) —
+    // fallback на V, чтобы текстура не пропала.
+    if uv_x < 0.001 {
+        uv_x = uv_y;
+    }
+
+    [uv_x, uv_y]
 }
 
 // ============================================================
@@ -162,8 +205,7 @@ impl DemoGame {
         }
     }
 
-    /// Дистанция взаимодействия (совпадает с PlayState.interact_distance
-    /// по умолчанию, но используется только RPG-логикой).
+    /// Дистанция взаимодействия для RPG-логики по E.
     fn rpg_interact_distance(&self) -> f32 {
         4.0
     }
@@ -242,7 +284,6 @@ impl Game for DemoGame {
                 .with_double_sided(true),
         );
 
-        // === RPG материалы ===
         rpg::register_materials(renderer);
 
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
@@ -353,6 +394,7 @@ impl Game for DemoGame {
                 );
                 world.insert(e, MeshHandle(inst.mesh_name.clone()));
                 world.insert(e, MaterialHandle(inst.material_name.clone()));
+                world.insert(e, TextureTiling::default());
                 if let Some(skel_name) = &inst.skeleton_name {
                     world.insert(e, SkeletonHandle(skel_name.clone()));
                 }
@@ -367,21 +409,10 @@ impl Game for DemoGame {
             );
         }
 
-        // === RPG tick: диалог, двери ===
         if self.spawned {
             let player_pos = self.camera.position();
             rpg::tick(&mut self.rpg, world, player_pos, dt);
 
-            // ============================================================
-            // Единственная точка обработки клавиши E в Play-режиме.
-            //
-            // Порядок:
-            //   1. RPG-специфичные сущности (NPC / Gold / Key / Chest).
-            //   2. Стандартный Interactable (Pickup / Paint / Toggle).
-            //
-            // App::update_player больше НЕ обрабатывает E — иначе получаем
-            // двойной raycast и потенциальное двойное срабатывание.
-            // ============================================================
             if input.play_mode && input.key_pressed(KeyCode::KeyE) {
                 let origin = self.camera.position();
                 let dir = self.camera.forward();
@@ -392,10 +423,7 @@ impl Game for DemoGame {
                     dir,
                 ) {
                     if dist < self.rpg_interact_distance() {
-                        // 1. RPG-объекты.
                         let handled = rpg::try_interact(world, &mut self.rpg, target);
-
-                        // 2. Fallback: стандартный Interactable.
                         if !handled {
                             if let Some(&inter) = world.get::<Interactable>(target) {
                                 match inter {
@@ -463,7 +491,7 @@ impl Game for DemoGame {
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
         use std::collections::HashMap;
 
-        type BucketKey = (String, String, [u32; 4], bool, bool);
+        type BucketKey = (String, String, [u32; 4], bool, bool, [u32; 2]);
         let mut buckets: HashMap<BucketKey, Vec<InstanceData>> = HashMap::new();
         let planes = self.camera.frustum_planes();
         let cam_pos = self.camera.position();
@@ -537,14 +565,31 @@ impl Game for DemoGame {
                 .map(|t| t.0)
                 .unwrap_or(material.base_color);
 
+            // Per-axis UV scale — текстура тайлится одинаково по U и V
+            // относительно физического размера, а не растягивается.
+            let tiling_size = world
+                .get::<TextureTiling>(e)
+                .map(|t| t.size)
+                .unwrap_or(1.0);
+            let uv_scale = compute_uv_scale(mesh, &model, tiling_size);
+
+            // Ключ включает ОБА компонента UV, округлённые до 0.001.
+            // Иначе сущности с разным аспектом слились бы в один draw
+            // и получили бы одинаковый uv_scale.
+            let uv_key = [
+                (uv_scale[0] * 1000.0).round() as i32 as u32,
+                (uv_scale[1] * 1000.0).round() as i32 as u32,
+            ];
+
             let key = (
                 mesh_name,
                 mat.0.clone(),
                 color.map(f32::to_bits),
                 blend,
                 double_sided,
+                uv_key,
             );
-            let inst = InstanceData::new(model, color);
+            let inst = InstanceData::new_with_uv(model, color, uv_scale);
             buckets.entry(key).or_default().push(inst);
         }
 
@@ -552,7 +597,7 @@ impl Game for DemoGame {
 
         buckets
             .into_iter()
-            .map(|((mesh, material_name, _, blend, double_sided), instances)| MeshDraw {
+            .map(|((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {
                 mesh,
                 instances,
                 texture: Some(material_name),

@@ -8,7 +8,8 @@ use std::path::Path;
 use crate::ecs::{Entity, World};
 use crate::game::components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
+    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
+    Visible,
 };
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use glam::Vec3;
@@ -17,21 +18,18 @@ use glam::Vec3;
 pub struct SceneFile {
     #[serde(default)]
     pub entities: Vec<EntitySnapshot>,
-    /// Точка спавна игрока (для Play-режима).
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
-    /// Оригинальный entity id. Нужен для ремапа `Parent` при загрузке.
     #[serde(default)]
     pub entity_id: Option<u32>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub transform: Option<TransformSnapshot>,
-    /// Ссылка на оригинальный entity id родителя (в терминах `entity_id`).
     #[serde(default)]
     pub parent: Option<u32>,
     #[serde(default)]
@@ -58,8 +56,10 @@ pub struct EntitySnapshot {
     pub tint: Option<[f32; 4]>,
     #[serde(default)]
     pub visible: Option<bool>,
+    /// Размер одного тайла текстуры в мировых единицах.
+    #[serde(default)]
+    pub texture_tiling: Option<f32>,
 
-    // === Physics ===
     #[serde(default)]
     pub rigid_body: Option<RigidBody>,
     #[serde(default)]
@@ -199,8 +199,11 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     }
     if let Some(t) = world.get::<Tint>(e) { s.tint = Some(t.0); any = true; }
     if let Some(v) = world.get::<Visible>(e) { s.visible = Some(v.0); any = true; }
+    if let Some(t) = world.get::<TextureTiling>(e) {
+        s.texture_tiling = Some(t.size);
+        any = true;
+    }
 
-    // === Physics ===
     if let Some(rb) = world.get::<RigidBody>(e) {
         s.rigid_body = Some(*rb);
         any = true;
@@ -307,8 +310,10 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     }
     if let Some(t) = snap.tint { world.insert(e, Tint(t)); }
     if let Some(v) = snap.visible { world.insert(e, Visible(v)); }
+    if let Some(size) = snap.texture_tiling {
+        world.insert(e, TextureTiling::new(size));
+    }
 
-    // === Physics ===
     if let Some(rb) = snap.rigid_body { world.insert(e, rb); }
     if let Some(col) = snap.collider { world.insert(e, col); }
     if let Some(mat) = snap.physics_material { world.insert(e, mat); }

@@ -57,10 +57,17 @@ pub struct InstanceData {
     pub model: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
     pub color: [f32; 4],
+    /// `xy` — множитель UV (сколько раз текстура повторяется),
+    /// `zw` — padding для 16-байтового выравнивания.
+    pub uv_scale: [f32; 4],
 }
 
 impl InstanceData {
     pub fn new(model: Mat4, color: [f32; 4]) -> Self {
+        Self::new_with_uv(model, color, [1.0, 1.0])
+    }
+
+    pub fn new_with_uv(model: Mat4, color: [f32; 4], uv_scale: [f32; 2]) -> Self {
         let m3 = Mat3::from_mat4(model);
         let normal = if m3.determinant().abs() > 1e-8 {
             m3.inverse().transpose()
@@ -71,13 +78,14 @@ impl InstanceData {
             model: model.to_cols_array_2d(),
             normal_matrix: Mat4::from_mat3(normal).to_cols_array_2d(),
             color,
+            uv_scale: [uv_scale[0], uv_scale[1], 0.0, 0.0],
         }
     }
 
-    const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
         6  => Float32x4, 7  => Float32x4, 8  => Float32x4, 9  => Float32x4,
         10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
-        14 => Float32x4
+        14 => Float32x4, 15 => Float32x4
     ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {

@@ -1,13 +1,10 @@
 // G-buffer pass. MRT: albedo, view-normal + linear-depth, emissive.
 // Bind groups: 0=camera, 1=material(+skeleton).
 //
-// Normal map применяется через derivative-based TBN (cotangent frame),
-// поэтому тангенты в вершинах не нужны.
+// Normal map применяется через derivative-based TBN (cotangent frame).
 //
-// Выбор между cull-back и no-cull делается на уровне пайплайна
-// (`gbuffer_pipeline_double_sided`). Для double-sided материалов нормаль
-// флипается через `@builtin(front_facing)`, чтобы освещение было
-// корректным при взгляде с обратной стороны.
+// UV масштабируется на `uv_scale.xy` (per-instance). Это позволяет
+// текстуре тайлиться при масштабировании объекта, а не растягиваться.
 
 struct Camera {
     view_proj:     mat4x4<f32>,
@@ -62,13 +59,14 @@ struct VsIn {
     @location(12) n2: vec4<f32>,
     @location(13) n3: vec4<f32>,
     @location(14) inst_color: vec4<f32>,
+    @location(15) uv_scale:   vec4<f32>,
 };
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
+    @location(2) uv: vec2<f32>,        // уже умноженный на uv_scale
     @location(3) color: vec4<f32>,
     @location(4) view_depth: f32,
 };
@@ -113,14 +111,14 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip_pos     = camera.view_proj * world_pos;
     out.world_pos    = world_pos.xyz;
     out.world_normal = world_nrm;
-    out.uv           = in.uv;
+    // Масштабируем UV до fragment-сэмплинга: textureSample использует
+    // уже умноженное значение → тайлинг без растяжения.
+    out.uv           = in.uv * in.uv_scale.xy;
     out.color        = in.color * in.inst_color;
     out.view_depth   = -view_pos.z;
     return out;
 }
 
-// Cotangent frame по Schüler'у. Работает в любом пространстве, где
-// вычисляются derivatives: здесь — world space.
 fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     let dp1 = dpdx(p);
     let dp2 = dpdy(p);
@@ -132,7 +130,6 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     let T = dp2perp * duv1.x + dp1perp * duv2.x;
     let B = dp2perp * duv1.y + dp1perp * duv2.y;
 
-    // Защита от деградации UV (например, на гранях куба).
     let invmax = inverseSqrt(max(max(dot(T, T), dot(B, B)), 0.0001));
     return mat3x3<f32>(T * invmax, B * invmax, N);
 }
@@ -148,8 +145,6 @@ fn fs_main(
     in: VsOut,
     @builtin(front_facing) front_facing: bool,
 ) -> FsOut {
-    // ВСЕ сэмплы делаем до discard — иначе textureSample попадает в
-    // non-uniform control flow, что запрещено WGSL.
     let base_sample     = textureSample(base_tex,     mat_samp, in.uv);
     let mr_sample       = textureSample(mr_tex,       mat_samp, in.uv);
     let normal_sample   = textureSample(normal_tex,   mat_samp, in.uv);
@@ -157,40 +152,32 @@ fn fs_main(
 
     let base = base_sample * mat.base_color * in.color;
 
-    // Alpha cutoff для AlphaMode::Mask.
     let alpha_mode = mat.flags.x;
     let alpha_cutoff = mat.params.w;
     if (alpha_mode == 1u && base.a < alpha_cutoff) {
         discard;
     }
 
-    // Базовая геометрическая нормаль.
     var n_world = normalize(in.world_normal);
     if (!front_facing) {
         n_world = -n_world;
     }
 
-    // Normal map: tangent-space → world-space через cotangent frame.
-    // Fallback normal (128,128,255) даёт (0,0,1) — identity, изменений нет.
     let n_sample = normal_sample.xyz * 2.0 - 1.0;
     let n_scaled = vec3<f32>(
-        n_sample.xy * mat.params.z,  // normal_scale
+        n_sample.xy * mat.params.z,
         n_sample.z,
     );
     let tbn = cotangent_frame(n_world, in.world_pos, in.uv);
     let n_mapped = normalize(tbn * n_scaled);
 
-    // MR-текстура: R=AO, G=roughness, B=metallic.
     let metallic  = clamp(mat.params.x * mr_sample.b, 0.0, 1.0);
     let roughness = clamp(mat.params.y * mr_sample.g, 0.04, 1.0);
 
-    // Emissive.
     let emissive = emissive_sample.rgb * mat.emissive.rgb;
 
-    // View-space normal для G-buffer.
     let n_view = normalize((camera.view * vec4<f32>(n_mapped, 0.0)).xyz);
 
-    // Линейная глубина, нормированная по far.
     let depth_norm = clamp(in.view_depth / camera.near_far.y, 0.0, 1.0);
 
     var out: FsOut;

@@ -7,7 +7,8 @@ use crate::editor::play::PlayState;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::components::{
     AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, Tint, Transform, Trigger, TriggerAction, Velocity, Visible,
+    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
+    Visible,
 };
 use crate::physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
 use crate::render::{AlphaMode, Material, PostFx};
@@ -1251,8 +1252,7 @@ fn draw_command_palette(
                     let query = state.command_palette_query.clone();
                     let mut filtered: Vec<(usize, &PaletteCommand)> = commands
                         .iter()
-                        .enumerate()
-                        .filter_map(|(i, c)| fuzzy_match(&query, c.label).map(|pos| (pos, c)))
+                        .filter_map(|c| fuzzy_match(&query, c.label).map(|pos| (pos, c)))
                         .collect();
                     filtered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
 
@@ -1335,6 +1335,7 @@ enum ComponentKind {
     Parent,
     Tint,
     Visible,
+    TextureTiling,
     RigidBody,
     Collider,
     PhysicsMaterial,
@@ -1357,6 +1358,7 @@ fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
         ComponentKind::Parent => { world.remove::<Parent>(e); }
         ComponentKind::Tint => { world.remove::<Tint>(e); }
         ComponentKind::Visible => { world.remove::<Visible>(e); }
+        ComponentKind::TextureTiling => { world.remove::<TextureTiling>(e); }
         ComponentKind::RigidBody => { world.remove::<RigidBody>(e); }
         ComponentKind::Collider => { world.remove::<Collider>(e); }
         ComponentKind::PhysicsMaterial => { world.remove::<PhysicsMaterial>(e); }
@@ -1404,6 +1406,18 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         any = true;
         if ui.button("Visible (false)").clicked() {
             world.insert(e, Visible(false));
+            editor.undo_requested = true;
+            ui.close_menu();
+        }
+    }
+    if !world.has::<TextureTiling>(e) {
+        any = true;
+        if ui
+            .button("Texture Tiling")
+            .on_hover_text("Size of one tile in world units (1.0 = 1 unit per tile)")
+            .clicked()
+        {
+            world.insert(e, TextureTiling::default());
             editor.undo_requested = true;
             ui.close_menu();
         }
@@ -1810,6 +1824,40 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
             }
         }
     }
+
+    // === Групповое редактирование TextureTiling ===
+    let tiled: Vec<(Entity, f32)> = selected
+        .iter()
+        .filter_map(|&e| world.get::<TextureTiling>(e).map(|t| (e, t.size)))
+        .collect();
+    if !tiled.is_empty() {
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!("Texture Tiling ({} objects)", tiled.len())).strong(),
+        );
+        let common_size = common_vec3(tiled.iter().map(|(_, s)| Vec3::splat(*s)));
+        let mixed = common_size.is_none();
+        let mut size = common_size.unwrap_or(Vec3::ONE).x;
+        ui.label(if mixed {
+            egui::RichText::new("Tile size (mixed)").weak()
+        } else {
+            egui::RichText::new("Tile size (world units)")
+        });
+        let r = ui.add(
+            egui::Slider::new(&mut size, 0.05..=50.0)
+                .logarithmic(true),
+        );
+        if r.drag_started() || r.gained_focus() {
+            editor.undo_requested = true;
+        }
+        if r.changed() {
+            for &(e, _) in &tiled {
+                if let Some(t) = world.get_mut::<TextureTiling>(e) {
+                    t.size = size;
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -2047,6 +2095,7 @@ fn component_badges(world: &World, e: Entity) -> String {
     if world.has::<Velocity>(e) { s.push_str("V "); }
     if world.has::<Tint>(e) { s.push_str("Ti "); }
     if world.has::<Visible>(e) { s.push_str("Vi "); }
+    if world.has::<TextureTiling>(e) { s.push_str("Tt "); }
     if world.has::<Health>(e) { s.push_str("H "); }
     if world.has::<Chase>(e) { s.push_str("Ch "); }
     if world.has::<Interactable>(e) { s.push_str("In "); }
@@ -2123,6 +2172,7 @@ fn draw_inspector(
     if world.has::<Trigger>(e) { chips.push(("Trigger", ComponentKind::Trigger)); }
     if world.has::<Tint>(e) { chips.push(("Tint", ComponentKind::Tint)); }
     if world.has::<Visible>(e) { chips.push(("Visible", ComponentKind::Visible)); }
+    if world.has::<TextureTiling>(e) { chips.push(("TexTiling", ComponentKind::TextureTiling)); }
     if world.has::<RigidBody>(e) { chips.push(("RigidBody", ComponentKind::RigidBody)); }
     if world.has::<Collider>(e) { chips.push(("Collider", ComponentKind::Collider)); }
     if world.has::<PhysicsMaterial>(e) { chips.push(("PhysicsMaterial", ComponentKind::PhysicsMaterial)); }
@@ -2351,6 +2401,46 @@ fn draw_inspector(
                             });
                     });
                     if current != mh.0 { mh.0 = current; }
+                }
+            });
+    }
+
+    // === Texture Tiling ===
+    if world.has::<TextureTiling>(e) {
+        egui::CollapsingHeader::new("Texture Tiling")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Размер одного тайла в мировых единицах. \
+                         При масштабировании объекта текстура тайлится, а не растягивается."
+                    )
+                    .small()
+                    .weak(),
+                );
+                if let Some(t) = world.get_mut::<TextureTiling>(e) {
+                    let r = ui.add(
+                        egui::Slider::new(&mut t.size, 0.05..=50.0)
+                            .logarithmic(true)
+                            .text("Tile size"),
+                    );
+                    if r.drag_started() || r.gained_focus() {
+                        editor.undo_requested = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Fine (0.25)").on_hover_text("Мелкая текстура").clicked() {
+                            t.size = 0.25;
+                            editor.undo_requested = true;
+                        }
+                        if ui.small_button("Default (1.0)").on_hover_text("1 unit = 1 tile").clicked() {
+                            t.size = 1.0;
+                            editor.undo_requested = true;
+                        }
+                        if ui.small_button("Coarse (4.0)").on_hover_text("Крупная текстура").clicked() {
+                            t.size = 4.0;
+                            editor.undo_requested = true;
+                        }
+                    });
                 }
             });
     }

@@ -13,7 +13,7 @@ use crate::editor::ui::{self as editor_ui, Stats, UiAssets, UiState};
 use crate::editor::{BoxSelect, Editor, EditorAction};
 use crate::game::components::{
     Chase, Health, Interactable, MaterialHandle, MeshHandle, Parent, SkeletonHandle, Spinner,
-    Tint, Transform, Trigger, TriggerAction, Velocity,
+    TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
 };
 use crate::physics::PhysicsWorld;
 use crate::render::{
@@ -1137,6 +1137,9 @@ impl<G: Game> App<G> {
             if let Some(&i) = self.world.get::<Interactable>(*e) {
                 self.world.insert(new_e, i);
             }
+            if let Some(t) = self.world.get::<TextureTiling>(*e).copied() {
+                self.world.insert(new_e, t);
+            }
             if let Some(rb) = self.world.get::<crate::physics::RigidBody>(*e).copied() {
                 self.world.insert(new_e, rb);
             }
@@ -1175,6 +1178,8 @@ impl<G: Game> App<G> {
         self.world.insert(e, MeshHandle(item.mesh().to_string()));
         self.world
             .insert(e, MaterialHandle(item.material().to_string()));
+        self.world
+            .insert(e, TextureTiling::new(item.default_tiling_size()));
 
         match item {
             PaletteItem::Enemy => {
@@ -1408,6 +1413,7 @@ impl<G: Game> App<G> {
                 self.world.insert(e, Transform::at(pos));
                 self.world.insert(e, MeshHandle(mesh.to_string()));
                 self.world.insert(e, MaterialHandle(mat.to_string()));
+                self.world.insert(e, TextureTiling::default());
 
                 self.ensure_unique_material_for(e);
                 self.editor.state.select_single(e);

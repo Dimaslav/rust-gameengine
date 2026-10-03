@@ -1,7 +1,8 @@
 // Forward transparent pass для AlphaMode::Blend.
 // Bind groups: 0=camera, 1=lights, 2=shadow2, 3=material + skeleton.
 // Depth-test против G-buffer depth, без записи depth, alpha blending.
-// Normal map — derivative-based TBN, тот же cotangent frame, что в gbuffer.
+//
+// UV масштабируется на `uv_scale.xy` — как в gbuffer.wgsl.
 
 struct Camera {
     view_proj:     mat4x4<f32>,
@@ -18,7 +19,7 @@ struct Lights {
     ambient_color:   vec4<f32>,
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
-    misc:            vec4<f32>,   // x = ibl_strength
+    misc:            vec4<f32>,
     fog_params:      vec4<f32>,
     fog_color:       vec4<f32>,
     _pad1:           vec4<f32>,
@@ -83,6 +84,7 @@ struct VsIn {
     @location(12) n2: vec4<f32>,
     @location(13) n3: vec4<f32>,
     @location(14) inst_color: vec4<f32>,
+    @location(15) uv_scale:   vec4<f32>,
 };
 
 struct VsOut {
@@ -131,7 +133,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip_pos     = camera.view_proj * world_pos;
     out.world_pos    = world_pos.xyz;
     out.world_normal = world_nrm;
-    out.uv           = in.uv;
+    out.uv           = in.uv * in.uv_scale.xy;
     out.color        = in.color * in.inst_color;
     return out;
 }
@@ -215,7 +217,6 @@ fn fs_main(
     let diffuse = base.rgb;
     var out_rgb = diffuse * (ambient + irr * ibl_strength + lit) + emissive_rgb;
 
-    // Fog для прозрачных — редкий случай, но пусть будет.
     let fog_density = lights.fog_params.x;
     if (fog_density > 0.0) {
         let cam_pos = camera.camera_pos.xyz;
