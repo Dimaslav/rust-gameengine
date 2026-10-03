@@ -4,65 +4,83 @@ pub struct Time {
     last: Instant,
     /// Сырой delta последнего кадра — для физики, анимаций.
     pub delta: f32,
-    /// Сглаженный delta (скользящее среднее по 8 кадрам) — для камеры
-    /// и движения. Устраняет дёрганье при неравномерном приходе кадров.
+    /// Сглаженный delta (скользящее среднее по 8 кадрам).
     pub delta_smooth: f32,
     pub elapsed: f32,
     pub frame_count: u64,
     fps_avg: f32,
     frame_time_max: f32,
-    /// Счётчик «плохих» кадров (в 2× длиннее сглаженного).
     pub hitches: u64,
 
     samples: [f32; SMOOTH_N],
     sample_idx: usize,
     sample_count: usize,
+
+    /// Сколько первых кадров игнорировать: их delta недостоверна
+    /// (инициализация, компиляция шейдеров, загрузка сцены).
+    warmup_frames: u32,
 }
 
 const SMOOTH_N: usize = 8;
+const WARMUP_FRAMES: u32 = 3;
+/// Клампим гигантские паузы (перетаскивание окна, breakpoints в отладчике).
+const MAX_DELTA: f32 = 0.25;
+const DEFAULT_DT: f32 = 1.0 / 60.0;
 
 impl Time {
     pub fn new() -> Self {
         Self {
             last: Instant::now(),
-            delta: 0.0,
-            delta_smooth: 0.0,
+            delta: DEFAULT_DT,
+            delta_smooth: DEFAULT_DT,
             elapsed: 0.0,
             frame_count: 0,
-            fps_avg: 0.0,
+            // Инициализируем правдоподобным значением, а не 0 —
+            // иначе первый `tick()` даёт всплеск FPS.
+            fps_avg: 60.0,
             frame_time_max: 0.0,
             hitches: 0,
-            samples: [0.0; SMOOTH_N],
+            samples: [DEFAULT_DT; SMOOTH_N],
             sample_idx: 0,
             sample_count: 0,
+            warmup_frames: WARMUP_FRAMES,
         }
     }
 
     pub fn tick(&mut self) {
         let now = Instant::now();
-        self.delta = (now - self.last).as_secs_f32();
+        let raw_delta = (now - self.last).as_secs_f32();
         self.last = now;
+
+        // Пропускаем warmup-кадры — не портим статистику мусором.
+        if self.warmup_frames > 0 {
+            self.warmup_frames -= 1;
+            self.delta = DEFAULT_DT;
+            self.elapsed += self.delta;
+            self.frame_count += 1;
+            return;
+        }
+
+        // Клампим «зависшие» кадры — иначе следующий сглаженный delta
+        // будет искажён, и физика получит dt=5 секунд.
+        self.delta = raw_delta.min(MAX_DELTA);
         self.elapsed += self.delta;
         self.frame_count += 1;
 
-        // Кольцевой буфер
         self.samples[self.sample_idx] = self.delta;
         self.sample_idx = (self.sample_idx + 1) % SMOOTH_N;
         if self.sample_count < SMOOTH_N {
             self.sample_count += 1;
         }
 
-        // Скользящее среднее
         let sum: f32 = self.samples[..self.sample_count].iter().sum();
         self.delta_smooth = sum / self.sample_count as f32;
 
-        // Пиковое время кадра за окно
         self.frame_time_max = self.samples[..self.sample_count]
             .iter()
             .copied()
             .fold(0.0_f32, f32::max);
 
-        // Hitch: кадр в 2+ раза длиннее среднего.
         if self.sample_count >= SMOOTH_N
             && self.delta > self.delta_smooth * 2.0
             && self.delta > 0.003
@@ -76,30 +94,14 @@ impl Time {
             0.0
         };
         const ALPHA: f32 = 0.05;
-        if self.fps_avg == 0.0 {
-            self.fps_avg = inst_fps;
-        } else {
-            self.fps_avg = self.fps_avg * (1.0 - ALPHA) + inst_fps * ALPHA;
-        }
+        self.fps_avg = self.fps_avg * (1.0 - ALPHA) + inst_fps * ALPHA;
     }
 
-    pub fn fps(&self) -> f32 {
-        self.fps_avg
-    }
-
-    /// Максимальное время кадра за окно (мс).
-    pub fn frame_time_max_ms(&self) -> f32 {
-        self.frame_time_max * 1000.0
-    }
-
-    /// Среднее время кадра за окно (мс).
-    pub fn frame_time_avg_ms(&self) -> f32 {
-        self.delta_smooth * 1000.0
-    }
+    pub fn fps(&self) -> f32 { self.fps_avg }
+    pub fn frame_time_max_ms(&self) -> f32 { self.frame_time_max * 1000.0 }
+    pub fn frame_time_avg_ms(&self) -> f32 { self.delta_smooth * 1000.0 }
 }
 
 impl Default for Time {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

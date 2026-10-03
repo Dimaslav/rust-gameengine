@@ -130,8 +130,55 @@ pub struct Renderer {
     pub textures: HashMap<String, Texture>,
     default_material: Material,
 
-    /// Время для анимации film grain и temporal rotation SSAO.
+    /// Общее время с начала работы (сек). Устанавливается каждый кадр
+    /// из `render()`.
     skybox_time: f32,
+}
+
+// ============================================================
+// Хелперы сортировки draws
+// ============================================================
+
+/// Средняя мировая позиция всех инстансов draw'а. Используется для
+/// сортировки прозрачных объектов (back-to-front).
+fn draw_center(d: &MeshDraw) -> Vec3 {
+    if d.instances.is_empty() {
+        return Vec3::ZERO;
+    }
+    let mut sum = Vec3::ZERO;
+    for inst in &d.instances {
+        let m = &inst.model;
+        sum += Vec3::new(m[3][0], m[3][1], m[3][2]);
+    }
+    sum / d.instances.len() as f32
+}
+
+/// Сортировка под рендер:
+/// 1. Opaque (blend=false) идут первыми в исходном порядке (сохранение batching).
+/// 2. Blend (blend=true) — по убыванию дистанции до камеры (back-to-front).
+fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
+    let mut v: Vec<MeshDraw> = draws
+        .iter()
+        .map(|d| MeshDraw {
+            mesh: d.mesh.clone(),
+            instances: d.instances.clone(),
+            texture: d.texture.clone(),
+            blend: d.blend,
+            double_sided: d.double_sided,
+        })
+        .collect();
+
+    v.sort_by_key(|d| d.blend);
+    let blend_start = v.partition_point(|d| !d.blend);
+
+    if blend_start < v.len() {
+        v[blend_start..].sort_by(|a, b| {
+            let da = draw_center(a).distance_squared(cam_pos);
+            let db = draw_center(b).distance_squared(cam_pos);
+            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    v
 }
 
 impl Renderer {
@@ -426,7 +473,6 @@ impl Renderer {
             ],
         });
 
-        // SSAO layout: t_gbuffer, noise, sampler, uniform, depth_src
         let ssao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ssao_layout"),
             entries: &[
@@ -1276,15 +1322,13 @@ impl Renderer {
     pub fn add_mesh(&mut self, name: impl Into<String>, mesh: Mesh) {
         let name = name.into();
 
-        // Регистрируем LOD-версии как отдельные меши с суффиксами.
-        // `name` → LOD0, `name__lod0` → LOD1, `name__lod1` → LOD2, ...
         for (i, lod) in mesh.lods.iter().enumerate() {
             let lod_mesh = Mesh::from_raw_parts(
                 &self.device,
                 &lod.vertices,
                 &lod.indices,
                 &format!("{}__lod{}", name, i),
-                false, // без рекурсивной генерации LOD
+                false,
             );
             self.meshes.insert(format!("{}__lod{}", name, i), lod_mesh);
         }
@@ -1292,8 +1336,15 @@ impl Renderer {
         self.meshes.insert(name, mesh);
     }
 
+    /// Возвращает список имён мешей БЕЗ LOD-версий (`*__lod*`),
+    /// чтобы UI не показывал их как отдельные меши.
     pub fn mesh_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.meshes.keys().cloned().collect();
+        let mut v: Vec<String> = self
+            .meshes
+            .keys()
+            .filter(|k| !k.contains("__lod"))
+            .cloned()
+            .collect();
         v.sort();
         v
     }
@@ -1566,7 +1617,9 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
 
-        let ibl_owned = std::mem::replace(&mut self.ibl, None).expect("IBL missing");
+        // IBL не трогаем через mem::replace: если build_size_dependent
+        // паникует, self.ibl останется валидным.
+        let ibl_ref = self.ibl.as_ref().expect("IBL must be initialized");
 
         self.sd = build_size_dependent(
             &self.device,
@@ -1584,13 +1637,11 @@ impl Renderer {
             &self.cube_shadow_cube_view,
             &self.cube_shadow_sampler,
             &self.camera_buffer,
-            &ibl_owned,
+            ibl_ref,
             0.5,
             1.0,
             &self.tonemap_uniform,
         );
-
-        self.ibl = Some(ibl_owned);
 
         self.csm_debug_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("csm_debug_bg"),
@@ -1640,6 +1691,11 @@ impl Renderer {
     // Render
     // ============================================================
 
+    /// Отрисовать кадр.
+    ///
+    /// `time` — общее время с начала работы (сек). Используется для film grain
+    /// и temporal rotation SSAO. Раньше инкремент был `+= 1/60` — теперь
+    /// корректно зависит от FPS.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1651,9 +1707,10 @@ impl Renderer {
         point_lights: &[GpuPointLight],
         ambient: [f32; 3],
         postfx: PostFx,
+        time: f32,
         egui_data: Option<EguiFrameData<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
-        self.skybox_time += 1.0 / 60.0;
+        self.skybox_time = time;
 
         let view = camera.view_matrix();
         let proj = camera.proj_matrix();
@@ -1867,13 +1924,20 @@ impl Renderer {
         self.queue
             .write_buffer(&self.sd.fxaa_uniform, 0, bytemuck::bytes_of(&fxaa_params));
 
+        // === Сортировка draws ===
+        // 1. Opaque (blend=false) вперёд, порядок сохраняется.
+        // 2. Blend (blend=true) — back-to-front по дистанции до камеры.
+        // Без этой сортировки прозрачные объекты накладываются в произвольном
+        // порядке и дают артефакты смешивания.
+        let sorted_draws = sort_draws_for_render(draws, camera.position());
+
         // === Instances ===
-        let total_instances: u64 = draws.iter().map(|d| d.instances.len() as u64).sum();
+        let total_instances: u64 = sorted_draws.iter().map(|d| d.instances.len() as u64).sum();
         if total_instances > 0 {
             self.ensure_instance_capacity(total_instances);
             let stride = std::mem::size_of::<InstanceData>() as u64;
             let mut offset_bytes: u64 = 0;
-            for d in draws {
+            for d in &sorted_draws {
                 if d.instances.is_empty() {
                     continue;
                 }
@@ -1911,18 +1975,20 @@ impl Renderer {
                 label: Some("encoder"),
             });
 
-        passes::encode_csm_all(self, &mut encoder, draws);
+        // Все проходы получают отсортированный список draws, чтобы offset
+        // в instance_buffer соответствовал порядку итерации.
+        passes::encode_csm_all(self, &mut encoder, &sorted_draws);
         if cube_count > 0 {
-            passes::encode_cube_shadow_all(self, &mut encoder, draws);
+            passes::encode_cube_shadow_all(self, &mut encoder, &sorted_draws);
         }
-        passes::encode_gbuffer_pass(self, &mut encoder, draws);
+        passes::encode_gbuffer_pass(self, &mut encoder, &sorted_draws);
         passes::encode_ssao_pass(self, &mut encoder);
         passes::encode_ssao_blur_pass(self, &mut encoder);
         passes::encode_lighting_pass(self, &mut encoder);
         passes::encode_skybox_pass(self, &mut encoder);
         passes::encode_forward_pass(self, &mut encoder, line_vertices);
         passes::encode_particles_pass(self, &mut encoder, particle_instances.len() as u32);
-        passes::encode_transparent_pass(self, &mut encoder, draws);
+        passes::encode_transparent_pass(self, &mut encoder, &sorted_draws);
 
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);

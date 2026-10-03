@@ -53,37 +53,19 @@ pub trait Game: 'static {
         Vec::new()
     }
 
-    fn dir_lights(&self) -> Vec<GpuLight> {
-        Vec::new()
-    }
-
-    fn point_lights(&self) -> Vec<GpuPointLight> {
-        Vec::new()
-    }
-
-    fn ambient(&self) -> [f32; 3] {
-        [0.18, 0.20, 0.26]
-    }
-
-    fn postfx(&self) -> PostFx {
-        PostFx::default()
-    }
-
+    fn dir_lights(&self) -> Vec<GpuLight> { Vec::new() }
+    fn point_lights(&self) -> Vec<GpuPointLight> { Vec::new() }
+    fn ambient(&self) -> [f32; 3] { [0.18, 0.20, 0.26] }
+    fn postfx(&self) -> PostFx { PostFx::default() }
     fn apply_postfx(&mut self, _postfx: PostFx) {}
 
     fn camera(&self) -> &Camera3D;
     fn camera_mut(&mut self) -> &mut Camera3D;
 
-    fn lod_stats(&self) -> [usize; 4] {
-        [0; 4]
-    }
+    fn lod_stats(&self) -> [usize; 4] { [0; 4] }
 
-    /// Строки дополнительного HUD (RPG gold, quests, dialogue).
-    fn rpg_hud(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
+    fn rpg_hud(&self) -> Vec<(String, String)> { Vec::new() }
 
-    /// Игрок убил entity. Хук для квестов и дропа.
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
 }
 
@@ -197,7 +179,6 @@ impl<G: Game> App<G> {
         let bob_enabled = self.editor.state.play.bob_enabled;
         let bob_amp = self.editor.state.play.bob_amplitude;
         let gun_range = self.editor.state.play.gun_range;
-        let interact_dist = self.editor.state.play.interact_distance;
         let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
 
@@ -293,11 +274,15 @@ impl<G: Game> App<G> {
             dir,
         );
 
+        // Highlight используется DemoGame-хуком `rpg::try_interact` для
+        // подсветки цели. Игровая логика взаимодействия — на стороне Game.
+        let interact_dist = self.editor.state.play.interact_distance;
         let new_highlight = aim_hit.as_ref().and_then(|(e, d)| {
             if *d <= interact_dist { Some(*e) } else { None }
         });
         self.editor.state.play.highlight = new_highlight;
 
+        // === Стрельба ===
         let lmb = self.input.mouse_down(MouseButton::Left);
         let can_fire = lmb
             && self.editor.state.play.fire_cooldown <= 0.0
@@ -329,7 +314,9 @@ impl<G: Game> App<G> {
                         let mut killed = false;
                         if let Some(h) = self.world.get_mut::<Health>(target) {
                             h.current -= damage;
-                            if h.current <= 0.0 { killed = true; }
+                            if h.current <= 0.0 {
+                                killed = true;
+                            }
                         }
                         if killed {
                             let pos = self
@@ -350,45 +337,20 @@ impl<G: Game> App<G> {
 
             let play = &mut self.editor.state.play;
             play.fire_cooldown = play.fire_cooldown_max;
-            if play.ammo > 0 { play.ammo -= 1; }
-        }
-
-        if self.input.key_pressed(KeyCode::KeyE)
-            && self.editor.state.play.interact_cooldown <= 0.0
-        {
-            if let Some(target) = self.editor.state.play.highlight {
-                if let Some(&inter) = self.world.get::<Interactable>(target) {
-                    let vfx_pos = self
-                        .world
-                        .get::<Transform>(target)
-                        .map(|t| t.position)
-                        .unwrap_or(Vec3::ZERO);
-
-                    match inter {
-                        Interactable::Pickup => {
-                            self.spawn_burst(vfx_pos, &particles::pickup_glow());
-                            if let Some(audio) = &self.audio {
-                                audio.play("pickup");
-                            }
-                            self.world.despawn(target);
-                        }
-                        Interactable::Paint(c) => {
-                            self.world.insert(target, Tint(c));
-                        }
-                        Interactable::Toggle => {
-                            if let Some(sp) = self.world.get_mut::<Spinner>(target) {
-                                sp.speed = -sp.speed;
-                            }
-                        }
-                    }
-                    self.editor.state.play.interact_cooldown =
-                        self.editor.state.play.interact_cooldown_max;
-                }
+            if play.ammo > 0 {
+                play.ammo -= 1;
             }
         }
 
+        // ============================================================
+        // ВАЖНО: обработка клавиши `E` (Interactable) перенесена
+        // в `Game::update`. App только поддерживает `play.highlight`,
+        // чтобы UI знал, что подсветить.
+        // ============================================================
+
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
 
+        // === Triggers ===
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
         for e in triggers {
             let trigger_data = self.world.get::<Trigger>(e).cloned();
@@ -397,7 +359,9 @@ impl<G: Game> App<G> {
             let (Some(mut t), Some(pos)) = (trigger_data, trigger_pos) else {
                 continue;
             };
-            if t.fired && t.once { continue; }
+            if t.fired && t.once {
+                continue;
+            }
 
             let dist = (player_feet_now - pos).length();
             if dist <= t.radius {
@@ -422,6 +386,7 @@ impl<G: Game> App<G> {
             }
         }
 
+        // === Chase ===
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
@@ -537,7 +502,9 @@ impl<G: Game> App<G> {
     }
 
     fn update_projectiles(&mut self, dt: f32) {
-        if self.projectiles.is_empty() { return; }
+        if self.projectiles.is_empty() {
+            return;
+        }
 
         let floor_y = self.editor.state.play.floor_y;
         let mut hits: Vec<(Vec3, Option<Entity>, f32)> = Vec::new();
@@ -545,7 +512,9 @@ impl<G: Game> App<G> {
 
         for mut p in self.projectiles.drain(..) {
             p.age += dt;
-            if p.age >= p.max_age { continue; }
+            if p.age >= p.max_age {
+                continue;
+            }
 
             let prev = p.position;
             p.position += p.velocity * dt;
@@ -558,7 +527,10 @@ impl<G: Game> App<G> {
 
             let seg = p.position - prev;
             let seg_len = seg.length();
-            if seg_len < 1e-5 { alive.push(p); continue; }
+            if seg_len < 1e-5 {
+                alive.push(p);
+                continue;
+            }
             let dir = seg / seg_len;
 
             if let Some((e, t)) = crate::editor::picking::pick_ray(
@@ -583,7 +555,9 @@ impl<G: Game> App<G> {
                 let mut died = false;
                 if let Some(h) = self.world.get_mut::<Health>(e) {
                     h.current -= dmg;
-                    if h.current <= 0.0 { died = true; }
+                    if h.current <= 0.0 {
+                        died = true;
+                    }
                 }
                 if died {
                     let pos = self
@@ -614,13 +588,24 @@ impl<G: Game> App<G> {
         if self.input.key_pressed(KeyCode::F9) {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
-        if self.input.key_pressed(KeyCode::Escape) && self.editor.state.play.active {
+
+        // Escape в Play-режиме — выход из Play. Не срабатывает, если
+        // открыт command palette или egui сейчас использует клавиатуру
+        // (иначе закроем оба).
+        let egui_wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
+        if self.input.key_pressed(KeyCode::Escape)
+            && self.editor.state.play.active
+            && !self.ui_state.command_palette_open
+            && !egui_wants_keyboard
+        {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
+
         if !self.editor.state.play.active
             && !self.editor.state.flying
             && self.input.key_pressed(KeyCode::Escape)
             && !self.ui_state.command_palette_open
+            && !egui_wants_keyboard
         {
             let mut consumed = false;
             if self.editor.state.palette.active.is_some() {
@@ -1023,6 +1008,8 @@ impl<G: Game> App<G> {
             pixels_per_point,
         };
 
+        // time передаётся в renderer, чтобы skybox_time и temporal SSAO
+        // использовали реальный elapsed, а не += 1/60.
         let res = self.renderer.render(
             self.game.camera(),
             &draws,
@@ -1032,6 +1019,7 @@ impl<G: Game> App<G> {
             &point_lights,
             ambient,
             postfx,
+            self.time.elapsed,
             Some(egui_data),
         );
 
@@ -1106,7 +1094,9 @@ impl<G: Game> App<G> {
             .copied()
             .filter(|&e| self.world.entities().contains(&e))
             .collect();
-        if originals.is_empty() { return; }
+        if originals.is_empty() {
+            return;
+        }
 
         let mut new_selected = Vec::with_capacity(originals.len());
         for e in &originals {
@@ -1299,7 +1289,9 @@ impl<G: Game> App<G> {
             }
             EditorAction::PasteEntity => {
                 let snaps = self.editor.state.clipboard_entities.clone();
-                if snaps.is_empty() { return; }
+                if snaps.is_empty() {
+                    return;
+                }
                 self.editor.state.undo.push_forced(&self.world);
 
                 let mut new_selected = Vec::new();
@@ -1356,7 +1348,8 @@ impl<G: Game> App<G> {
             EditorAction::Load => {
                 let path = self.editor.state.save_path.clone();
                 match crate::scene::load_scene_from_file(&path) {
-                    Ok((new_world, spawn)) => {
+                    Ok((mut new_world, spawn)) => {
+                        new_world.sync_next_id();
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
@@ -1370,7 +1363,8 @@ impl<G: Game> App<G> {
             }
             EditorAction::LoadPath(path) => {
                 match crate::scene::load_scene_from_file(&path) {
-                    Ok((new_world, spawn)) => {
+                    Ok((mut new_world, spawn)) => {
+                        new_world.sync_next_id();
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
@@ -1419,7 +1413,9 @@ impl<G: Game> App<G> {
                 self.editor.state.select_single(e);
             }
             EditorAction::DeleteSelected => {
-                if self.editor.state.selected.is_empty() { return; }
+                if self.editor.state.selected.is_empty() {
+                    return;
+                }
                 self.editor.state.undo.push_forced(&self.world);
                 let victims: Vec<Entity> = self.editor.state.selected.clone();
                 let mut all_victims = victims.clone();
@@ -1442,10 +1438,14 @@ impl<G: Game> App<G> {
                 self.duplicate_selected();
             }
             EditorAction::FocusSelected => {
-                if self.editor.state.selected.is_empty() { return; }
+                if self.editor.state.selected.is_empty() {
+                    return;
+                }
                 let Some(center) =
                     gizmo::group_center(&self.world, &self.editor.state.selected)
-                else { return; };
+                else {
+                    return;
+                };
                 let radius = gizmo::group_radius(
                     &self.world,
                     &self.editor.state.selected,
@@ -1455,7 +1455,10 @@ impl<G: Game> App<G> {
             }
             EditorAction::SavePrefab => {
                 let name = self.editor.state.prefab_save_name.trim().to_string();
-                if name.is_empty() { log::warn!("Prefab name is empty"); return; }
+                if name.is_empty() {
+                    log::warn!("Prefab name is empty");
+                    return;
+                }
                 if self.editor.state.selected.is_empty() {
                     log::warn!("Nothing selected for prefab");
                     return;
@@ -1902,9 +1905,15 @@ pub fn run<G: Game>(mut game: G) {
                                                             app.editor.state.gizmo.drag = Some(drag);
                                                             app.editor.state.gizmo.hovered = Some(axis);
                                                             true
-                                                        } else { false }
-                                                    } else { false }
-                                                } else { false };
+                                                        } else {
+                                                            false
+                                                        }
+                                                    } else {
+                                                        false
+                                                    }
+                                                } else {
+                                                    false
+                                                };
 
                                             if !started_gizmo {
                                                 app.editor.state.box_select = Some(BoxSelect {

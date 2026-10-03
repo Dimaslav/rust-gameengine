@@ -33,7 +33,6 @@ pub fn prefab_from_selection(
     selected: &[Entity],
     name: Option<String>,
 ) -> PrefabFile {
-    // Детерминированный порядок.
     let mut sorted: Vec<Entity> = selected.to_vec();
     sorted.sort();
     sorted.dedup();
@@ -50,6 +49,7 @@ pub fn prefab_from_selection(
             continue;
         };
         // Перекодируем Parent: real entity → index в префабе.
+        // Ссылки наружу префаба → None.
         if let Some(p) = snap.parent {
             snap.parent = id_to_idx.get(&p).copied();
         }
@@ -80,24 +80,39 @@ pub fn load_prefab_from_file(path: impl AsRef<Path>) -> Result<PrefabFile> {
 }
 
 /// Спавнит все entity из префаба. Возвращает список новых entity.
-/// Позиции смещаются на `offset` (мировое смещение).
+///
+/// Смещение `offset` применяется **только к корневым** entity префаба
+/// (у которых `parent == None` или указывает за пределы префаба).
+/// Иначе дочерние entity получили бы offset дважды: один раз через
+/// свой локальный Transform, второй — через родителя.
 pub fn instantiate_prefab(
     world: &mut World,
     prefab: &PrefabFile,
     offset: Vec3,
 ) -> Vec<Entity> {
+    let n = prefab.entities.len() as u32;
+
+    let is_root = |parent: Option<u32>| -> bool {
+        match parent {
+            None => true,
+            Some(p) => p >= n,
+        }
+    };
+
     let mut idx_to_entity: HashMap<u32, Entity> = HashMap::new();
     let mut new_entities: Vec<Entity> = Vec::with_capacity(prefab.entities.len());
 
-    // Первый проход: spawn всех без Parent, с offset в Transform.
+    // Первый проход: spawn всех без Parent.
     for (idx, snap) in prefab.entities.iter().enumerate() {
         let mut s = snap.clone();
         s.parent = None;
 
-        if let Some(ref mut t) = s.transform {
-            t.position[0] += offset.x;
-            t.position[1] += offset.y;
-            t.position[2] += offset.z;
+        if is_root(snap.parent) {
+            if let Some(ref mut t) = s.transform {
+                t.position[0] += offset.x;
+                t.position[1] += offset.y;
+                t.position[2] += offset.z;
+            }
         }
 
         let e = spawn_snapshot(world, s);
@@ -105,13 +120,17 @@ pub fn instantiate_prefab(
         new_entities.push(e);
     }
 
-    // Второй проход: восстановить Parent через маппинг.
+    // Второй проход: восстановить Parent через маппинг индексов.
     for (idx, snap) in prefab.entities.iter().enumerate() {
         let Some(old_parent_idx) = snap.parent else { continue };
-        let Some(&new_parent) = idx_to_entity.get(&old_parent_idx) else {
+        // Ссылки наружу префаба отбрасываем.
+        if old_parent_idx >= n {
             continue;
-        };
-        let Some(&new_self) = idx_to_entity.get(&(idx as u32)) else {
+        }
+        let (Some(&new_parent), Some(&new_self)) = (
+            idx_to_entity.get(&old_parent_idx),
+            idx_to_entity.get(&(idx as u32)),
+        ) else {
             continue;
         };
         world.insert(new_self, Parent(new_parent));

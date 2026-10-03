@@ -15,13 +15,6 @@
 //!
 //! version >= 7500: 64-bit offsets in NODE header.
 //! version <  7500: 32-bit offsets in NODE header.
-//!
-//! Array property header НЕ ЗАВИСИТ от версии:
-//!   u32 length
-//!   u32 encoding        (0 = raw, 1 = zlib)
-//!   u32 stored_length   (всегда есть; для raw — размер данных, включая
-//!                        возможный padding; для zlib — размер сжатых данных)
-//!   data
 
 use anyhow::{bail, Context, Result};
 use std::io::Read;
@@ -37,6 +30,11 @@ const MAX_VERSION: u32 = 7700;
 const MAX_NUM_PROPERTIES: u64 = 1_000_000;
 const MAX_ARRAY_LEN: u32 = 200_000_000;
 const MAX_NAME_LEN: u8 = 200;
+
+/// Максимальная глубина вложенности нод. Реальные FBX редко превышают 10.
+/// Защита от malicious / corrupted файлов, вызывающих stack overflow
+/// при рекурсивном `read_node`.
+const MAX_NODE_DEPTH: u32 = 64;
 
 pub fn is_binary_fbx(bytes: &[u8]) -> bool {
     bytes.len() >= BIN_MAGIC_21.len() && &bytes[..BIN_MAGIC_21.len()] == BIN_MAGIC_21
@@ -115,7 +113,9 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
 }
 
 fn read_u32_at(b: &[u8], off: usize) -> u32 {
-    if off + 4 > b.len() { return 0; }
+    if off + 4 > b.len() {
+        return 0;
+    }
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
@@ -178,6 +178,15 @@ fn read_node(
     depth: u32,
     parent_end: usize,
 ) -> Result<Option<FbxNode>> {
+    // Защита от malicious / corrupted файлов с бесконечной вложенностью.
+    if depth > MAX_NODE_DEPTH {
+        bail!(
+            "FBX binary: exceeded max node depth {} at offset {}",
+            MAX_NODE_DEPTH,
+            cur.pos()
+        );
+    }
+
     let file_size = cur.data.len();
     let node_start = cur.pos();
 
@@ -357,16 +366,6 @@ fn read_property(cur: &mut Cursor<'_>) -> Result<FbxArg> {
 // ============================================================
 // Array reader
 // ============================================================
-//
-// Array header НЕ ЗАВИСИТ от FBX версии:
-//   u32 array_len
-//   u32 encoding          (0 = raw, 1 = zlib)
-//   u32 stored_len
-//   data
-//
-// Для encoding=0 курсор обязан продвинуться на stored_len (не raw_len),
-// потому что stored_len может включать padding.
-// Для encoding=1 читаем ровно stored_len сжатых байт и разжимаем до raw_len.
 
 fn read_array(
     cur: &mut Cursor<'_>,
@@ -406,8 +405,6 @@ fn read_array(
         ))?;
 
     let bytes: Vec<u8> = if encoding == 0 {
-        // Raw: cursor продвигается на stored_len (включая возможный
-        // padding), декодируем первые raw_len байт.
         if stored_len < raw_len {
             bail!(
                 "FBX binary: raw array@{} tag='{}': stored_len {} < raw_len {}",

@@ -161,6 +161,12 @@ impl DemoGame {
             rpg: RpgState::new(),
         }
     }
+
+    /// Дистанция взаимодействия (совпадает с PlayState.interact_distance
+    /// по умолчанию, но используется только RPG-логикой).
+    fn rpg_interact_distance(&self) -> f32 {
+        4.0
+    }
 }
 
 impl Game for DemoGame {
@@ -327,10 +333,8 @@ impl Game for DemoGame {
         if !self.spawned {
             self.spawned = true;
 
-            // === RPG-сцена ===
             rpg::spawn_scene(world);
 
-            // === glTF-модели (если загрузились) ===
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
@@ -368,8 +372,16 @@ impl Game for DemoGame {
             let player_pos = self.camera.position();
             rpg::tick(&mut self.rpg, world, player_pos, dt);
 
-            // Взаимодействие E в Play-режиме — перехватывает только если
-            // обычный обработчик App не сработал.
+            // ============================================================
+            // Единственная точка обработки клавиши E в Play-режиме.
+            //
+            // Порядок:
+            //   1. RPG-специфичные сущности (NPC / Gold / Key / Chest).
+            //   2. Стандартный Interactable (Pickup / Paint / Toggle).
+            //
+            // App::update_player больше НЕ обрабатывает E — иначе получаем
+            // двойной raycast и потенциальное двойное срабатывание.
+            // ============================================================
             if input.play_mode && input.key_pressed(KeyCode::KeyE) {
                 let origin = self.camera.position();
                 let dir = self.camera.forward();
@@ -379,8 +391,28 @@ impl Game for DemoGame {
                     origin,
                     dir,
                 ) {
-                    if dist < 4.0 {
-                        rpg::try_interact(world, &mut self.rpg, target);
+                    if dist < self.rpg_interact_distance() {
+                        // 1. RPG-объекты.
+                        let handled = rpg::try_interact(world, &mut self.rpg, target);
+
+                        // 2. Fallback: стандартный Interactable.
+                        if !handled {
+                            if let Some(&inter) = world.get::<Interactable>(target) {
+                                match inter {
+                                    Interactable::Pickup => {
+                                        world.despawn(target);
+                                    }
+                                    Interactable::Paint(c) => {
+                                        world.insert(target, Tint(c));
+                                    }
+                                    Interactable::Toggle => {
+                                        if let Some(sp) = world.get_mut::<Spinner>(target) {
+                                            sp.speed = -sp.speed;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -400,12 +432,17 @@ impl Game for DemoGame {
             let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
                 player.time += dt * speed;
                 player.time
-            } else { continue };
+            } else {
+                continue;
+            };
 
             let Some(clip) = self.animations.get(&clip_name) else { continue };
             let duration = clip.duration;
-            let final_time = if looping && duration > 0.0 { new_time % duration }
-                else { new_time.min(duration) };
+            let final_time = if looping && duration > 0.0 {
+                new_time % duration
+            } else {
+                new_time.min(duration)
+            };
 
             let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else { continue };
             let Some(skel) = self.skeletons.get(&skel_handle.0) else { continue };
@@ -439,14 +476,18 @@ impl Game for DemoGame {
         let entities: Vec<_> = world.entities().to_vec();
         for e in entities {
             if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
+                if !v.0 {
+                    continue;
+                }
             }
 
             let (Some(_t), Some(m), Some(mat)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
                 world.get::<MaterialHandle>(e),
-            ) else { continue };
+            ) else {
+                continue;
+            };
 
             let model = crate::game::world_matrix(world, e);
 
@@ -536,7 +577,9 @@ impl Game for DemoGame {
 
         for &e in selected {
             if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
+                if !v.0 {
+                    continue;
+                }
             }
 
             if let (Some(_t), Some(mh)) = (

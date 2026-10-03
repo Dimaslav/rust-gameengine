@@ -30,7 +30,6 @@ use super::fbx_ast::{parse_fbx_ascii, FbxArg, FbxNode};
 #[derive(Debug, Clone)]
 pub struct FbxImportOptions {
     /// Дополнительный множитель к позициям (поверх UnitScaleFactor).
-    /// По умолчанию 1.0.
     pub scale: f32,
     /// Префикс имени для mesh/material/entity.
     pub prefix: String,
@@ -63,8 +62,6 @@ pub fn import_fbx(
 ) -> Result<FbxImportStats> {
     let path = path.as_ref();
 
-    // 1. Читаем как байты — иначе UTF-8 декод упадёт раньше,
-    //    чем мы успеем распознать binary-FBX.
     let bytes = std::fs::read(path)
         .with_context(|| format!("read FBX {}", path.display()))?;
 
@@ -72,13 +69,11 @@ pub fn import_fbx(
         bail!("FBX '{}' пустой", path.display());
     }
 
-    // 2. Binary vs ASCII.
     let nodes = if super::fbx_binary::is_binary_fbx(&bytes) {
         log::info!("FBX '{}' — binary, парсим binary-формат", path.display());
         super::fbx_binary::parse_fbx_binary(&bytes)
             .with_context(|| format!("parse binary FBX {}", path.display()))?
     } else {
-        // ASCII fallback.
         let text_bytes: &[u8] = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
             &bytes[3..]
         } else {
@@ -129,21 +124,17 @@ fn import_fbx_ast(
     path: &Path,
     opts: &FbxImportOptions,
 ) -> Result<FbxImportStats> {
-    // Единицы.
     let unit_scale = find_unit_scale_factor(nodes).unwrap_or(1.0) as f32;
     let world_scale = (unit_scale / 100.0) * opts.scale;
 
-    // Objects.
     let objects = nodes
         .iter()
         .find(|n| n.name == "Objects")
         .ok_or_else(|| anyhow!("no `Objects` section in FBX"))?;
 
-    // Connections.
     let connections = nodes.iter().find(|n| n.name == "Connections");
     let conn_map = build_connection_map(connections);
 
-    // Разбор объектов.
     let mut geometries: HashMap<i64, FbxGeometry> = HashMap::new();
     let mut models: Vec<FbxModel> = Vec::new();
     let mut materials: HashMap<i64, FbxMaterial> = HashMap::new();
@@ -176,25 +167,22 @@ fn import_fbx_ast(
     let mut stats = FbxImportStats::default();
     stats.models = models.len();
 
-    // Первый проход: spawn entity с трансформом.
     let mut model_to_entity: HashMap<i64, Entity> = HashMap::new();
     for m in &models {
         let e = world.spawn();
         world.insert(e, Name(format!("{}{}", opts.prefix, m.name)));
         world.insert(e, Transform {
             position: m.translation * world_scale,
-            rotation: euler_xyz_deg_to_quat(m.rotation_deg),
+            rotation: euler_deg_to_quat(m.rotation_deg, m.rotation_order),
             scale: m.scaling,
         });
         model_to_entity.insert(m.id, e);
     }
 
-    // Второй проход: mesh + material.
     for m in &models {
         let Some(&entity) = model_to_entity.get(&m.id) else { continue };
         let kids = conn_map.children_of.get(&m.id);
 
-        // Geometry.
         if let Some(gid) = kids
             .and_then(|ks| ks.iter().find(|id| geometries.contains_key(id)).copied())
         {
@@ -210,7 +198,6 @@ fn import_fbx_ast(
             }
         }
 
-        // Material.
         if let Some(mid) = kids
             .and_then(|ks| ks.iter().find(|id| materials.contains_key(id)).copied())
         {
@@ -223,7 +210,6 @@ fn import_fbx_ast(
         }
     }
 
-    // Третий проход: Parent.
     for m in &models {
         let Some(&entity) = model_to_entity.get(&m.id) else { continue };
         let parent_id = conn_map.parent_of.get(&m.id).copied();
@@ -260,9 +246,7 @@ fn import_fbx_ast(
 
 #[derive(Default)]
 struct ConnectionMap {
-    /// parent_id → [child_id, ...]
     children_of: HashMap<i64, Vec<i64>>,
-    /// child_id → parent_id
     parent_of: HashMap<i64, i64>,
 }
 
@@ -271,14 +255,15 @@ fn build_connection_map(connections: Option<&FbxNode>) -> ConnectionMap {
     let Some(conn) = connections else { return map };
 
     for c in conn.children_named("C") {
-        // args: ["OO" | "OP", child_id, parent_id]
         let ids: Vec<i64> = c.args.iter()
             .filter_map(|a| match a {
                 FbxArg::Int(i) => Some(*i),
                 _ => None,
             })
             .collect();
-        if ids.len() < 2 { continue; }
+        if ids.len() < 2 {
+            continue;
+        }
         let child = ids[0];
         let parent = ids[1];
         map.children_of.entry(parent).or_default().push(child);
@@ -336,7 +321,9 @@ fn parse_geometry(node: &FbxNode) -> Option<FbxGeometry> {
 
     let vertices = find_array(node, "Vertices")?;
     let pvi = find_int_array(node, "PolygonVertexIndex")?;
-    if vertices.len() < 3 || pvi.len() < 3 { return None; }
+    if vertices.len() < 3 || pvi.len() < 3 {
+        return None;
+    }
 
     let normals = find_layer_array(node, "LayerElementNormal", "Normals");
     let uvs = find_layer_array(node, "LayerElementUV", "UV");
@@ -367,12 +354,62 @@ fn find_layer_array(node: &FbxNode, layer: &str, elem: &str) -> Option<Vec<f32>>
 // Model
 // ============================================================
 
+/// Порядок применения поворотов в FBX.
+///
+/// FBX enum `RotationOrder`:
+/// 0 = eEulerXYZ, 1 = eEulerXZY, 2 = eEulerYZX,
+/// 3 = eEulerYXZ, 4 = eEulerZXY, 5 = eEulerZYX, 6 = eSphericXYZ.
+///
+/// Применение `Quat::from_euler` в glam соответствует «XYZ» =
+/// сначала X, потом Y, потом Z (в исходной нотации FBX для eEulerXYZ).
+#[derive(Debug, Clone, Copy)]
+enum RotationOrder {
+    XYZ,
+    XZY,
+    YZX,
+    YXZ,
+    ZXY,
+    ZYX,
+}
+
+impl Default for RotationOrder {
+    fn default() -> Self {
+        RotationOrder::XYZ
+    }
+}
+
+impl RotationOrder {
+    fn from_enum_code(code: i32) -> Self {
+        match code {
+            0 => Self::XYZ,
+            1 => Self::XZY,
+            2 => Self::YZX,
+            3 => Self::YXZ,
+            4 => Self::ZXY,
+            5 => Self::ZYX,
+            _ => Self::XYZ,
+        }
+    }
+
+    fn to_euler_rot(self) -> EulerRot {
+        match self {
+            Self::XYZ => EulerRot::XYZ,
+            Self::XZY => EulerRot::XZY,
+            Self::YZX => EulerRot::YZX,
+            Self::YXZ => EulerRot::YXZ,
+            Self::ZXY => EulerRot::ZXY,
+            Self::ZYX => EulerRot::ZYX,
+        }
+    }
+}
+
 struct FbxModel {
     id: i64,
     name: String,
     translation: Vec3,
     rotation_deg: Vec3,
     scaling: Vec3,
+    rotation_order: RotationOrder,
 }
 
 fn parse_model(node: &FbxNode) -> Option<FbxModel> {
@@ -389,12 +426,23 @@ fn parse_model(node: &FbxNode) -> Option<FbxModel> {
     let mut translation = Vec3::ZERO;
     let mut rotation_deg = Vec3::ZERO;
     let mut scaling = Vec3::ONE;
+    let mut rotation_order = RotationOrder::default();
 
     if let Some(props) = node.child("Properties70") {
         for p in props.children_named("P") {
             let Some(prop_name) = p.first_str() else { continue };
             let floats = p.floats();
-            if floats.len() < 3 { continue; }
+
+            if prop_name == "RotationOrder" {
+                if let Some(&v) = floats.last() {
+                    rotation_order = RotationOrder::from_enum_code(v as i32);
+                }
+                continue;
+            }
+
+            if floats.len() < 3 {
+                continue;
+            }
             let s = floats.len() - 3;
             let v = Vec3::new(floats[s], floats[s + 1], floats[s + 2]);
             match prop_name {
@@ -406,12 +454,20 @@ fn parse_model(node: &FbxNode) -> Option<FbxModel> {
         }
     }
 
-    Some(FbxModel { id, name, translation, rotation_deg, scaling })
+    Some(FbxModel {
+        id,
+        name,
+        translation,
+        rotation_deg,
+        scaling,
+        rotation_order,
+    })
 }
 
-fn euler_xyz_deg_to_quat(deg: Vec3) -> Quat {
+/// Применяет углы Эйлера (в градусах) в заданном порядке.
+fn euler_deg_to_quat(deg: Vec3, order: RotationOrder) -> Quat {
     Quat::from_euler(
-        EulerRot::XYZ,
+        order.to_euler_rot(),
         deg.x.to_radians(),
         deg.y.to_radians(),
         deg.z.to_radians(),
@@ -439,12 +495,14 @@ impl FbxMaterial {
         m.emissive = self.emissive;
         m.roughness = (1.0 - self.shininess / 100.0).clamp(0.05, 1.0);
         m.metallic = self.metallic.unwrap_or_else(|| {
-            // Грубая эвристика: если specular близок к diffuse, это
-            // скорее металл (PBR-экспортёры часто так делают).
             let dx = (self.diffuse[0] - self.specular[0]).abs();
             let dy = (self.diffuse[1] - self.specular[1]).abs();
             let dz = (self.diffuse[2] - self.specular[2]).abs();
-            if (dx + dy + dz) < 0.05 && self.diffuse[0] > 0.3 { 1.0 } else { 0.0 }
+            if (dx + dy + dz) < 0.05 && self.diffuse[0] > 0.3 {
+                1.0
+            } else {
+                0.0
+            }
         });
         m.base_color[3] = self.opacity;
         m
@@ -478,7 +536,9 @@ fn parse_material(node: &FbxNode) -> Option<FbxMaterial> {
             let Some(prop_name) = p.first_str() else { continue };
             let floats = p.floats();
             let last3 = || -> Option<[f32; 3]> {
-                if floats.len() < 3 { return None; }
+                if floats.len() < 3 {
+                    return None;
+                }
                 let s = floats.len() - 3;
                 Some([floats[s], floats[s + 1], floats[s + 2]])
             };
@@ -491,16 +551,24 @@ fn parse_material(node: &FbxNode) -> Option<FbxMaterial> {
                     }
                 }
                 "SpecularColor" => {
-                    if let Some(v) = last3() { m.specular = v; }
+                    if let Some(v) = last3() {
+                        m.specular = v;
+                    }
                 }
                 "EmissiveColor" => {
-                    if let Some(v) = last3() { m.emissive = v; }
+                    if let Some(v) = last3() {
+                        m.emissive = v;
+                    }
                 }
                 "Shininess" => {
-                    if let Some(v) = floats.last() { m.shininess = *v; }
+                    if let Some(v) = floats.last() {
+                        m.shininess = *v;
+                    }
                 }
                 "Opacity" => {
-                    if let Some(v) = floats.last() { m.opacity = *v; }
+                    if let Some(v) = floats.last() {
+                        m.opacity = *v;
+                    }
                 }
                 "TransparencyFactor" => {
                     if let Some(v) = floats.last() {
@@ -510,7 +578,9 @@ fn parse_material(node: &FbxNode) -> Option<FbxMaterial> {
                     }
                 }
                 "Metallic" => {
-                    if let Some(v) = floats.last() { m.metallic = Some(*v); }
+                    if let Some(v) = floats.last() {
+                        m.metallic = Some(*v);
+                    }
                 }
                 _ => {}
             }
@@ -531,10 +601,10 @@ fn build_mesh_from_geometry(
 ) -> Option<Mesh> {
     let verts = &geom.vertices;
     let pvi = &geom.polygon_vertex_indices;
-    if verts.len() < 3 || pvi.len() < 3 { return None; }
+    if verts.len() < 3 || pvi.len() < 3 {
+        return None;
+    }
 
-    // Разбор pvi в полигоны: индекс >= 0 → vertex_id; отрицательный
-    // (`-idx - 1`) → последний vertex полигона.
     let mut polygons: Vec<Vec<u32>> = Vec::new();
     let mut current: Vec<u32> = Vec::new();
     for &raw in pvi {
@@ -550,7 +620,6 @@ fn build_mesh_from_geometry(
         polygons.push(current);
     }
 
-    // Один out-vertex на ByPolygonVertex-индекс, cache по bv.
     let mut out_vertices: Vec<Vertex3D> = Vec::new();
     let mut out_indices: Vec<u32> = Vec::new();
     let mut cache: HashMap<u32, u32> = HashMap::new();
@@ -570,11 +639,13 @@ fn build_mesh_from_geometry(
             } else {
                 let pos = get_pos(verts, v_id as usize, scale);
                 let normal = geom
-                    .normals.as_ref()
+                    .normals
+                    .as_ref()
                     .and_then(|n| get_vec3(n, bv_i as usize))
                     .unwrap_or([0.0, 1.0, 0.0]);
                 let uv = geom
-                    .uvs.as_ref()
+                    .uvs
+                    .as_ref()
                     .and_then(|u| get_vec2(u, bv_i as usize))
                     .unwrap_or([0.0, 0.0]);
                 out_vertices.push(Vertex3D {
@@ -592,7 +663,6 @@ fn build_mesh_from_geometry(
             idxs.push(out_i);
         }
 
-        // Fan: (0, k, k+1).
         for k in 1..idxs.len() - 1 {
             out_indices.push(idxs[0]);
             out_indices.push(idxs[k]);
@@ -602,26 +672,34 @@ fn build_mesh_from_geometry(
         bv += poly.len() as u32;
     }
 
-    if out_vertices.is_empty() || out_indices.len() < 3 { return None; }
+    if out_vertices.is_empty() || out_indices.len() < 3 {
+        return None;
+    }
 
     Some(Mesh::new(device, &out_vertices, &out_indices, &geom.name))
 }
 
 fn get_pos(flat: &[f32], i: usize, scale: f32) -> [f32; 3] {
     let b = i * 3;
-    if b + 2 >= flat.len() { return [0.0, 0.0, 0.0]; }
+    if b + 2 >= flat.len() {
+        return [0.0, 0.0, 0.0];
+    }
     [flat[b] * scale, flat[b + 1] * scale, flat[b + 2] * scale]
 }
 
 fn get_vec3(flat: &[f32], i: usize) -> Option<[f32; 3]> {
     let b = i * 3;
-    if b + 2 >= flat.len() { return None; }
+    if b + 2 >= flat.len() {
+        return None;
+    }
     Some([flat[b], flat[b + 1], flat[b + 2]])
 }
 
 fn get_vec2(flat: &[f32], i: usize) -> Option<[f32; 2]> {
     let b = i * 2;
-    if b + 1 >= flat.len() { return None; }
+    if b + 1 >= flat.len() {
+        return None;
+    }
     Some([flat[b], flat[b + 1]])
 }
 
@@ -630,11 +708,15 @@ fn get_vec2(flat: &[f32], i: usize) -> Option<[f32; 2]> {
 // ============================================================
 
 fn unique_name(base: &str, exists: impl Fn(&str) -> bool) -> String {
-    if !exists(base) { return base.to_string(); }
+    if !exists(base) {
+        return base.to_string();
+    }
     let mut i = 1u32;
     loop {
         let n = format!("{}_{}", base, i);
-        if !exists(&n) { return n; }
+        if !exists(&n) {
+            return n;
+        }
         i += 1;
     }
 }
