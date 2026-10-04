@@ -10,7 +10,7 @@ pub use gpu_types::{
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use winit::window::Window;
 
 use crate::render::camera::Camera3D;
@@ -25,7 +25,6 @@ use crate::render::texture::Texture;
 use gpu_types::*;
 use size_dep::{build_size_dependent, SizeDependent};
 
-/// Данные для отрисовки egui-оверлея в тот же кадр, что и рендер.
 pub struct EguiFrameData<'a> {
     pub renderer: &'a mut egui_wgpu::Renderer,
     pub clipped_primitives: Vec<egui::ClippedPrimitive>,
@@ -52,6 +51,7 @@ pub struct Renderer {
     debug_layout: wgpu::BindGroupLayout,
     debug_depth_layout: wgpu::BindGroupLayout,
     skybox_layout: wgpu::BindGroupLayout,
+    taa_layout: wgpu::BindGroupLayout,
 
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -100,6 +100,7 @@ pub struct Renderer {
     tonemap_pipeline: wgpu::RenderPipeline,
     fxaa_pipeline: wgpu::RenderPipeline,
     skybox_pipeline: wgpu::RenderPipeline,
+    taa_pipeline: wgpu::RenderPipeline,
 
     debug2d_pipeline: wgpu::RenderPipeline,
     debug_depth_pipeline: wgpu::RenderPipeline,
@@ -130,17 +131,32 @@ pub struct Renderer {
     pub textures: HashMap<String, Texture>,
     default_material: Material,
 
-    /// Общее время с начала работы (сек). Устанавливается каждый кадр
-    /// из `render()`.
     skybox_time: f32,
+
+    /// Счётчик кадров для Halton-джиттера и свопа TAA ping-pong.
+    taa_frame_index: u32,
+    /// **Jittered** view-proj **прошлого** кадра — то, чем реально
+    /// растеризовали предыдущий кадр (включая Halton-джиттер).
+    ///
+    /// Motion в gbuffer.wgsl считается как
+    /// `project(prev_P, prev_view_proj) - pixel_center_uv`,
+    /// где `pixel_center_uv = frag_coord.xy / screen_size.xy`.
+    ///
+    /// На статике это даёт `motion = jitter_prev - jitter_curr`, и TAA
+    /// через bilinear-сэмплинг по `uv + motion` попадает точно в ту
+    /// суб-пиксельную позицию, куда P был растеризован в прошлом кадре.
+    ///
+    /// Если хранить **unjittered** vp — motion станет `-jitter_curr`,
+    /// history уедет на `jitter_prev` мимо правильной точки → тряска.
+    taa_prev_view_proj: Mat4,
+    /// Первые 2 кадра после resize — сброс TAA history.
+    taa_reset_frames: u32,
 }
 
 // ============================================================
 // Хелперы сортировки draws
 // ============================================================
 
-/// Средняя мировая позиция всех инстансов draw'а. Используется для
-/// сортировки прозрачных объектов (back-to-front).
 fn draw_center(d: &MeshDraw) -> Vec3 {
     if d.instances.is_empty() {
         return Vec3::ZERO;
@@ -153,9 +169,6 @@ fn draw_center(d: &MeshDraw) -> Vec3 {
     sum / d.instances.len() as f32
 }
 
-/// Сортировка под рендер:
-/// 1. Opaque (blend=false) идут первыми в исходном порядке (сохранение batching).
-/// 2. Blend (blend=true) — по убыванию дистанции до камеры (back-to-front).
 fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
     let mut v: Vec<MeshDraw> = draws
         .iter()
@@ -181,6 +194,33 @@ fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
     v
 }
 
+// ============================================================
+// Halton
+// ============================================================
+
+fn radical_inverse(mut n: u32, base: u32) -> f32 {
+    let mut result = 0.0f32;
+    let mut f = 1.0f32 / base as f32;
+    while n > 0 {
+        result += f * (n % base) as f32;
+        n /= base;
+        f /= base as f32;
+    }
+    result
+}
+
+/// Halton(2, 3) jitter в пикселях, диапазон `[-0.5, 0.5]`.
+///
+/// Джиттер сдвигает sample-точку растеризации в суб-пиксель. TAA
+/// накапливает историю из N кадров и через это аппроксимирует
+/// supersampling: каждый пиксель «видит» свою подвыборку 8 кадров.
+fn halton_jitter_pixels(i: u32) -> Vec2 {
+    let s = i % TAA_JITTER_SEQUENCE;
+    let hx = radical_inverse(s + 1, 2);
+    let hy = radical_inverse(s + 1, 3);
+    Vec2::new(hx - 0.5, hy - 0.5)
+}
+
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
@@ -203,7 +243,13 @@ impl Renderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        // Instance data (14) + vertex data (6) = 20 attributes.
+                        // Default wgpu-limit — 16. Desktop Vulkan/DX12/Metal
+                        // стабильно дают 32.
+                        max_vertex_attributes: 32,
+                        ..wgpu::Limits::default()
+                    },
                 },
                 None,
             )
@@ -757,6 +803,58 @@ impl Renderer {
             ],
         });
 
+        let taa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("taa_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         // ============================================================
         // Uniforms
         // ============================================================
@@ -833,7 +931,7 @@ impl Renderer {
         });
 
         // ============================================================
-        // CSM
+        // CSM / Cube shadow
         // ============================================================
         let csm_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("csm_texture"),
@@ -876,9 +974,6 @@ impl Renderer {
             ..Default::default()
         });
 
-        // ============================================================
-        // Cube shadow
-        // ============================================================
         let cube_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cube_shadow_texture"),
             size: wgpu::Extent3d {
@@ -1024,6 +1119,8 @@ impl Renderer {
             make_fxaa_pipeline(&device, &config, &debug_layout).expect("fxaa pipeline");
         let skybox_pipeline =
             make_skybox_pipeline(&device, &skybox_layout).expect("skybox pipeline");
+        let taa_pipeline =
+            make_taa_pipeline(&device, &taa_layout).expect("taa pipeline");
 
         // ============================================================
         // Noise
@@ -1042,6 +1139,7 @@ impl Renderer {
             &shadow2_layout,
             &debug_layout,
             &lighting_layout,
+            &taa_layout,
             &ssao_uniform,
             &ssao_noise_view,
             &csm_array_view,
@@ -1070,7 +1168,6 @@ impl Renderer {
             ],
         });
 
-        // === Buffers ===
         const INITIAL_INSTANCE_CAPACITY: u64 = 4096;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance_buffer"),
@@ -1081,29 +1178,14 @@ impl Renderer {
 
         let fallback_texture = Texture::white(&device, &queue, &texture_layout).unwrap();
         let fallback_emissive = Texture::from_solid(
-            &device,
-            &queue,
-            &texture_layout,
-            [0, 0, 0, 255],
-            "fallback_emissive",
-        )
-        .unwrap();
+            &device, &queue, &texture_layout, [0, 0, 0, 255], "fallback_emissive",
+        ).unwrap();
         let fallback_mr = Texture::from_solid_linear(
-            &device,
-            &queue,
-            &texture_layout,
-            [255, 255, 0, 255],
-            "fallback_mr",
-        )
-        .unwrap();
+            &device, &queue, &texture_layout, [255, 255, 0, 255], "fallback_mr",
+        ).unwrap();
         let fallback_normal = Texture::from_solid_linear(
-            &device,
-            &queue,
-            &texture_layout,
-            [128, 128, 255, 255],
-            "fallback_normal",
-        )
-        .unwrap();
+            &device, &queue, &texture_layout, [128, 128, 255, 255], "fallback_normal",
+        ).unwrap();
 
         let default_material = Material::default();
         let default_sampler = device.create_sampler(&SamplerDesc::default().to_wgpu());
@@ -1130,89 +1212,48 @@ impl Renderer {
         });
 
         Self {
-            surface,
-            device,
-            queue,
-            config,
-            size,
-            camera_layout,
-            lights_layout,
-            shadow_pass_layout,
-            shadow2_layout,
-            texture_layout,
-            material_layout,
-            ssao_layout,
-            lighting_layout,
-            bloom_layout,
-            tonemap_layout,
-            debug_layout,
-            debug_depth_layout,
-            skybox_layout,
-            camera_buffer,
-            camera_bind_group,
-            lights_buffer,
-            lights_bind_group,
-            shadow_pass_buffer,
-            shadow_pass_bind_group,
-            shadow_pass_stride,
-            csm_array_view,
-            csm_cascade_views,
-            csm_sampler,
-            cube_shadow_cube_view,
-            cube_shadow_face_views,
-            cube_shadow_sampler,
+            surface, device, queue, config, size,
+            camera_layout, lights_layout, shadow_pass_layout, shadow2_layout,
+            texture_layout, material_layout, ssao_layout, lighting_layout,
+            bloom_layout, tonemap_layout, debug_layout, debug_depth_layout, skybox_layout,
+            taa_layout,
+            camera_buffer, camera_bind_group,
+            lights_buffer, lights_bind_group,
+            shadow_pass_buffer, shadow_pass_bind_group, shadow_pass_stride,
+            csm_array_view, csm_cascade_views, csm_sampler,
+            cube_shadow_cube_view, cube_shadow_face_views, cube_shadow_sampler,
             material_bind_groups: HashMap::new(),
             default_material_bind_group,
             sampler_cache: HashMap::new(),
             skeleton_buffers: HashMap::new(),
-            fallback_texture,
-            fallback_mr,
-            fallback_normal,
-            fallback_emissive,
-            gbuffer_pipeline,
-            gbuffer_pipeline_double_sided,
-            shadow_pipeline,
-            shadow_pipeline_double_sided,
-            line_pipeline,
-            particles_pipeline,
-            transparent_pipeline,
-            transparent_pipeline_double_sided,
+            fallback_texture, fallback_mr, fallback_normal, fallback_emissive,
+            gbuffer_pipeline, gbuffer_pipeline_double_sided,
+            shadow_pipeline, shadow_pipeline_double_sided,
+            line_pipeline, particles_pipeline,
+            transparent_pipeline, transparent_pipeline_double_sided,
             lighting_pipeline,
-            ssao_pipeline,
-            ssao_blur_pipeline,
-            bloom_prefilter_pipeline,
-            bloom_downsample_pipeline,
-            bloom_upsample_pipeline,
-            tonemap_pipeline,
-            fxaa_pipeline,
-            skybox_pipeline,
-            debug2d_pipeline,
-            debug_depth_pipeline,
-            csm_debug_bind_group,
-            tonemap_uniform,
-            ssao_uniform,
-            skybox_uniform,
-            skybox_bind_group,
-            _ssao_noise_tex: ssao_noise_tex,
-            ssao_noise_view,
-            ibl: Some(ibl),
-            sd,
-            instance_buffer,
-            instance_capacity: INITIAL_INSTANCE_CAPACITY,
+            ssao_pipeline, ssao_blur_pipeline,
+            bloom_prefilter_pipeline, bloom_downsample_pipeline, bloom_upsample_pipeline,
+            tonemap_pipeline, fxaa_pipeline, skybox_pipeline,
+            taa_pipeline,
+            debug2d_pipeline, debug_depth_pipeline, csm_debug_bind_group,
+            tonemap_uniform, ssao_uniform,
+            skybox_uniform, skybox_bind_group,
+            _ssao_noise_tex: ssao_noise_tex, ssao_noise_view,
+            ibl: Some(ibl), sd,
+            instance_buffer, instance_capacity: INITIAL_INSTANCE_CAPACITY,
             line_buffer,
-            particles_instance_buffer,
-            particles_instance_capacity: INITIAL_PARTICLES_CAPACITY,
+            particles_instance_buffer, particles_instance_capacity: INITIAL_PARTICLES_CAPACITY,
             meshes: HashMap::new(),
             materials: MaterialRegistry::new(),
             textures: HashMap::new(),
             default_material,
             skybox_time: 0.0,
+            taa_frame_index: 0,
+            taa_prev_view_proj: Mat4::IDENTITY,
+            taa_reset_frames: 2,
         }
     }
-
-    // ============================================================
-    // Hot-reload шейдеров
-    // ============================================================
 
     #[cfg(debug_assertions)]
     pub fn reload_shaders(&mut self) -> Result<(), String> {
@@ -1239,18 +1280,14 @@ impl Renderer {
                 particles: make_particles_pipeline(&self.device, &self.camera_layout)?,
                 transparent: make_transparent_pipeline(
                     &self.device,
-                    &self.camera_layout,
-                    &self.lights_layout,
-                    &self.shadow2_layout,
-                    &self.material_layout,
+                    &self.camera_layout, &self.lights_layout,
+                    &self.shadow2_layout, &self.material_layout,
                     Some(wgpu::Face::Back),
                 )?,
                 transparent_double_sided: make_transparent_pipeline(
                     &self.device,
-                    &self.camera_layout,
-                    &self.lights_layout,
-                    &self.shadow2_layout,
-                    &self.material_layout,
+                    &self.camera_layout, &self.lights_layout,
+                    &self.shadow2_layout, &self.material_layout,
                     None,
                 )?,
                 lighting: make_lighting_pipeline(
@@ -1269,9 +1306,8 @@ impl Renderer {
                 fxaa: make_fxaa_pipeline(
                     &self.device, &self.config, &self.debug_layout,
                 )?,
-                skybox: make_skybox_pipeline(
-                    &self.device, &self.skybox_layout,
-                )?,
+                skybox: make_skybox_pipeline(&self.device, &self.skybox_layout)?,
+                taa: make_taa_pipeline(&self.device, &self.taa_layout)?,
             })
         };
 
@@ -1306,6 +1342,7 @@ impl Renderer {
         self.debug_depth_pipeline = built.debug.1;
         self.fxaa_pipeline = built.fxaa;
         self.skybox_pipeline = built.skybox;
+        self.taa_pipeline = built.taa;
 
         Ok(())
     }
@@ -1336,8 +1373,6 @@ impl Renderer {
         self.meshes.insert(name, mesh);
     }
 
-    /// Возвращает список имён мешей БЕЗ LOD-версий (`*__lod*`),
-    /// чтобы UI не показывал их как отдельные меши.
     pub fn mesh_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self
             .meshes
@@ -1368,40 +1403,22 @@ impl Renderer {
     }
 
     pub fn load_texture_rgba(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        width: u32,
-        height: u32,
+        &mut self, name: &str, data: &[u8], width: u32, height: u32,
     ) -> anyhow::Result<()> {
         let tex = Texture::from_rgba(
-            &self.device,
-            &self.queue,
-            &self.texture_layout,
-            data,
-            width,
-            height,
-            name,
+            &self.device, &self.queue, &self.texture_layout,
+            data, width, height, name,
         )?;
         self.textures.insert(name.to_string(), tex);
         Ok(())
     }
 
     pub fn load_texture_rgba_linear(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        width: u32,
-        height: u32,
+        &mut self, name: &str, data: &[u8], width: u32, height: u32,
     ) -> anyhow::Result<()> {
         let tex = Texture::from_rgba_linear(
-            &self.device,
-            &self.queue,
-            &self.texture_layout,
-            data,
-            width,
-            height,
-            name,
+            &self.device, &self.queue, &self.texture_layout,
+            data, width, height, name,
         )?;
         self.textures.insert(name.to_string(), tex);
         Ok(())
@@ -1414,8 +1431,9 @@ impl Renderer {
     }
 
     pub fn load_texture_bytes(&mut self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        let tex =
-            Texture::from_bytes(&self.device, &self.queue, &self.texture_layout, bytes, name)?;
+        let tex = Texture::from_bytes(
+            &self.device, &self.queue, &self.texture_layout, bytes, name,
+        )?;
         self.textures.insert(name.to_string(), tex);
         Ok(())
     }
@@ -1433,37 +1451,19 @@ impl Renderer {
         let name = name.into();
         let sampler = self.get_sampler(&mat.sampler);
 
-        let base_tex = mat
-            .base_color_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_texture);
-        let mr_tex = mat
-            .metallic_roughness_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_mr);
-        let normal_tex = mat
-            .normal_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_normal);
-        let emissive_tex = mat
-            .emissive_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_emissive);
+        let base_tex = mat.base_color_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_texture);
+        let mr_tex = mat.metallic_roughness_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_mr);
+        let normal_tex = mat.normal_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_normal);
+        let emissive_tex = mat.emissive_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_emissive);
 
         let gpu = build_object_bind_group(
-            &self.device,
-            &self.material_layout,
-            &mat,
-            base_tex,
-            mr_tex,
-            normal_tex,
-            emissive_tex,
-            &sampler,
-            create_identity_skeleton_buffer(&self.device),
+            &self.device, &self.material_layout, &mat,
+            base_tex, mr_tex, normal_tex, emissive_tex,
+            &sampler, create_identity_skeleton_buffer(&self.device),
         );
 
         self.materials.insert(name.clone(), mat);
@@ -1475,50 +1475,27 @@ impl Renderer {
     }
 
     pub fn add_material_with_skeleton(
-        &mut self,
-        name: &str,
-        mat: Material,
-        skeleton_name: &str,
+        &mut self, name: &str, mat: Material, skeleton_name: &str,
     ) {
         let sampler = self.get_sampler(&mat.sampler);
 
-        let base_tex = mat
-            .base_color_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_texture);
-        let mr_tex = mat
-            .metallic_roughness_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_mr);
-        let normal_tex = mat
-            .normal_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_normal);
-        let emissive_tex = mat
-            .emissive_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_emissive);
+        let base_tex = mat.base_color_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_texture);
+        let mr_tex = mat.metallic_roughness_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_mr);
+        let normal_tex = mat.normal_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_normal);
+        let emissive_tex = mat.emissive_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_emissive);
 
-        let skeleton_uniform = self
-            .skeleton_buffers
-            .get(skeleton_name)
-            .cloned()
+        let skeleton_uniform = self.skeleton_buffers
+            .get(skeleton_name).cloned()
             .unwrap_or_else(|| create_identity_skeleton_buffer(&self.device));
 
         let gpu = build_object_bind_group(
-            &self.device,
-            &self.material_layout,
-            &mat,
-            base_tex,
-            mr_tex,
-            normal_tex,
-            emissive_tex,
-            &sampler,
-            skeleton_uniform,
+            &self.device, &self.material_layout, &mat,
+            base_tex, mr_tex, normal_tex, emissive_tex,
+            &sampler, skeleton_uniform,
         );
 
         self.materials.insert(name.to_string(), mat);
@@ -1526,58 +1503,33 @@ impl Renderer {
     }
 
     pub fn update_material(&mut self, name: &str, mat: Material) {
-        if self.materials.get(name).is_none() {
-            return;
-        }
-
+        if self.materials.get(name).is_none() { return; }
         let sampler = self.get_sampler(&mat.sampler);
 
-        let base_tex = mat
-            .base_color_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_texture);
-        let mr_tex = mat
-            .metallic_roughness_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_mr);
-        let normal_tex = mat
-            .normal_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_normal);
-        let emissive_tex = mat
-            .emissive_texture
-            .as_deref()
-            .and_then(|n| self.textures.get(n))
-            .unwrap_or(&self.fallback_emissive);
+        let base_tex = mat.base_color_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_texture);
+        let mr_tex = mat.metallic_roughness_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_mr);
+        let normal_tex = mat.normal_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_normal);
+        let emissive_tex = mat.emissive_texture.as_deref()
+            .and_then(|n| self.textures.get(n)).unwrap_or(&self.fallback_emissive);
 
-        let skeleton_uniform = self
-            .material_bind_groups
-            .get(name)
+        let skeleton_uniform = self.material_bind_groups.get(name)
             .map(|g| g.skeleton_uniform.clone())
             .unwrap_or_else(|| create_identity_skeleton_buffer(&self.device));
 
         let gpu = build_object_bind_group(
-            &self.device,
-            &self.material_layout,
-            &mat,
-            base_tex,
-            mr_tex,
-            normal_tex,
-            emissive_tex,
-            &sampler,
-            skeleton_uniform,
+            &self.device, &self.material_layout, &mat,
+            base_tex, mr_tex, normal_tex, emissive_tex,
+            &sampler, skeleton_uniform,
         );
 
         self.materials.insert(name.to_string(), mat);
         self.material_bind_groups.insert(name.to_string(), gpu);
     }
 
-    pub fn materials_default(&self) -> &Material {
-        &self.default_material
-    }
+    pub fn materials_default(&self) -> &Material { &self.default_material }
 
     pub fn add_skeleton(&mut self, name: impl Into<String>, matrices: &[Mat4]) {
         let name = name.into();
@@ -1597,9 +1549,7 @@ impl Renderer {
     }
 
     pub fn update_skeleton(&mut self, name: &str, matrices: &[Mat4]) {
-        let Some(buffer) = self.skeleton_buffers.get(name) else {
-            return;
-        };
+        let Some(buffer) = self.skeleton_buffers.get(name) else { return; };
         let data = if matrices.is_empty() {
             SkeletonUniform::identity()
         } else {
@@ -1609,38 +1559,23 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
-            return;
-        }
+        if new_size.width == 0 || new_size.height == 0 { return; }
         self.size = new_size;
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
 
-        // IBL не трогаем через mem::replace: если build_size_dependent
-        // паникует, self.ibl останется валидным.
         let ibl_ref = self.ibl.as_ref().expect("IBL must be initialized");
 
         self.sd = build_size_dependent(
-            &self.device,
-            &self.config,
-            &self.bloom_layout,
-            &self.tonemap_layout,
-            &self.ssao_layout,
-            &self.shadow2_layout,
-            &self.debug_layout,
-            &self.lighting_layout,
-            &self.ssao_uniform,
-            &self.ssao_noise_view,
-            &self.csm_array_view,
-            &self.csm_sampler,
-            &self.cube_shadow_cube_view,
-            &self.cube_shadow_sampler,
-            &self.camera_buffer,
-            ibl_ref,
-            0.5,
-            1.0,
-            &self.tonemap_uniform,
+            &self.device, &self.config,
+            &self.bloom_layout, &self.tonemap_layout, &self.ssao_layout,
+            &self.shadow2_layout, &self.debug_layout, &self.lighting_layout,
+            &self.taa_layout,
+            &self.ssao_uniform, &self.ssao_noise_view,
+            &self.csm_array_view, &self.csm_sampler,
+            &self.cube_shadow_cube_view, &self.cube_shadow_sampler,
+            &self.camera_buffer, ibl_ref, 0.5, 1.0, &self.tonemap_uniform,
         );
 
         self.csm_debug_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1657,12 +1592,13 @@ impl Renderer {
                 },
             ],
         });
+
+        // Сброс TAA: history теперь содержит текстуры другого размера.
+        self.taa_reset_frames = 2;
     }
 
     fn ensure_instance_capacity(&mut self, needed: u64) {
-        if needed <= self.instance_capacity {
-            return;
-        }
+        if needed <= self.instance_capacity { return; }
         let new_cap = (self.instance_capacity * 2).max(needed);
         self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance_buffer"),
@@ -1674,9 +1610,7 @@ impl Renderer {
     }
 
     fn ensure_particles_capacity(&mut self, needed: u64) {
-        if needed <= self.particles_instance_capacity {
-            return;
-        }
+        if needed <= self.particles_instance_capacity { return; }
         let new_cap = (self.particles_instance_capacity * 2).max(needed);
         self.particles_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particles_instance_buffer"),
@@ -1691,11 +1625,6 @@ impl Renderer {
     // Render
     // ============================================================
 
-    /// Отрисовать кадр.
-    ///
-    /// `time` — общее время с начала работы (сек). Используется для film grain
-    /// и temporal rotation SSAO. Раньше инкремент был `+= 1/60` — теперь
-    /// корректно зависит от FPS.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1712,9 +1641,30 @@ impl Renderer {
     ) -> Result<(), wgpu::SurfaceError> {
         self.skybox_time = time;
 
+        // ============================================================
+        // Jitter + предыдущая view-proj
+        // ============================================================
+        let w_px = self.config.width.max(1) as f32;
+        let h_px = self.config.height.max(1) as f32;
+
+        let jitter_pixels = halton_jitter_pixels(self.taa_frame_index);
+        let jitter_ndc = Vec2::new(
+            jitter_pixels.x * 2.0 / w_px,
+            jitter_pixels.y * 2.0 / h_px,
+        );
+
         let view = camera.view_matrix();
-        let proj = camera.proj_matrix();
+        let proj_unjittered = camera.proj_matrix();
+        let mut proj = proj_unjittered;
+
+        // Jitter применяется **только** для растеризации G-buffer / forward.
+        // Motion считается от jittered prev к pixel_center (см. комментарий
+        // в gbuffer.wgsl). Это даёт корректный prev_uv для TAA-history.
+        proj.z_axis.x -= jitter_ndc.x;
+        proj.z_axis.y -= jitter_ndc.y;
+
         let vp = proj * view;
+
         let camera_uniform = CameraUniform {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
@@ -1722,10 +1672,47 @@ impl Renderer {
             inv_view: view.inverse().to_cols_array_2d(),
             camera_pos: camera.position().extend(1.0).to_array(),
             near_far: [camera.near, camera.far, 0.0, 0.0],
+            // prev_view_proj — **jittered** vp прошлого кадра.
+            prev_view_proj: self.taa_prev_view_proj.to_cols_array_2d(),
+            screen_size: [w_px, h_px, 1.0 / w_px, 1.0 / h_px],
         };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
+        // Сохраняем **jittered** vp — то, чем реально растеризовали этот
+        // кадр. В следующем кадре оно станет prev_view_proj для motion.
+        //
+        // Motion = `project(prev_P, prev_vp_jit) - pixel_center_uv`.
+        // На статике это `jitter_prev - jitter_curr` — TAA через bilinear
+        // сэмплит history точно там, где P был растеризован в прошлом кадре.
+        // Если хранить unjittered — motion теряет sub-pixel сдвиг, history
+        // промахивается на jitter_prev, и картинка трясётся.
+        self.taa_prev_view_proj = vp;
+
+        let write_idx = (self.taa_frame_index as usize) & 1;
+
+        let reset_flag = if self.taa_reset_frames > 0 { 1.0 } else { 0.0 };
+        if self.taa_reset_frames > 0 {
+            self.taa_reset_frames -= 1;
+        }
+
+        let taa_params = TaaParams {
+            values: [
+                (1.0 - postfx.taa_strength) + postfx.taa_strength * 0.1,
+                0.125,
+                postfx.taa_sharpening,
+                reset_flag,
+            ],
+            screen: [w_px, h_px, 1.0 / w_px, 1.0 / h_px],
+        };
+        self.queue
+            .write_buffer(&self.sd.taa_uniform, 0, bytemuck::bytes_of(&taa_params));
+
+        self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
+
+        // ============================================================
+        // Lights / shadows
+        // ============================================================
         let dir_light_dir = dir_lights
             .first()
             .map(|l| Vec3::new(l.direction[0], l.direction[1], l.direction[2]))
@@ -1787,18 +1774,13 @@ impl Renderer {
             ambient_color,
             counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
             light_view_proj: cascade_vp[0].to_cols_array_2d(),
-            misc,
-            fog_params,
-            fog_color,
-            shadow_params,
+            misc, fog_params, fog_color, shadow_params,
             dir_lights: dir_packed,
             point_lights: pt_packed,
             cube_shadow_pos: cube_pos_packed,
         };
-        self.queue
-            .write_buffer(&self.lights_buffer, 0, bytemuck::bytes_of(&lights_uniform));
+        self.queue.write_buffer(&self.lights_buffer, 0, bytemuck::bytes_of(&lights_uniform));
 
-        // Shadow pass uniforms — 9 слотов.
         {
             let stride = self.shadow_pass_stride as usize;
             let light_size = std::mem::size_of::<LightsUniform>();
@@ -1811,10 +1793,7 @@ impl Renderer {
                     ambient_color,
                     counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
                     light_view_proj: mat.to_cols_array_2d(),
-                    misc,
-                    fog_params,
-                    fog_color,
-                    shadow_params,
+                    misc, fog_params, fog_color, shadow_params,
                     dir_lights: dir_packed,
                     point_lights: pt_packed,
                     cube_shadow_pos: cube_pos_packed,
@@ -1848,13 +1827,13 @@ impl Renderer {
             self.queue.write_buffer(&self.shadow_pass_buffer, 0, &bytes);
         }
 
-        // === Post uniforms ===
+        // ============================================================
+        // Post uniforms
+        // ============================================================
         let knee = postfx.bloom_knee.max(1e-4);
         let radius = postfx.bloom_radius.max(0.5);
-        let w = self.config.width.max(1) as f32;
-        let h = self.config.height.max(1) as f32;
         let prefilter_uniform_data = BloomParams {
-            texel: [1.0 / w, 1.0 / h, 2.0 / w, 2.0 / h],
+            texel: [1.0 / w_px, 1.0 / h_px, 2.0 / w_px, 2.0 / h_px],
             params: [postfx.bloom_threshold, knee, radius, 0.0],
         };
         self.queue.write_buffer(
@@ -1894,6 +1873,9 @@ impl Renderer {
 
         let noise_tile_x = self.config.width as f32 / 4.0;
         let noise_tile_y = self.config.height as f32 / 4.0;
+        // SSAO `time` не использует `skybox_time` — иначе шум SSAO
+        // вращается каждый кадр, TAA его не гасит, и картинка «кипит».
+        // С temporal rotation 0 паттерн шума статичен per-pixel.
         let ssao_data = SsaoUniform {
             proj_scale: [
                 proj.x_axis.x,
@@ -1902,7 +1884,8 @@ impl Renderer {
                 postfx.ssao_radius,
             ],
             params: [0.025, postfx.ssao_strength, noise_tile_x, noise_tile_y],
-            time: [self.skybox_time, 0.0, 0.0, 0.0],
+            time: [0.0, 0.0, 0.0, 0.0],
+            view: view.to_cols_array_2d(),
         };
         self.queue
             .write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
@@ -1915,32 +1898,27 @@ impl Renderer {
 
         let fxaa_params = FxaaParams {
             values: [
-                1.0 / self.config.width as f32,
-                1.0 / self.config.height as f32,
-                postfx.fxaa_strength,
+                1.0 / w_px,
+                1.0 / h_px,
+                postfx.fxaa_strength * (1.0 - 0.5 * postfx.taa_strength),
                 0.0,
             ],
         };
         self.queue
             .write_buffer(&self.sd.fxaa_uniform, 0, bytemuck::bytes_of(&fxaa_params));
 
-        // === Сортировка draws ===
-        // 1. Opaque (blend=false) вперёд, порядок сохраняется.
-        // 2. Blend (blend=true) — back-to-front по дистанции до камеры.
-        // Без этой сортировки прозрачные объекты накладываются в произвольном
-        // порядке и дают артефакты смешивания.
+        // ============================================================
+        // Instances / lines / particles
+        // ============================================================
         let sorted_draws = sort_draws_for_render(draws, camera.position());
 
-        // === Instances ===
         let total_instances: u64 = sorted_draws.iter().map(|d| d.instances.len() as u64).sum();
         if total_instances > 0 {
             self.ensure_instance_capacity(total_instances);
             let stride = std::mem::size_of::<InstanceData>() as u64;
             let mut offset_bytes: u64 = 0;
             for d in &sorted_draws {
-                if d.instances.is_empty() {
-                    continue;
-                }
+                if d.instances.is_empty() { continue; }
                 self.queue.write_buffer(
                     &self.instance_buffer,
                     offset_bytes,
@@ -1950,11 +1928,9 @@ impl Renderer {
             }
         }
 
-        // === Lines ===
         self.line_buffer
             .upload(&self.device, &self.queue, line_vertices);
 
-        // === Particle instances ===
         if !particle_instances.is_empty() {
             self.ensure_particles_capacity(particle_instances.len() as u64);
             self.queue.write_buffer(
@@ -1964,7 +1940,9 @@ impl Renderer {
             );
         }
 
-        // === Frame ===
+        // ============================================================
+        // Frame
+        // ============================================================
         let frame = self.surface.get_current_texture()?;
         let swap_view = frame
             .texture
@@ -1975,8 +1953,6 @@ impl Renderer {
                 label: Some("encoder"),
             });
 
-        // Все проходы получают отсортированный список draws, чтобы offset
-        // в instance_buffer соответствовал порядку итерации.
         passes::encode_csm_all(self, &mut encoder, &sorted_draws);
         if cube_count > 0 {
             passes::encode_cube_shadow_all(self, &mut encoder, &sorted_draws);
@@ -1990,13 +1966,14 @@ impl Renderer {
         passes::encode_particles_pass(self, &mut encoder, particle_instances.len() as u32);
         passes::encode_transparent_pass(self, &mut encoder, &sorted_draws);
 
+        passes::encode_taa_pass(self, &mut encoder, write_idx);
+
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);
         } else {
-            passes::encode_post_processing(self, &mut encoder, &swap_view);
+            passes::encode_post_processing(self, &mut encoder, &swap_view, write_idx);
         }
 
-        // === egui-оверлей ===
         if let Some(egui_data) = egui_data {
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
@@ -2040,7 +2017,6 @@ impl Renderer {
     }
 }
 
-/// Все собранные пайплайны — временный контейнер для `reload_shaders`.
 struct BuiltPipelines {
     gbuffer: wgpu::RenderPipeline,
     gbuffer_double_sided: wgpu::RenderPipeline,
@@ -2057,6 +2033,7 @@ struct BuiltPipelines {
     debug: (wgpu::RenderPipeline, wgpu::RenderPipeline),
     fxaa: wgpu::RenderPipeline,
     skybox: wgpu::RenderPipeline,
+    taa: wgpu::RenderPipeline,
 }
 
 // ============================================================
@@ -2104,6 +2081,11 @@ fn make_gbuffer_pipeline(
                 }),
                 Some(wgpu::ColorTargetState {
                     format: GBUFFER_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: MOTION_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
@@ -2307,11 +2289,18 @@ fn make_transparent_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_FORMAT,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: MOTION_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -2619,6 +2608,46 @@ fn make_skybox_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    }))
+}
+
+fn make_taa_pipeline(
+    device: &wgpu::Device,
+    taa_layout: &wgpu::BindGroupLayout,
+) -> Result<wgpu::RenderPipeline, String> {
+    let src = crate::shader_source!("src/render/shaders/taa.wgsl")?;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("taa_shader"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("taa_pipeline_layout"),
+        bind_group_layouts: &[taa_layout],
+        push_constant_ranges: &[],
+    });
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("taa_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     }))

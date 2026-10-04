@@ -4,7 +4,7 @@
 //! bloom и ACES tonemap отключаются, и экран заполняется выбранной
 //! текстурой напрямую.
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DebugView {
     /// Финальная картинка (bloom + ACES).
     Final = 0,

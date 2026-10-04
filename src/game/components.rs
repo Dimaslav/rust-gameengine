@@ -38,25 +38,12 @@ pub struct MaterialHandle(pub String);
 #[derive(Debug, Clone)]
 pub struct SkeletonHandle(pub String);
 
-/// Цвет поверх материала (умножается в шейдере как instance color).
-/// Если есть — перебивает material.base_color.
 #[derive(Debug, Clone, Copy)]
 pub struct Tint(pub [f32; 4]);
 
-/// Видимость объекта. По умолчанию считается видимым, если компонента нет.
-/// `Visible(false)` — объект не рисуется, не коллизится, но остаётся в сцене.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Visible(pub bool);
 
-/// Размер одного тайла текстуры в мировых единицах.
-///
-/// `1.0` (default) — один тайл на 1 unit world space.
-/// Меньше значение — текстура мельче (чаще повторяется).
-/// Больше значение — текстура крупнее (реже повторяется).
-///
-/// При масштабировании объекта размер тайла в мире остаётся постоянным:
-/// текстура не растягивается, а тайлится многократно. Значение
-/// автоматически умножается на world scale в `collect_draws`.
 #[derive(Debug, Clone, Copy)]
 pub struct TextureTiling {
     pub size: f32,
@@ -101,7 +88,7 @@ impl Velocity {
 }
 
 // ============================================================
-// Play-режим: здоровье, chase, триггеры, интерактивность
+// Play-режим
 // ============================================================
 
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +100,6 @@ impl Health {
     pub fn new(max: f32) -> Self { Self { current: max, max } }
 }
 
-/// Простейший преследователь: движется к игроку по прямой.
 #[derive(Debug, Clone, Copy)]
 pub struct Chase {
     pub speed: f32,
@@ -125,7 +111,6 @@ impl Chase {
     }
 }
 
-/// Зона-триггер: срабатывает при входе игрока.
 #[derive(Debug, Clone)]
 pub struct Trigger {
     pub radius: f32,
@@ -136,27 +121,206 @@ pub struct Trigger {
 
 #[derive(Debug, Clone)]
 pub enum TriggerAction {
-    /// Телепортировать игрока в позицию.
     Teleport([f32; 3]),
-    /// Покрасить этот объект в цвет.
     Tint([f32; 4]),
-    /// Удалить сам объект.
     Despawn,
+    CallElevator { elevator: u32, floor_idx: u32 },
+    PlaySound(String),
 }
 
 impl Trigger {
     pub fn new(radius: f32, action: TriggerAction) -> Self {
         Self { radius, action, once: true, fired: false }
     }
+    pub fn repeatable(radius: f32, action: TriggerAction) -> Self {
+        Self { radius, action, once: false, fired: false }
+    }
 }
 
-/// Метка «с этим можно взаимодействовать по E».
 #[derive(Debug, Clone, Copy)]
 pub enum Interactable {
-    /// Удаляется при использовании.
     Pickup,
-    /// Меняет tint.
     Paint([f32; 4]),
-    /// Тoggle состояния Spinner (вкл/выкл).
     Toggle,
+}
+
+// ============================================================
+// Лифт
+// ============================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElevatorState {
+    Idle,
+    Moving,
+    DoorsOpening,
+    DoorsOpen,
+    DoorsClosing,
+}
+
+impl Default for ElevatorState {
+    fn default() -> Self { Self::Idle }
+}
+
+/// Логика лифта с trapezoid-профилем скорости и sensor-дверью.
+///
+/// **КРИТИЧНО:** сама платформа двигается через `RigidBody::kinematic()`.
+/// `ElevatorSystem` пишет `velocity.y` kinematic-тела, а `physics.step`
+/// интегрирует позицию. Прямое изменение `Transform.position` сломает
+/// динамику: dynamic-объекты (ящики) на платформе не поедут.
+#[derive(Debug, Clone)]
+pub struct Elevator {
+    /// Y-координаты этажей (обычно 2+).
+    pub floors: Vec<f32>,
+    pub current_floor: usize,
+    pub target_floor: usize,
+
+    /// Максимальная скорость (м/с).
+    pub speed: f32,
+    /// Ускорение (м/с²). Отвечает за плавный разгон/торможение.
+    /// 0.01 — мгновенный старт; 5.0 — «плавно как лифт в отеле».
+    pub acceleration: f32,
+    /// Текущая линейная скорость по Y со знаком. Пишется в
+    /// `RigidBody.velocity.y` kinematic-тела каждый кадр.
+    pub current_velocity: f32,
+
+    pub state: ElevatorState,
+    pub doors_open: f32,
+    pub door_speed: f32,
+    pub dwell: f32,
+    pub dwell_timer: f32,
+
+    /// Радиус XZ сенсора двери. Игрок внутри — двери не закрываются.
+    /// Должен быть немного больше ширины кабины, чтобы ловить
+    /// стоящих в проёме.
+    pub sensor_radius: f32,
+    /// true — игрок в sensor-зоне в этом кадре (обновляется App).
+    pub player_inside: bool,
+}
+
+impl Elevator {
+    pub fn new(floors: Vec<f32>, speed: f32) -> Self {
+        let f = if floors.len() < 2 { vec![0.0, 3.0] } else { floors };
+        Self {
+            floors: f,
+            current_floor: 0,
+            target_floor: 0,
+            speed: speed.max(0.1),
+            acceleration: 3.0,
+            current_velocity: 0.0,
+            state: ElevatorState::Idle,
+            doors_open: 0.0,
+            door_speed: 1.5,
+            dwell: 2.5,
+            dwell_timer: 0.0,
+            sensor_radius: 2.0,
+            player_inside: false,
+        }
+    }
+
+    pub fn floor_y(&self, idx: usize) -> f32 {
+        self.floors.get(idx).copied().unwrap_or(0.0)
+    }
+
+    pub fn current_y(&self) -> f32 {
+        self.floor_y(self.current_floor)
+    }
+
+    /// Вызвать лифт на этаж `floor_idx`.
+    pub fn call(&mut self, floor_idx: usize) {
+        if floor_idx >= self.floors.len() { return; }
+
+        if self.state == ElevatorState::Moving {
+            self.target_floor = floor_idx;
+            return;
+        }
+
+        if floor_idx == self.current_floor {
+            if matches!(self.state, ElevatorState::Idle | ElevatorState::DoorsClosing) {
+                self.state = ElevatorState::DoorsOpening;
+            }
+            return;
+        }
+
+        self.target_floor = floor_idx;
+        if self.doors_open > 0.01 {
+            self.state = ElevatorState::DoorsClosing;
+        } else {
+            self.state = ElevatorState::Moving;
+        }
+    }
+
+    /// Обновление состояния `Moving` для одного кадра.
+    /// Возвращает `true`, если приехали на этаж.
+    ///
+    /// `current_y` — текущая Y платформы (из Transform).
+    /// Логика: trapezoid (разгон → круиз → торможение).
+    pub fn update_moving(&mut self, current_y: f32, dt: f32) -> bool {
+        let target_y = self.floor_y(self.target_floor);
+        let diff = target_y - current_y;
+        let dist = diff.abs();
+
+        // Если можем доехать за один кадр — финализируем точно.
+        // Иначе из-за интегрирования позиции в physics.step
+        // перескочим на пару сантиметров выше/ниже этажа.
+        let finish_threshold = (self.current_velocity.abs() * dt * 2.0).max(0.02);
+        if dist <= finish_threshold {
+            // velocity такой, чтобы за один шаг физики попасть ровно.
+            self.current_velocity = diff / dt.max(1e-4);
+            self.current_floor = self.target_floor;
+            return true;
+        }
+
+        let sign = diff.signum();
+        let a = self.acceleration.max(0.01);
+
+        // Скорость торможения: v = sqrt(2 * a * distance).
+        // С ней комфортно остановиться ровно на этаже.
+        let braking_speed = (2.0 * a * dist).sqrt();
+        let desired_speed = self.speed.min(braking_speed);
+        let desired_velocity = sign * desired_speed;
+
+        // Плавно двигаемся к целевой скорости с ускорением `a`.
+        let dv = desired_velocity - self.current_velocity;
+        let max_dv = a * dt;
+        if dv.abs() <= max_dv {
+            self.current_velocity = desired_velocity;
+        } else {
+            self.current_velocity += dv.signum() * max_dv;
+        }
+
+        false
+    }
+
+    /// Общая частота вызовов в секунду для FSM.
+    /// Если приехали — velocity обнуляется при завершении.
+    pub fn stop_velocity(&mut self) {
+        self.current_velocity = 0.0;
+    }
+}
+
+/// Дверь-створка. Двигается по `slide_axis` от `closed_position`.
+///
+/// Обычно привязана к платформе лифта через `Parent`. `closed_position`
+/// и `slide_axis` задаются в **локальных координатах** родителя.
+#[derive(Debug, Clone, Copy)]
+pub struct SlidingDoor {
+    pub open_amount: f32,
+    pub target: f32,
+    pub speed: f32,
+    pub slide_axis: Vec3,
+    pub slide_distance: f32,
+    pub closed_position: Vec3,
+}
+
+impl SlidingDoor {
+    pub fn new(closed_position: Vec3, slide_axis: Vec3, slide_distance: f32) -> Self {
+        Self {
+            open_amount: 0.0,
+            target: 0.0,
+            speed: 1.2,
+            slide_axis: slide_axis.normalize_or_zero(),
+            slide_distance: slide_distance.max(0.01),
+            closed_position,
+        }
+    }
 }

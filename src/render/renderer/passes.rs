@@ -168,7 +168,7 @@ pub(super) fn encode_cube_shadow_all(
 }
 
 // ============================================================
-// G-buffer
+// G-buffer (4 MRT: albedo, normal+depth, emissive, motion)
 // ============================================================
 
 pub(super) fn encode_gbuffer_pass(
@@ -193,6 +193,11 @@ pub(super) fn encode_gbuffer_pass(
                 view: &r.sd.gbuffer_emissive_view,
                 resolve_target: None,
                 ops: clear(wgpu::Color::BLACK),
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.motion_view,
+                resolve_target: None,
+                ops: clear(wgpu::Color::TRANSPARENT),
             }),
         ],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -378,7 +383,7 @@ pub(super) fn encode_particles_pass(
 }
 
 // ============================================================
-// Transparent (forward, blend)
+// Transparent (forward, blend) — 2 MRT: HDR + motion
 // ============================================================
 
 pub(super) fn encode_transparent_pass(
@@ -392,11 +397,22 @@ pub(super) fn encode_transparent_pass(
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("transparent_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_view,
-            resolve_target: None,
-            ops: load(),
-        })],
+        color_attachments: &[
+            // MRT 0: HDR, alpha blending.
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.hdr_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+            // MRT 1: motion, REPLACE (пишем поверх G-buffer motion
+            // только там, где transparent реально виден — back-to-front,
+            // последний (ближайший) побеждает).
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.motion_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+        ],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &r.sd.gbuffer_depth_view,
             depth_ops: Some(depth_load()),
@@ -421,11 +437,49 @@ pub(super) fn encode_transparent_pass(
 }
 
 // ============================================================
-// Bloom mip chain
+// TAA
+// ============================================================
+//
+// Читает hdr_view (current) + motion_view + taa_resolved_views[read_idx],
+// пишет в taa_resolved_views[write_idx].
+//
+// Индексы выбираются в Renderer::render() по frame_index % 2.
+pub(super) fn encode_taa_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    write_idx: usize,
+) {
+    let read_idx = 1 - write_idx;
+    let dst_view = &r.sd.taa_resolved_views[write_idx];
+    let bg = &r.sd.taa_read_bgs[read_idx];
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("taa_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: dst_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::BLACK),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.taa_pipeline);
+    pass.set_bind_group(0, bg, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
+// Bloom mip chain — читают TAA resolved[write_idx]
 // ============================================================
 
-pub(super) fn encode_bloom_prefilter(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+pub(super) fn encode_bloom_prefilter(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    write_idx: usize,
+) {
     let mip0 = &r.sd.bloom_chain.mips[0];
+    let bg = &r.sd.bloom_chain.prefilter_bgs[write_idx];
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("bloom_prefilter"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -438,7 +492,7 @@ pub(super) fn encode_bloom_prefilter(r: &Renderer, encoder: &mut wgpu::CommandEn
         occlusion_query_set: None,
     });
     pass.set_pipeline(&r.bloom_prefilter_pipeline);
-    pass.set_bind_group(0, &r.sd.bloom_chain.prefilter_bg, &[]);
+    pass.set_bind_group(0, bg, &[]);
     fullscreen_triangle(&mut pass);
 }
 
@@ -465,8 +519,6 @@ pub(super) fn encode_bloom_downsample(r: &Renderer, encoder: &mut wgpu::CommandE
 }
 
 pub(super) fn encode_bloom_upsample(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
-    // Порядок: mip[4] → mip[3], mip[3] → mip[2], ..., mip[1] → mip[0].
-    // Additive blend: mip[i] уже содержит downsample-результат.
     for idx in 0..(BLOOM_MIP_COUNT - 1) {
         let dst_level = BLOOM_MIP_COUNT - 2 - idx;
         let dst = &r.sd.bloom_chain.mips[dst_level];
@@ -492,8 +544,12 @@ pub(super) fn encode_bloom_upsample(r: &Renderer, encoder: &mut wgpu::CommandEnc
     }
 }
 
-pub(super) fn encode_bloom_chain(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
-    encode_bloom_prefilter(r, encoder);
+pub(super) fn encode_bloom_chain(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    write_idx: usize,
+) {
+    encode_bloom_prefilter(r, encoder, write_idx);
     encode_bloom_downsample(r, encoder);
     encode_bloom_upsample(r, encoder);
 }
@@ -502,7 +558,12 @@ pub(super) fn encode_bloom_chain(r: &Renderer, encoder: &mut wgpu::CommandEncode
 // Post-processing
 // ============================================================
 
-pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+pub(super) fn encode_composite_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    write_idx: usize,
+) {
+    let bg = &r.sd.composite_bgs[write_idx];
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("composite_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -515,7 +576,7 @@ pub(super) fn encode_composite_pass(r: &Renderer, encoder: &mut wgpu::CommandEnc
         occlusion_query_set: None,
     });
     pass.set_pipeline(&r.tonemap_pipeline);
-    pass.set_bind_group(0, &r.sd.composite_bind_group, &[]);
+    pass.set_bind_group(0, bg, &[]);
     fullscreen_triangle(&mut pass);
 }
 
@@ -544,9 +605,10 @@ pub(super) fn encode_post_processing(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     swap_view: &wgpu::TextureView,
+    write_idx: usize,
 ) {
-    encode_bloom_chain(r, encoder);
-    encode_composite_pass(r, encoder);
+    encode_bloom_chain(r, encoder, write_idx);
+    encode_composite_pass(r, encoder, write_idx);
     encode_fxaa_pass(r, encoder, swap_view);
 }
 

@@ -60,14 +60,30 @@ pub struct InstanceData {
     /// `xy` — множитель UV (сколько раз текстура повторяется),
     /// `zw` — padding для 16-байтового выравнивания.
     pub uv_scale: [f32; 4],
+    /// Матрица модели из **предыдущего кадра**. Нужна G-buffer'у для
+    /// per-object motion vectors: prev_world_pos = prev_model * local_pos.
+    /// Для статических объектов == model.
+    pub prev_model: [[f32; 4]; 4],
 }
 
 impl InstanceData {
+    /// Устаревший конструктор без motion: prev_model = model (статика).
     pub fn new(model: Mat4, color: [f32; 4]) -> Self {
         Self::new_with_uv(model, color, [1.0, 1.0])
     }
 
+    /// То же, с UV-масштабом. prev_model = model → только camera motion.
     pub fn new_with_uv(model: Mat4, color: [f32; 4], uv_scale: [f32; 2]) -> Self {
+        Self::new_full(model, model, color, uv_scale)
+    }
+
+    /// Полный конструктор: явный prev_model для per-object motion vectors.
+    pub fn new_full(
+        model: Mat4,
+        prev_model: Mat4,
+        color: [f32; 4],
+        uv_scale: [f32; 2],
+    ) -> Self {
         let m3 = Mat3::from_mat4(model);
         let normal = if m3.determinant().abs() > 1e-8 {
             m3.inverse().transpose()
@@ -79,13 +95,18 @@ impl InstanceData {
             normal_matrix: Mat4::from_mat3(normal).to_cols_array_2d(),
             color,
             uv_scale: [uv_scale[0], uv_scale[1], 0.0, 0.0],
+            prev_model: prev_model.to_cols_array_2d(),
         }
     }
 
-    const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+    // 14 attributes: 4 (model) + 4 (normal) + 1 (color) + 1 (uv_scale)
+    //               + 4 (prev_model).
+    const ATTRS: [wgpu::VertexAttribute; 14] = wgpu::vertex_attr_array![
         6  => Float32x4, 7  => Float32x4, 8  => Float32x4, 9  => Float32x4,
         10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
-        14 => Float32x4, 15 => Float32x4
+        14 => Float32x4,
+        15 => Float32x4,
+        16 => Float32x4, 17 => Float32x4, 18 => Float32x4, 19 => Float32x4,
     ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -306,6 +327,7 @@ impl Mesh {
         Self::new(device, &vertices, &indices, "sphere")
     }
 
+    /// Плоскость в **XZ** (Y = 0, нормаль +Y). Классический «ground».
     pub fn plane(device: &wgpu::Device, size: f32, subdivisions: u32) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -335,6 +357,42 @@ impl Mesh {
         }
 
         Self::new(device, &vertices, &indices, "plane")
+    }
+
+    /// Плоскость в **XY** (Z = 0, нормаль +Z). Для билбордов / листвы /
+    /// вертикальных спрайтов.
+    ///
+    /// Отличие от `plane`: ось Y используется как «высота» плоскости,
+    /// поэтому `Transform.scale.y` реально растягивает объект вертикально.
+    pub fn plane_xy(device: &wgpu::Device, size: f32, subdivisions: u32) -> Self {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let n = subdivisions.max(1);
+        let h = size * 0.5;
+
+        for y in 0..=n {
+            for x in 0..=n {
+                let fx = x as f32 / n as f32;
+                let fy = y as f32 / n as f32;
+                vertices.push(Vertex3D::static_vertex(
+                    [fx * size - h, fy * size - h, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [fx, 1.0 - fy],
+                    [1.0; 4],
+                ));
+            }
+        }
+
+        let stride = n + 1;
+        for y in 0..n {
+            for x in 0..n {
+                let a = y * stride + x;
+                let b = a + stride;
+                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            }
+        }
+
+        Self::new(device, &vertices, &indices, "plane_xy")
     }
 
     pub fn truncated_cone(

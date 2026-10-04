@@ -7,9 +7,9 @@ use std::path::Path;
 
 use crate::ecs::{Entity, World};
 use crate::game::components::{
-    AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
-    Visible,
+    AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
+    MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
+    Transform, Trigger, TriggerAction, Velocity, Visible,
 };
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use glam::Vec3;
@@ -24,48 +24,29 @@ pub struct SceneFile {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
-    #[serde(default)]
-    pub entity_id: Option<u32>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub transform: Option<TransformSnapshot>,
-    #[serde(default)]
-    pub parent: Option<u32>,
-    #[serde(default)]
-    pub mesh: Option<String>,
-    #[serde(default)]
-    pub material: Option<String>,
-    #[serde(default)]
-    pub skeleton: Option<String>,
-    #[serde(default)]
-    pub animation: Option<AnimationSnapshot>,
-    #[serde(default)]
-    pub spinner: Option<SpinnerSnapshot>,
-    #[serde(default)]
-    pub velocity: Option<VelocitySnapshot>,
-    #[serde(default)]
-    pub health: Option<HealthSnapshot>,
-    #[serde(default)]
-    pub chase: Option<ChaseSnapshot>,
-    #[serde(default)]
-    pub trigger: Option<TriggerSnapshot>,
-    #[serde(default)]
-    pub interactable: Option<InteractableSnapshot>,
-    #[serde(default)]
-    pub tint: Option<[f32; 4]>,
-    #[serde(default)]
-    pub visible: Option<bool>,
-    /// Размер одного тайла текстуры в мировых единицах.
-    #[serde(default)]
-    pub texture_tiling: Option<f32>,
+    #[serde(default)] pub entity_id: Option<u32>,
+    #[serde(default)] pub name: Option<String>,
+    #[serde(default)] pub transform: Option<TransformSnapshot>,
+    #[serde(default)] pub parent: Option<u32>,
+    #[serde(default)] pub mesh: Option<String>,
+    #[serde(default)] pub material: Option<String>,
+    #[serde(default)] pub skeleton: Option<String>,
+    #[serde(default)] pub animation: Option<AnimationSnapshot>,
+    #[serde(default)] pub spinner: Option<SpinnerSnapshot>,
+    #[serde(default)] pub velocity: Option<VelocitySnapshot>,
+    #[serde(default)] pub health: Option<HealthSnapshot>,
+    #[serde(default)] pub chase: Option<ChaseSnapshot>,
+    #[serde(default)] pub trigger: Option<TriggerSnapshot>,
+    #[serde(default)] pub interactable: Option<InteractableSnapshot>,
+    #[serde(default)] pub tint: Option<[f32; 4]>,
+    #[serde(default)] pub visible: Option<bool>,
+    #[serde(default)] pub texture_tiling: Option<f32>,
+    #[serde(default)] pub elevator: Option<ElevatorSnapshot>,
+    #[serde(default)] pub sliding_door: Option<SlidingDoorSnapshot>,
 
-    #[serde(default)]
-    pub rigid_body: Option<RigidBody>,
-    #[serde(default)]
-    pub collider: Option<Collider>,
-    #[serde(default)]
-    pub physics_material: Option<PhysicsMaterial>,
+    #[serde(default)] pub rigid_body: Option<RigidBody>,
+    #[serde(default)] pub collider: Option<Collider>,
+    #[serde(default)] pub physics_material: Option<PhysicsMaterial>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -98,10 +79,13 @@ pub struct ChaseSnapshot { pub speed: f32, pub stop_distance: f32 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerSnapshot {
     pub radius: f32,
+    /// "teleport" | "tint" | "despawn" | "call_elevator" | "play_sound"
     pub action: String,
     pub param: [f32; 4],
     pub once: bool,
     pub fired: bool,
+    #[serde(default)]
+    pub sound_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -109,6 +93,86 @@ pub struct InteractableSnapshot {
     pub kind: String,
     pub color: Option<[f32; 4]>,
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ElevatorSnapshot {
+    pub floors: Vec<f32>,
+    pub current_floor: u32,
+    pub target_floor: u32,
+    pub speed: f32,
+    #[serde(default)] pub acceleration: f32,
+    #[serde(default)] pub current_velocity: f32,
+    /// "idle" | "moving" | "doors_opening" | "doors_open" | "doors_closing"
+    pub state: String,
+    pub doors_open: f32,
+    pub door_speed: f32,
+    pub dwell: f32,
+    pub dwell_timer: f32,
+    #[serde(default)] pub sensor_radius: f32,
+}
+
+impl ElevatorSnapshot {
+    fn from_elevator(e: &Elevator) -> Self {
+        let state = match e.state {
+            ElevatorState::Idle => "idle",
+            ElevatorState::Moving => "moving",
+            ElevatorState::DoorsOpening => "doors_opening",
+            ElevatorState::DoorsOpen => "doors_open",
+            ElevatorState::DoorsClosing => "doors_closing",
+        };
+        Self {
+            floors: e.floors.clone(),
+            current_floor: e.current_floor as u32,
+            target_floor: e.target_floor as u32,
+            speed: e.speed,
+            acceleration: e.acceleration,
+            current_velocity: e.current_velocity,
+            state: state.to_string(),
+            doors_open: e.doors_open,
+            door_speed: e.door_speed,
+            dwell: e.dwell,
+            dwell_timer: e.dwell_timer,
+            sensor_radius: e.sensor_radius,
+        }
+    }
+
+    fn to_elevator(&self) -> Elevator {
+        let state = match self.state.as_str() {
+            "moving" => ElevatorState::Moving,
+            "doors_opening" => ElevatorState::DoorsOpening,
+            "doors_open" => ElevatorState::DoorsOpen,
+            "doors_closing" => ElevatorState::DoorsClosing,
+            _ => ElevatorState::Idle,
+        };
+        let mut el = Elevator::new(self.floors.clone(), self.speed);
+        el.current_floor = self.current_floor as usize;
+        el.target_floor = self.target_floor as usize;
+        el.state = state;
+        el.doors_open = self.doors_open;
+        el.door_speed = self.door_speed;
+        el.dwell = self.dwell;
+        el.dwell_timer = self.dwell_timer;
+        el.acceleration = if self.acceleration > 0.0 { self.acceleration } else { 3.0 };
+        el.current_velocity = self.current_velocity;
+        el.sensor_radius = if self.sensor_radius > 0.0 { self.sensor_radius } else { 2.0 };
+        el.player_inside = false;
+        el
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct SlidingDoorSnapshot {
+    pub open_amount: f32,
+    pub target: f32,
+    pub speed: f32,
+    pub slide_axis: [f32; 3],
+    pub slide_distance: f32,
+    pub closed_position: [f32; 3],
+}
+
+// ============================================================
+// Save
+// ============================================================
 
 pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result<String> {
     let mut entities = Vec::new();
@@ -178,13 +242,23 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
     if let Some(t) = world.get::<Trigger>(e) {
-        let (kind, param) = match &t.action {
-            TriggerAction::Teleport(p) => ("teleport".to_string(), [p[0], p[1], p[2], 0.0]),
-            TriggerAction::Tint(c) => ("tint".to_string(), *c),
-            TriggerAction::Despawn => ("despawn".to_string(), [0.0; 4]),
+        let (kind, param, sound_name) = match &t.action {
+            TriggerAction::Teleport(p) => ("teleport".to_string(), [p[0], p[1], p[2], 0.0], None),
+            TriggerAction::Tint(c) => ("tint".to_string(), *c, None),
+            TriggerAction::Despawn => ("despawn".to_string(), [0.0; 4], None),
+            TriggerAction::CallElevator { elevator, floor_idx } => (
+                "call_elevator".to_string(),
+                [*elevator as f32, *floor_idx as f32, 0.0, 0.0],
+                None,
+            ),
+            TriggerAction::PlaySound(name) => (
+                "play_sound".to_string(),
+                [0.0; 4],
+                Some(name.clone()),
+            ),
         };
         s.trigger = Some(TriggerSnapshot {
-            radius: t.radius, action: kind, param, once: t.once, fired: t.fired,
+            radius: t.radius, action: kind, param, once: t.once, fired: t.fired, sound_name,
         });
         any = true;
     }
@@ -203,25 +277,51 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         s.texture_tiling = Some(t.size);
         any = true;
     }
+    if let Some(el) = world.get::<Elevator>(e) {
+        s.elevator = Some(ElevatorSnapshot::from_elevator(el));
+        any = true;
+    }
+    if let Some(sd) = world.get::<SlidingDoor>(e) {
+        s.sliding_door = Some(SlidingDoorSnapshot {
+            open_amount: sd.open_amount,
+            target: sd.target,
+            speed: sd.speed,
+            slide_axis: sd.slide_axis.to_array(),
+            slide_distance: sd.slide_distance,
+            closed_position: sd.closed_position.to_array(),
+        });
+        any = true;
+    }
 
-    if let Some(rb) = world.get::<RigidBody>(e) {
-        s.rigid_body = Some(*rb);
-        any = true;
-    }
-    if let Some(col) = world.get::<Collider>(e) {
-        s.collider = Some(*col);
-        any = true;
-    }
-    if let Some(mat) = world.get::<PhysicsMaterial>(e) {
-        s.physics_material = Some(*mat);
-        any = true;
-    }
+    if let Some(rb) = world.get::<RigidBody>(e) { s.rigid_body = Some(*rb); any = true; }
+    if let Some(col) = world.get::<Collider>(e) { s.collider = Some(*col); any = true; }
+    if let Some(mat) = world.get::<PhysicsMaterial>(e) { s.physics_material = Some(*mat); any = true; }
 
     if any { Some(s) } else { None }
 }
 
-/// Загрузка сцены: two-pass, чтобы корректно перепривязать `Parent`.
+// ============================================================
+// Load
+// ============================================================
+
+/// Загрузка сцены из строки. Two-pass: сначала spawn всех entity,
+/// затем восстановление Parent по id_map.
+///
+/// Для Play-in-Editor сценариев, где нужно знать соответствие
+/// old_entity_id → new_entity (например, чтобы отремапить selection
+/// после restore), используйте `load_scene_from_str_full`.
 pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
+    let (world, spawn, _) = load_scene_from_str_full(text)?;
+    Ok((world, spawn))
+}
+
+/// Как `load_scene_from_str`, но дополнительно возвращает карту
+/// `old_entity_id → new_entity` — нужно для ремапа selection,
+/// триггеров с `CallElevator` и любых других ссылок по entity id
+/// после Play-in-Editor snapshot restore.
+pub fn load_scene_from_str_full(
+    text: &str,
+) -> Result<(World, Option<Vec3>, HashMap<u32, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
     let mut world = World::new();
 
@@ -246,8 +346,22 @@ pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
         }
     }
 
+    // Триггеры с `call_elevator` ссылались на старые id — перепривязываем.
+    // Это делается в 3-м проходе, после того как весь id_map построен.
+    let trigger_entities: Vec<Entity> =
+        world.query::<Trigger>().map(|(e, _)| e).collect();
+    for e in trigger_entities {
+        let Some(mut t) = world.get::<Trigger>(e).cloned() else { continue };
+        if let TriggerAction::CallElevator { elevator, floor_idx } = t.action {
+            if let Some(&new_el) = id_map.get(&elevator) {
+                t.action = TriggerAction::CallElevator { elevator: new_el, floor_idx };
+                world.insert(e, t);
+            }
+        }
+    }
+
     let spawn = file.player_spawn.map(Vec3::from_array);
-    Ok((world, spawn))
+    Ok((world, spawn, id_map))
 }
 
 pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec3>)> {
@@ -256,7 +370,8 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
     load_scene_from_str(&text)
 }
 
-/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет вызывающий.
+/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет
+/// вызывающий (чтобы two-pass корректно разрешал ссылки).
 pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
@@ -293,6 +408,15 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             "teleport" => TriggerAction::Teleport([t.param[0], t.param[1], t.param[2]]),
             "tint" => TriggerAction::Tint(t.param),
             "despawn" => TriggerAction::Despawn,
+            "call_elevator" => TriggerAction::CallElevator {
+                // При спавне используем старый id — вызывающий код
+                // перепривяжет его через id_map в 3-м проходе.
+                elevator: t.param[0] as u32,
+                floor_idx: t.param[1] as u32,
+            },
+            "play_sound" => TriggerAction::PlaySound(
+                t.sound_name.unwrap_or_else(|| "pickup".to_string())
+            ),
             _ => TriggerAction::Despawn,
         };
         world.insert(e, Trigger {
@@ -312,6 +436,19 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     if let Some(v) = snap.visible { world.insert(e, Visible(v)); }
     if let Some(size) = snap.texture_tiling {
         world.insert(e, TextureTiling::new(size));
+    }
+    if let Some(el) = snap.elevator {
+        world.insert(e, el.to_elevator());
+    }
+    if let Some(sd) = snap.sliding_door {
+        world.insert(e, SlidingDoor {
+            open_amount: sd.open_amount,
+            target: sd.target,
+            speed: sd.speed,
+            slide_axis: glam::Vec3::from_array(sd.slide_axis),
+            slide_distance: sd.slide_distance,
+            closed_position: glam::Vec3::from_array(sd.closed_position),
+        });
     }
 
     if let Some(rb) = snap.rigid_body { world.insert(e, rb); }

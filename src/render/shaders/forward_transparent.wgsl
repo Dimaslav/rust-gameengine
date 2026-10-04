@@ -1,16 +1,15 @@
-// Forward transparent pass для AlphaMode::Blend.
-// Bind groups: 0=camera, 1=lights, 2=shadow2, 3=material + skeleton.
-// Depth-test против G-buffer depth, без записи depth, alpha blending.
-//
-// UV масштабируется на `uv_scale.xy` — как в gbuffer.wgsl.
+// Forward transparent. 2 MRT: HDR + motion.
+// Motion — как в gbuffer: prev_vp **unjittered**, база = pixel_center_uv.
 
 struct Camera {
-    view_proj:     mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    view:          mat4x4<f32>,
-    inv_view:      mat4x4<f32>,
-    camera_pos:    vec4<f32>,
-    near_far:      vec4<f32>,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    view:           mat4x4<f32>,
+    inv_view:       mat4x4<f32>,
+    camera_pos:     vec4<f32>,
+    near_far:       vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+    screen_size:    vec4<f32>,
 };
 
 struct Lights {
@@ -37,12 +36,6 @@ struct Material {
 
 struct Skeleton {
     joints: array<mat4x4<f32>, 64>,
-};
-
-struct Instance {
-    model:         mat4x4<f32>,
-    normal_matrix: mat4x4<f32>,
-    color:         vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -85,14 +78,19 @@ struct VsIn {
     @location(13) n3: vec4<f32>,
     @location(14) inst_color: vec4<f32>,
     @location(15) uv_scale:   vec4<f32>,
+    @location(16) p0: vec4<f32>,
+    @location(17) p1: vec4<f32>,
+    @location(18) p2: vec4<f32>,
+    @location(19) p3: vec4<f32>,
 };
 
 struct VsOut {
-    @builtin(position) clip_pos: vec4<f32>,
+    @builtin(position) frag_coord: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
+    @location(4) prev_world_pos: vec3<f32>,
 };
 
 fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
@@ -115,6 +113,7 @@ fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
 fn vs_main(in: VsIn) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nrm_mat = mat4x4<f32>(in.n0, in.n1, in.n2, in.n3);
+    let prev_model = mat4x4<f32>(in.p0, in.p1, in.p2, in.p3);
 
     var local_pos = vec4<f32>(in.position, 1.0);
     var local_nrm = vec4<f32>(in.normal, 0.0);
@@ -127,14 +126,16 @@ fn vs_main(in: VsIn) -> VsOut {
     }
 
     let world_pos = model * local_pos;
+    let prev_world_pos = (prev_model * local_pos).xyz;
     let world_nrm = normalize((nrm_mat * local_nrm).xyz);
 
     var out: VsOut;
-    out.clip_pos     = camera.view_proj * world_pos;
-    out.world_pos    = world_pos.xyz;
-    out.world_normal = world_nrm;
-    out.uv           = in.uv * in.uv_scale.xy;
-    out.color        = in.color * in.inst_color;
+    out.frag_coord      = camera.view_proj * world_pos;
+    out.world_pos       = world_pos.xyz;
+    out.world_normal    = world_nrm;
+    out.uv              = in.uv * in.uv_scale.xy;
+    out.color           = in.color * in.inst_color;
+    out.prev_world_pos  = prev_world_pos;
     return out;
 }
 
@@ -173,11 +174,23 @@ fn point_contrib(n: vec3<f32>, world_pos: vec3<f32>, idx: u32) -> vec3<f32> {
     return col_int.rgb * ndl * atten * atten;
 }
 
+fn project_to_uv(vp: mat4x4<f32>, world_pos: vec3<f32>) -> vec2<f32> {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    let inv_w = 1.0 / max(abs(clip.w), 1e-6) * sign(clip.w);
+    let ndc = clip.xy * inv_w;
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+}
+
+struct FsOut {
+    @location(0) color:  vec4<f32>,
+    @location(1) motion: vec2<f32>,
+};
+
 @fragment
 fn fs_main(
     in: VsOut,
     @builtin(front_facing) front_facing: bool,
-) -> @location(0) vec4<f32> {
+) -> FsOut {
     let base_sample     = textureSample(base_tex,     mat_samp, in.uv);
     let mr_sample       = textureSample(mr_tex,       mat_samp, in.uv);
     let normal_sample   = textureSample(normal_tex,   mat_samp, in.uv);
@@ -227,5 +240,12 @@ fn fs_main(
         out_rgb = mix(out_rgb, lights.fog_color.rgb, fog_amount);
     }
 
-    return vec4<f32>(out_rgb, alpha);
+    let pixel_center_uv = in.frag_coord.xy / camera.screen_size.xy;
+    let prev_uv = project_to_uv(camera.prev_view_proj, in.prev_world_pos);
+    let motion  = prev_uv - pixel_center_uv;
+
+    var out: FsOut;
+    out.color  = vec4<f32>(out_rgb, alpha);
+    out.motion = motion;
+    return out;
 }

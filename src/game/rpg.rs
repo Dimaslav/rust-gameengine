@@ -336,7 +336,13 @@ fn spawn_npc(
 // ---------- Forest ----------
 
 fn spawn_forest(world: &mut World) {
-    // 40 деревьев
+    // 40 деревьев.
+    //
+    // Раньше здесь использовался `quad` (горизонтальная плоскость в XZ):
+    // все точки имели y = 0, и scale.y был бесполезен — деревья
+    // выглядели как плоские пятна на земле. Теперь используем `quad_xy`
+    // (вертикальная плоскость в XY): scale.x = ширина, scale.y = высота.
+    // Позиция y = 3.0 — центр 6-метрового билборда (0..6 м).
     for i in 0..40 {
         let angle = i as f32 / 40.0 * std::f32::consts::TAU;
         let r = 20.0 + ((i as f32 * 0.7).sin() + 1.0) * 7.0;
@@ -347,7 +353,7 @@ fn spawn_forest(world: &mut World) {
         world.insert(e, Transform::new(x, 3.0, z)
             .with_rotation(glam::Quat::from_axis_angle(Vec3::Y, angle))
             .with_scale_xyz(3.0, 6.0, 1.0));
-        world.insert(e, MeshHandle("quad".into()));
+        world.insert(e, MeshHandle("quad_xy".into()));
         world.insert(e, MaterialHandle("foliage".into()));
         world.insert(e, RigidBody::static_body());
         world.insert(e, Collider::capsule(0.5, 6.0));

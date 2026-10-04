@@ -1,25 +1,30 @@
-// G-buffer pass. MRT: albedo, view-normal + linear-depth, emissive.
-// Bind groups: 0=camera, 1=material(+skeleton).
+// G-buffer pass. MRT: albedo, world-normal + linear-depth, emissive, motion.
 //
-// Normal map применяется через derivative-based TBN (cotangent frame).
+// Motion = project(prev_P, prev_vp_unjit) - pixel_center_uv.
+// prev_vp_unjit — **unjittered** view-proj прошлого кадра.
+// pixel_center_uv = frag_coord.xy / screen_size.xy (без jitter'а).
 //
-// UV масштабируется на `uv_scale.xy` (per-instance). Это позволяет
-// текстуре тайлиться при масштабировании объекта, а не растягиваться.
+// На статике: prev_P == P, prev_vp_unjit == curr_vp_unjit →
+//   motion = (pixel_center - jitter_curr) - pixel_center = -jitter_curr.
+// TAA сэмплит history в `pixel_center + motion = pixel_center - jitter_curr`
+// — это unjittered prev позиция P. Стабильно, без тряски.
 
 struct Camera {
-    view_proj:     mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    view:          mat4x4<f32>,
-    inv_view:      mat4x4<f32>,
-    camera_pos:    vec4<f32>,
-    near_far:      vec4<f32>,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    view:           mat4x4<f32>,
+    inv_view:       mat4x4<f32>,
+    camera_pos:     vec4<f32>,
+    near_far:       vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+    screen_size:    vec4<f32>,
 };
 
 struct Material {
     base_color: vec4<f32>,
     emissive:   vec4<f32>,
-    params:     vec4<f32>,   // metallic, roughness, normal_scale, alpha_cutoff
-    flags:      vec4<u32>,   // alpha_mode (0=Opaque, 1=Mask, 2=Blend), _, _, _
+    params:     vec4<f32>,
+    flags:      vec4<u32>,
 };
 
 struct Skeleton {
@@ -49,7 +54,6 @@ struct VsIn {
     @location(3) color:    vec4<f32>,
     @location(4) joints:   vec4<u32>,
     @location(5) weights:  vec4<f32>,
-    // instance
     @location(6)  m0: vec4<f32>,
     @location(7)  m1: vec4<f32>,
     @location(8)  m2: vec4<f32>,
@@ -60,15 +64,20 @@ struct VsIn {
     @location(13) n3: vec4<f32>,
     @location(14) inst_color: vec4<f32>,
     @location(15) uv_scale:   vec4<f32>,
+    @location(16) p0: vec4<f32>,
+    @location(17) p1: vec4<f32>,
+    @location(18) p2: vec4<f32>,
+    @location(19) p3: vec4<f32>,
 };
 
 struct VsOut {
-    @builtin(position) clip_pos: vec4<f32>,
+    @builtin(position) frag_coord: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,        // уже умноженный на uv_scale
+    @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
     @location(4) view_depth: f32,
+    @location(5) prev_world_pos: vec3<f32>,
 };
 
 fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
@@ -91,6 +100,7 @@ fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
 fn vs_main(in: VsIn) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nrm_mat = mat4x4<f32>(in.n0, in.n1, in.n2, in.n3);
+    let prev_model = mat4x4<f32>(in.p0, in.p1, in.p2, in.p3);
 
     var local_pos = vec4<f32>(in.position, 1.0);
     var local_nrm = vec4<f32>(in.normal, 0.0);
@@ -104,18 +114,18 @@ fn vs_main(in: VsIn) -> VsOut {
 
     let world_pos = model * local_pos;
     let world_nrm = normalize((nrm_mat * local_nrm).xyz);
+    let prev_world_pos = (prev_model * local_pos).xyz;
 
     let view_pos = camera.view * world_pos;
 
     var out: VsOut;
-    out.clip_pos     = camera.view_proj * world_pos;
-    out.world_pos    = world_pos.xyz;
-    out.world_normal = world_nrm;
-    // Масштабируем UV до fragment-сэмплинга: textureSample использует
-    // уже умноженное значение → тайлинг без растяжения.
-    out.uv           = in.uv * in.uv_scale.xy;
-    out.color        = in.color * in.inst_color;
-    out.view_depth   = -view_pos.z;
+    out.frag_coord      = camera.view_proj * world_pos;
+    out.world_pos       = world_pos.xyz;
+    out.world_normal    = world_nrm;
+    out.uv              = in.uv * in.uv_scale.xy;
+    out.color           = in.color * in.inst_color;
+    out.view_depth      = -view_pos.z;
+    out.prev_world_pos  = prev_world_pos;
     return out;
 }
 
@@ -138,7 +148,15 @@ struct FsOut {
     @location(0) albedo:   vec4<f32>,
     @location(1) normal_d: vec4<f32>,
     @location(2) emissive: vec4<f32>,
+    @location(3) motion:   vec2<f32>,
 };
+
+fn project_to_uv(vp: mat4x4<f32>, world_pos: vec3<f32>) -> vec2<f32> {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    let inv_w = 1.0 / max(abs(clip.w), 1e-6) * sign(clip.w);
+    let ndc = clip.xy * inv_w;
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+}
 
 @fragment
 fn fs_main(
@@ -164,10 +182,7 @@ fn fs_main(
     }
 
     let n_sample = normal_sample.xyz * 2.0 - 1.0;
-    let n_scaled = vec3<f32>(
-        n_sample.xy * mat.params.z,
-        n_sample.z,
-    );
+    let n_scaled = vec3<f32>(n_sample.xy * mat.params.z, n_sample.z);
     let tbn = cotangent_frame(n_world, in.world_pos, in.uv);
     let n_mapped = normalize(tbn * n_scaled);
 
@@ -176,13 +191,16 @@ fn fs_main(
 
     let emissive = emissive_sample.rgb * mat.emissive.rgb;
 
-    let n_view = normalize((camera.view * vec4<f32>(n_mapped, 0.0)).xyz);
-
     let depth_norm = clamp(in.view_depth / camera.near_far.y, 0.0, 1.0);
+
+    let pixel_center_uv = in.frag_coord.xy / camera.screen_size.xy;
+    let prev_uv = project_to_uv(camera.prev_view_proj, in.prev_world_pos);
+    let motion  = prev_uv - pixel_center_uv;
 
     var out: FsOut;
     out.albedo   = vec4<f32>(base.rgb, metallic);
-    out.normal_d = vec4<f32>(n_view, depth_norm);
+    out.normal_d = vec4<f32>(n_mapped, depth_norm);
     out.emissive = vec4<f32>(emissive, roughness);
+    out.motion   = motion;
     return out;
 }

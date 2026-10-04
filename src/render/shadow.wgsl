@@ -2,8 +2,7 @@
 // Используется и для CSM (ortho), и для cube shadow (6 faces).
 //
 // Bind groups: 0 = Lights (dynamic offset), 1 = material_layout
-// (из которого берётся только skeleton). Остальные биндинги material_layout
-// в шейдере не используются — wgpu позволяет держать «лишние» entries.
+// (из которого берётся только skeleton).
 
 struct Lights {
     cascade_vp:      array<mat4x4<f32>, 3>,
@@ -46,6 +45,13 @@ struct InstanceInput {
     @location(12) n2: vec4<f32>,
     @location(13) n3: vec4<f32>,
     @location(14) inst_color: vec4<f32>,
+    @location(15) uv_scale:   vec4<f32>,
+    // prev_model — не используется в shadow pass, но обязан
+    // присутствовать: layout vertex-buffer'а общий с gbuffer.
+    @location(16) p0: vec4<f32>,
+    @location(17) p1: vec4<f32>,
+    @location(18) p2: vec4<f32>,
+    @location(19) p3: vec4<f32>,
 };
 
 fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {

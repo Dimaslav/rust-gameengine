@@ -7,19 +7,19 @@ use super::gpu_types::*;
 /// Сколько уровней в bloom chain.
 pub const BLOOM_MIP_COUNT: usize = 5;
 
-/// Один уровень bloom chain.
 pub struct BloomMip {
     pub view: wgpu::TextureView,
     pub _tex: wgpu::Texture,
     pub size: (u32, u32),
 }
 
-/// Bloom mip chain (5 уровней) + bind groups для prefilter/downsample/upsample.
 pub struct BloomChain {
     pub mips: Vec<BloomMip>,
     pub sampler: wgpu::Sampler,
 
-    pub prefilter_bg: wgpu::BindGroup,
+    /// Два варианта prefilter BG — читают TAA resolved[0] или [1].
+    /// Выбирается по `frame_index % 2`, чтобы bloom видел уже TAA-результат.
+    pub prefilter_bgs: [wgpu::BindGroup; 2],
     pub downsample_bgs: Vec<wgpu::BindGroup>,
     pub upsample_bgs: Vec<wgpu::BindGroup>,
 
@@ -29,18 +29,30 @@ pub struct BloomChain {
 }
 
 pub struct SizeDependent {
+    /// HDR после deferred lighting / skybox / forward. Вход TAA.
     pub hdr_view: wgpu::TextureView,
+    /// Motion vectors (Rg16Float). Пишется G-buffer'ом и transparent-пассом.
+    pub motion_view: wgpu::TextureView,
+
+    /// Ping-pong resolved: TAA пишет в [write_idx], читает из [read_idx].
+    pub taa_resolved_views: [wgpu::TextureView; 2],
+    pub _taa_resolved_tex: [wgpu::Texture; 2],
+
+    /// Бинд-группы TAA-пасса: [i] читает taa_resolved_views[i] как history.
+    pub taa_read_bgs: [wgpu::BindGroup; 2],
+
+    pub taa_uniform: wgpu::Buffer,
+
     pub bloom_chain: BloomChain,
     pub linear_sampler: wgpu::Sampler,
 
-    pub composite_bind_group: wgpu::BindGroup,
+    /// Два варианта composite BG: [i] читает taa_resolved_views[i].
+    pub composite_bgs: [wgpu::BindGroup; 2],
 
-    /// LDR-таргет после tonemap (перед FXAA).
     pub ldr_view: wgpu::TextureView,
     pub fxaa_uniform: wgpu::Buffer,
     pub fxaa_bind_group: wgpu::BindGroup,
 
-    // G-buffer: 3 MRT + depth
     pub gbuffer_albedo_view: wgpu::TextureView,
     pub gbuffer_normal_view: wgpu::TextureView,
     pub gbuffer_emissive_view: wgpu::TextureView,
@@ -71,6 +83,7 @@ pub fn build_size_dependent(
     shadow2_layout: &wgpu::BindGroupLayout,
     debug_layout: &wgpu::BindGroupLayout,
     lighting_layout: &wgpu::BindGroupLayout,
+    taa_layout: &wgpu::BindGroupLayout,
     ssao_uniform: &wgpu::Buffer,
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
@@ -87,23 +100,82 @@ pub fn build_size_dependent(
     let h = config.height.max(1);
 
     let hdr_view = create_color_target(device, "hdr", w, h, HDR_FORMAT, 1, true);
+    let motion_view = create_color_target(device, "motion", w, h, MOTION_FORMAT, 1, true);
     let ldr_view = create_color_target(device, "ldr", w, h, LDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
 
     // ============================================================
-    // Bloom chain
+    // TAA ping-pong resolved (2 HDR-текстуры)
+    // ============================================================
+    let taa_resolved_tex: [wgpu::Texture; 2] = std::array::from_fn(|i| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("taa_resolved_{}", i)),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    });
+    let taa_resolved_views: [wgpu::TextureView; 2] = std::array::from_fn(|i| {
+        taa_resolved_tex[i].create_view(&wgpu::TextureViewDescriptor::default())
+    });
+
+    let taa_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("taa_uniform"),
+        size: std::mem::size_of::<TaaParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let taa_read_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("taa_read_bg"),
+            layout: taa_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&taa_resolved_views[i]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&motion_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: taa_uniform.as_entire_binding(),
+                },
+            ],
+        })
+    });
+
+    // ============================================================
+    // Bloom chain — prefilter читает TAA resolved (2 варианта).
     // ============================================================
     let bloom_chain = build_bloom_chain(
         device,
         bloom_layout,
-        &hdr_view,
+        &taa_resolved_views,
         w,
         h,
         bloom_knee,
         bloom_radius,
     );
 
-    // G-buffer: 3 MRT + depth
+    // ============================================================
+    // G-buffer: 3 MRT + depth (+ motion отдельно)
+    // ============================================================
     let gbuffer_albedo_view =
         create_color_target(device, "gbuffer_albedo", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_normal_view =
@@ -116,7 +188,6 @@ pub fn build_size_dependent(
     let ssao_view = create_color_target(device, "ssao", w, h, SSAO_FORMAT, 1, true);
     let ssao_blur_view = create_color_target(device, "ssao_blur", w, h, SSAO_FORMAT, 1, true);
 
-    // SSAO pass: t_gbuffer + noise + sampler + uniform + binding 4 (тот же gbuffer).
     let ssao_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao_bind_group"),
         layout: ssao_layout,
@@ -144,7 +215,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // SSAO blur pass: t_ssao + noise + sampler + uniform + binding 4 (gbuffer depth).
     let ssao_blur_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao_blur_bind_group"),
         layout: ssao_layout,
@@ -254,27 +324,29 @@ pub fn build_size_dependent(
         ],
     });
 
-    let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("composite_bind_group"),
-        layout: tonemap_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&hdr_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&bloom_chain.mips[0].view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(&linear_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: tonemap_uniform.as_entire_binding(),
-            },
-        ],
+    let composite_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bind_group"),
+            layout: tonemap_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&taa_resolved_views[i]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&bloom_chain.mips[0].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: tonemap_uniform.as_entire_binding(),
+                },
+            ],
+        })
     });
 
     let debug_uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -338,9 +410,14 @@ pub fn build_size_dependent(
 
     SizeDependent {
         hdr_view,
+        motion_view,
+        taa_resolved_views,
+        _taa_resolved_tex: taa_resolved_tex,
+        taa_read_bgs,
+        taa_uniform,
         bloom_chain,
         linear_sampler,
-        composite_bind_group,
+        composite_bgs,
         ldr_view,
         fxaa_uniform,
         fxaa_bind_group,
@@ -369,7 +446,7 @@ pub fn build_size_dependent(
 fn build_bloom_chain(
     device: &wgpu::Device,
     bloom_layout: &wgpu::BindGroupLayout,
-    hdr_view: &wgpu::TextureView,
+    taa_resolved_views: &[wgpu::TextureView; 2],
     screen_w: u32,
     screen_h: u32,
     knee: f32,
@@ -426,23 +503,25 @@ fn build_bloom_chain(
         radius,
     );
 
-    let prefilter_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("bloom_prefilter_bg"),
-        layout: bloom_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(hdr_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: prefilter_uniform.as_entire_binding(),
-            },
-        ],
+    let prefilter_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom_prefilter_bg"),
+            layout: bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&taa_resolved_views[i]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: prefilter_uniform.as_entire_binding(),
+                },
+            ],
+        })
     });
 
     let mut downsample_bgs = Vec::with_capacity(BLOOM_MIP_COUNT - 1);
@@ -522,7 +601,7 @@ fn build_bloom_chain(
     BloomChain {
         mips,
         sampler,
-        prefilter_bg,
+        prefilter_bgs,
         downsample_bgs,
         upsample_bgs,
         prefilter_uniform,

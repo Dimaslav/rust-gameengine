@@ -5,6 +5,11 @@ struct SsaoUniform {
     params: vec4<f32>,
     // x = time (для temporal rotation шума)
     time: vec4<f32>,
+    // world → view. Нужна, потому что G-buffer хранит world-space нормаль,
+    // а SSAO восстанавливает view-space позицию и сэмплит hemisphere
+    // в view-space. Без этого преобразования нормаль была бы «в другой
+    // системе координат», TBN строился бы неверно, AO-паттерн поехал бы.
+    view: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var t_gbuffer: texture_2d<f32>;
@@ -136,7 +141,11 @@ fn fs_ssao(in: VertexOutput) -> @location(0) vec4<f32> {
     if (depth_norm >= 0.9999) {
         return vec4<f32>(1.0, 0.0, 0.0, 1.0);
     }
-    let normal = normalize(g.xyz);
+    // G-buffer хранит WORLD-space нормаль. SSAO работает во view-space
+    // (reconstruct_view_pos + hemisphere-сэмплы + проекция). Приводим
+    // нормаль к view-space через camera.view.
+    let n_world = normalize(g.xyz);
+    let normal = normalize((params.view * vec4<f32>(n_world, 0.0)).xyz);
     let view_pos = reconstruct_view_pos(in.uv, depth_norm);
     let ao = compute_occlusion(view_pos, normal, in.uv);
     return vec4<f32>(1.0 - ao, 0.0, 0.0, 1.0);

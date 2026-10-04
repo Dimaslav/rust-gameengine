@@ -8,18 +8,19 @@ mod physics;
 mod render;
 mod scene;
 
+use std::any::Any;
 use std::collections::HashMap;
 
 use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
-    AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
-    Visible,
+    AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
+    MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
+    Transform, Trigger, TriggerAction, Velocity, Visible,
 };
 use game::rpg::{self, RpgState};
 use glam::{Quat, Vec3};
-use physics::{Collider, PhysicsMaterial, RigidBody};
+use physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
 use render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GltfInstance, GpuLight,
     GpuPointLight, InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx,
@@ -29,9 +30,7 @@ use render::{
 fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> bool {
     for p in planes {
         let dist = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
-        if dist < -radius {
-            return false;
-        }
+        if dist < -radius { return false; }
     }
     true
 }
@@ -40,41 +39,18 @@ fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> boo
 // UV scale helper
 // ============================================================
 
-/// Вычислить множитель UV для инстанса — **раздельно по осям**.
-///
-/// U масштабируется по максимальному из **горизонтальных** extent'ов
-/// (`x` vs `z`), V — по вертикальному (`y`). Это устраняет растяжение
-/// текстуры на вытянутых объектах: у куба scale `(1, 3, 1)` боковая
-/// грань имеет физический размер 1×3, и без раздельных UV-множителей
-/// текстура растягивалась бы по вертикали.
-///
-/// Для плоских мешей (`extent.y ≈ 0`, например `plane`) V-множитель
-/// наследует U. Если горизонтальные оси вырождены (вертикальный
-/// стержень) — наоборот, U наследует V.
 fn compute_uv_scale(mesh: &Mesh, model: &glam::Mat4, tiling_size: f32) -> [f32; 2] {
     let local_extent = (mesh.aabb_max - mesh.aabb_min).abs();
     let (scale, _, _) = model.to_scale_rotation_translation();
     let scale_abs = scale.abs();
-    let world_extent = local_extent * scale_abs; // покомпонентно
+    let world_extent = local_extent * scale_abs;
 
     let tile = tiling_size.max(0.001);
-
-    // U — горизонтальная ось. Для +Z/-Z граней куба физическая ширина
-    // идёт по X, для +X/-X — по Z. Берём максимум, чтобы обе пары
-    // боковых граней тайлились одинаково.
     let mut uv_x = world_extent.x.max(world_extent.z) / tile;
     let mut uv_y = world_extent.y / tile;
 
-    // Плоский меш (plane, quad) — V вырожден, используем U.
-    if uv_y < 0.001 {
-        uv_y = uv_x;
-    }
-    // Если горизонтальные оси вырождены (тонкий вертикальный стержень) —
-    // fallback на V, чтобы текстура не пропала.
-    if uv_x < 0.001 {
-        uv_x = uv_y;
-    }
-
+    if uv_y < 0.001 { uv_y = uv_x; }
+    if uv_x < 0.001 { uv_x = uv_y; }
     [uv_x, uv_y]
 }
 
@@ -90,9 +66,7 @@ impl System for RotationSystem {
             let spinner = world.get::<Spinner>(e).copied();
             if let (Some(s), Some(t)) = (spinner, world.get_mut::<Transform>(e)) {
                 let axis = s.axis.normalize_or_zero();
-                if axis.length_squared() < 1e-6 {
-                    continue;
-                }
+                if axis.length_squared() < 1e-6 { continue; }
                 let dq = Quat::from_axis_angle(axis, s.speed * dt);
                 t.rotation = dq * t.rotation;
             }
@@ -107,6 +81,243 @@ impl System for MovementSystem {
             t.position += v.value * dt;
         });
     }
+}
+
+/// Управляет лифтами: FSM с trapezoid-профилем, sensor-дверь, синхронизация
+/// SlidingDoor детей, запись velocity.y в kinematic RigidBody.
+struct ElevatorSystem;
+impl System for ElevatorSystem {
+    fn update(&mut self, world: &mut World, dt: f32) {
+        let entities: Vec<_> = world.query::<Elevator>().map(|(e, _)| e).collect();
+        for e in entities {
+            let Some(mut el) = world.get::<Elevator>(e).cloned() else { continue };
+            let current_y = world
+                .get::<Transform>(e)
+                .map(|t| t.position.y)
+                .unwrap_or(0.0);
+
+            match el.state {
+                ElevatorState::Idle => {
+                    el.current_velocity = 0.0;
+                }
+                ElevatorState::DoorsOpening => {
+                    el.current_velocity = 0.0;
+                    el.doors_open = (el.doors_open + el.door_speed * dt).min(1.0);
+                    if el.doors_open >= 1.0 {
+                        el.state = ElevatorState::DoorsOpen;
+                        el.dwell_timer = el.dwell;
+                    }
+                }
+                ElevatorState::DoorsOpen => {
+                    el.current_velocity = 0.0;
+                    if el.player_inside {
+                        el.dwell_timer = el.dwell;
+                    } else {
+                        el.dwell_timer -= dt;
+                        if el.dwell_timer <= 0.0 {
+                            el.state = ElevatorState::DoorsClosing;
+                        }
+                    }
+                }
+                ElevatorState::DoorsClosing => {
+                    el.current_velocity = 0.0;
+                    if el.player_inside {
+                        el.state = ElevatorState::DoorsOpening;
+                    } else {
+                        el.doors_open = (el.doors_open - el.door_speed * dt).max(0.0);
+                        if el.doors_open <= 0.0 {
+                            if el.target_floor != el.current_floor {
+                                el.state = ElevatorState::Moving;
+                            } else {
+                                el.state = ElevatorState::Idle;
+                            }
+                        }
+                    }
+                }
+                ElevatorState::Moving => {
+                    let arrived = el.update_moving(current_y, dt);
+                    if arrived {
+                        el.stop_velocity();
+                        el.state = ElevatorState::DoorsOpening;
+                    }
+                }
+            }
+
+            if let Some(rb) = world.get_mut::<RigidBody>(e) {
+                if rb.body_type == BodyType::Kinematic {
+                    rb.velocity = Vec3::new(0.0, el.current_velocity, 0.0);
+                }
+            }
+
+            let doors: Vec<Entity> = world
+                .entities()
+                .iter()
+                .copied()
+                .filter(|&d| {
+                    world.get::<SlidingDoor>(d).is_some()
+                        && world.get::<Parent>(d).map(|p| p.0 == e).unwrap_or(false)
+                })
+                .collect();
+            for d in doors {
+                if let Some(sd) = world.get_mut::<SlidingDoor>(d) {
+                    sd.target = el.doors_open;
+                }
+            }
+
+            if let Some(slot) = world.get_mut::<Elevator>(e) { *slot = el; }
+        }
+    }
+}
+
+struct SlidingDoorSystem;
+impl System for SlidingDoorSystem {
+    fn update(&mut self, world: &mut World, dt: f32) {
+        let entities: Vec<_> = world.query::<SlidingDoor>().map(|(e, _)| e).collect();
+        for e in entities {
+            let Some(mut sd) = world.get::<SlidingDoor>(e).copied() else { continue };
+            let Some(t) = world.get_mut::<Transform>(e) else { continue };
+
+            let diff = sd.target - sd.open_amount;
+            if diff.abs() < 1e-4 {
+                sd.open_amount = sd.target;
+            } else {
+                let step = sd.speed * dt;
+                if step >= diff.abs() {
+                    sd.open_amount = sd.target;
+                } else {
+                    sd.open_amount += step * diff.signum();
+                }
+            }
+
+            t.position = sd.closed_position
+                + sd.slide_axis * sd.slide_distance * sd.open_amount;
+
+            if let Some(slot) = world.get_mut::<SlidingDoor>(e) { *slot = sd; }
+        }
+    }
+}
+
+// ============================================================
+// Спавн лифта
+// ============================================================
+
+fn spawn_elevator(
+    world: &mut World,
+    xz: (f32, f32),
+    floors_y: Vec<f32>,
+    speed: f32,
+) {
+    let y0 = *floors_y.first().unwrap_or(&0.0);
+    let top_y = *floors_y.last().unwrap_or(&y0);
+
+    let plat_scale = Vec3::new(3.0, 0.2, 3.0);
+
+    // === Платформа ===
+    let plat = world.spawn();
+    world.insert(plat, Name("Elevator".into()));
+    world.insert(
+        plat,
+        Transform::at(Vec3::new(xz.0, y0, xz.1)).with_scale_xyz(
+            plat_scale.x,
+            plat_scale.y,
+            plat_scale.z,
+        ),
+    );
+    world.insert(plat, MeshHandle("cube".into()));
+    world.insert(plat, MaterialHandle("flat_blue".into()));
+    world.insert(plat, TextureTiling::new(1.5));
+    world.insert(plat, RigidBody::kinematic());
+    world.insert(plat, Collider::aabb(Vec3::splat(0.5)));
+
+    let mut el = Elevator::new(floors_y.clone(), speed);
+    el.acceleration = 3.0;
+    el.sensor_radius = 2.0;
+    world.insert(plat, el);
+
+    // === Двери ===
+    for side in [-1.0_f32, 1.0] {
+        let d = world.spawn();
+        world.insert(
+            d,
+            Name(format!("ElevatorDoor_{}", if side < 0.0 { "L" } else { "R" })),
+        );
+
+        let desired_world_size = Vec3::new(1.4, 2.0, 0.1);
+        let local_scale = desired_world_size / plat_scale;
+
+        let desired_world_pos = Vec3::new(side * 0.7, 1.0, 1.5);
+        let local_pos = desired_world_pos / plat_scale;
+
+        world.insert(
+            d,
+            Transform::at(local_pos).with_scale_xyz(
+                local_scale.x,
+                local_scale.y,
+                local_scale.z,
+            ),
+        );
+        world.insert(d, MeshHandle("cube".into()));
+        world.insert(d, MaterialHandle("rpg_door".into()));
+        world.insert(d, Parent(plat));
+
+        let local_slide_distance = 1.4 / plat_scale.x;
+        world.insert(
+            d,
+            SlidingDoor::new(local_pos, Vec3::X * side, local_slide_distance),
+        );
+    }
+
+    // === Стены шахты ===
+    let shaft_height = (top_y - y0) + 6.0;
+    let shaft_center_y = (y0 + top_y) * 0.5 + 1.0;
+
+    let wall_specs = [
+        (Vec3::new(0.0, 0.0, -1.75), Vec3::new(3.6, shaft_height, 0.2)),
+        (Vec3::new(-1.75, 0.0, 0.0), Vec3::new(0.2, shaft_height, 3.6)),
+        (Vec3::new(1.75, 0.0, 0.0), Vec3::new(0.2, shaft_height, 3.6)),
+    ];
+
+    for (i, (offset, size)) in wall_specs.iter().enumerate() {
+        let w = world.spawn();
+        world.insert(w, Name(format!("ElevatorShaft_{}", i)));
+        world.insert(
+            w,
+            Transform::at(Vec3::new(xz.0 + offset.x, shaft_center_y, xz.1 + offset.z))
+                .with_scale_xyz(size.x, size.y, size.z),
+        );
+        world.insert(w, MeshHandle("cube".into()));
+        world.insert(w, MaterialHandle("rpg_dungeon".into()));
+        world.insert(w, RigidBody::static_body());
+        world.insert(w, Collider::aabb(Vec3::splat(0.5)));
+    }
+
+    // === Кнопки ===
+    for (idx, &y) in floors_y.iter().enumerate() {
+        let b = world.spawn();
+        world.insert(b, Name(format!("ElevatorButton_{}", idx)));
+        world.insert(
+            b,
+            Transform::at(Vec3::new(xz.0 + 2.5, y + 1.0, xz.1)).with_scale(0.25),
+        );
+        world.insert(b, MeshHandle("cube".into()));
+        world.insert(b, MaterialHandle("emissive".into()));
+        world.insert(b, Spinner::new(Vec3::Y, 1.5));
+        world.insert(
+            b,
+            Trigger::repeatable(
+                1.2,
+                TriggerAction::CallElevator {
+                    elevator: plat,
+                    floor_idx: idx as u32,
+                },
+            ),
+        );
+    }
+
+    log::info!(
+        "Elevator spawned at ({:.1}, {:.1}) with {} floors, speed {:.1} m/s",
+        xz.0, xz.1, floors_y.len(), speed
+    );
 }
 
 // ============================================================
@@ -131,40 +342,35 @@ struct DemoGame {
 
     lod_stats: [usize; 4],
 
-    // === RPG ===
     rpg: RpgState,
+
+    /// Предыдущие world-матрицы per-entity. Нужно для per-object motion
+    /// vectors в G-buffer. Каждый кадр пересобирается заново из текущих
+    /// `Transform`'ов — entity, которых больше нет, выпадают автоматически.
+    /// Для новых entity (без записи в этом HashMap) prev == curr.
+    prev_world_matrices: HashMap<Entity, glam::Mat4>,
 }
 
 impl DemoGame {
     fn new() -> Self {
         let dir_lights = vec![
-            GpuLight {
-                direction: [0.4, 1.0, 0.3, 2.5],
-                color: [1.0, 0.98, 0.9, 0.0],
-            },
-            GpuLight {
-                direction: [-0.6, 0.3, -0.7, 0.4],
-                color: [1.0, 0.5, 0.3, 0.0],
-            },
+            GpuLight { direction: [0.4, 1.0, 0.3, 2.5], color: [1.0, 0.98, 0.9, 0.0] },
+            GpuLight { direction: [-0.6, 0.3, -0.7, 0.4], color: [1.0, 0.5, 0.3, 0.0] },
         ];
         let point_lights = vec![
-            GpuPointLight {
-                position: [0.0, 3.0, 0.0, 18.0],
-                color: [1.0, 0.4, 0.2, 12.0],
-            },
-            GpuPointLight {
-                position: [10.0, 4.0, 10.0, 14.0],
-                color: [0.2, 0.6, 1.0, 10.0],
-            },
-            GpuPointLight {
-                position: [-10.0, 4.0, -10.0, 14.0],
-                color: [0.4, 1.0, 0.4, 10.0],
-            },
+            GpuPointLight { position: [0.0, 3.0, 0.0, 18.0], color: [1.0, 0.4, 0.2, 12.0] },
+            GpuPointLight { position: [10.0, 4.0, 10.0, 14.0], color: [0.2, 0.6, 1.0, 10.0] },
+            GpuPointLight { position: [-10.0, 4.0, -10.0, 14.0], color: [0.4, 1.0, 0.4, 10.0] },
         ];
 
         Self {
             camera: Camera3D::new(16.0 / 9.0),
-            systems: vec![Box::new(RotationSystem), Box::new(MovementSystem)],
+            systems: vec![
+                Box::new(RotationSystem),
+                Box::new(MovementSystem),
+                Box::new(ElevatorSystem),
+                Box::new(SlidingDoorSystem),
+            ],
             dir_lights,
             point_lights,
             postfx: PostFx {
@@ -191,6 +397,11 @@ impl DemoGame {
                 shadow_fade_end: 200.0,
                 lod_bias: 1.0,
                 lod_distances: [30.0, 80.0, 200.0, 500.0],
+                taa_strength: 1.0,
+                // Меньше, чем 0.3 — иначе unsharp-mask усиливает per-frame
+                // шум (SSAO, шум теней). 0.1 — компромисс: edges немного
+                // подчёркнуты, но шум не «кипит».
+                taa_sharpening: 0.1,
             },
             spawned: false,
             dragging: false,
@@ -202,13 +413,11 @@ impl DemoGame {
             animations: HashMap::new(),
             lod_stats: [0; 4],
             rpg: RpgState::new(),
+            prev_world_matrices: HashMap::new(),
         }
     }
 
-    /// Дистанция взаимодействия для RPG-логики по E.
-    fn rpg_interact_distance(&self) -> f32 {
-        4.0
-    }
+    fn rpg_interact_distance(&self) -> f32 { 4.0 }
 }
 
 impl Game for DemoGame {
@@ -217,7 +426,8 @@ impl Game for DemoGame {
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
         renderer.add_mesh("quad", Mesh::plane(&renderer.device, 2.0, 1));
-
+        // Вертикальный билборд (XY). Нужен для листвы/растительности.
+        renderer.add_mesh("quad_xy", Mesh::plane_xy(&renderer.device, 2.0, 1));
         renderer.add_mesh("cylinder", Mesh::cylinder(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("cone",     Mesh::cone(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("capsule",  Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
@@ -233,74 +443,38 @@ impl Game for DemoGame {
                 data[idx + 3] = 255;
             }
         }
-        renderer
-            .load_texture_rgba("checker", &data, 64, 64)
-            .expect("checker");
+        renderer.load_texture_rgba("checker", &data, 64, 64).expect("checker");
 
-        renderer.add_material(
-            "ground",
-            Material::new([0.55, 0.60, 0.55, 1.0]).with_metallic_roughness(0.0, 0.85),
-        );
-        renderer.add_material(
-            "checker_red",
-            Material::new([1.0, 0.35, 0.35, 1.0])
-                .with_texture("checker")
-                .with_metallic_roughness(0.0, 0.5),
-        );
-        renderer.add_material(
-            "checker_blue",
-            Material::new([0.35, 0.55, 1.0, 1.0])
-                .with_texture("checker")
-                .with_metallic_roughness(0.0, 0.5),
-        );
-        renderer.add_material(
-            "flat_red",
-            Material::new([1.0, 0.35, 0.35, 1.0]).with_metallic_roughness(0.0, 0.5),
-        );
-        renderer.add_material(
-            "flat_blue",
-            Material::new([0.35, 0.55, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5),
-        );
-        renderer.add_material(
-            "gold",
-            Material::new([1.0, 0.85, 0.3, 1.0]).with_metallic_roughness(1.0, 0.25),
-        );
-        renderer.add_material(
-            "emissive",
-            Material::new([1.0, 1.0, 1.0, 1.0])
-                .with_metallic_roughness(0.0, 0.5)
-                .with_emissive([2.5, 2.2, 0.6]),
-        );
-        renderer.add_material(
-            "glass",
-            Material::new([0.7, 0.85, 1.0, 0.35])
-                .with_metallic_roughness(0.2, 0.05)
-                .with_alpha_mode(AlphaMode::Blend),
-        );
-        renderer.add_material(
-            "foliage",
-            Material::new([0.25, 0.75, 0.3, 1.0])
-                .with_metallic_roughness(0.0, 0.7)
-                .with_double_sided(true),
-        );
+        renderer.add_material("ground",
+            Material::new([0.55, 0.60, 0.55, 1.0]).with_metallic_roughness(0.0, 0.85));
+        renderer.add_material("checker_red",
+            Material::new([1.0, 0.35, 0.35, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
+        renderer.add_material("checker_blue",
+            Material::new([0.35, 0.55, 1.0, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
+        renderer.add_material("flat_red",
+            Material::new([1.0, 0.35, 0.35, 1.0]).with_metallic_roughness(0.0, 0.5));
+        renderer.add_material("flat_blue",
+            Material::new([0.35, 0.55, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5));
+        renderer.add_material("gold",
+            Material::new([1.0, 0.85, 0.3, 1.0]).with_metallic_roughness(1.0, 0.25));
+        renderer.add_material("emissive",
+            Material::new([1.0, 1.0, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5).with_emissive([2.5, 2.2, 0.6]));
+        renderer.add_material("glass",
+            Material::new([0.7, 0.85, 1.0, 0.35]).with_metallic_roughness(0.2, 0.05).with_alpha_mode(AlphaMode::Blend));
+        renderer.add_material("foliage",
+            Material::new([0.25, 0.75, 0.3, 1.0]).with_metallic_roughness(0.0, 0.7).with_double_sided(true));
 
         rpg::register_materials(renderer);
 
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             Ok(loaded) => {
-                println!(
-                    "Loaded glTF: {} instances, {} skeletons, {} animations",
-                    loaded.instances.len(),
-                    loaded.skeletons.len(),
-                    loaded.animations.len()
-                );
+                println!("Loaded glTF: {} instances, {} skeletons, {} animations",
+                    loaded.instances.len(), loaded.skeletons.len(), loaded.animations.len());
                 self.gltf_instances = loaded.instances;
                 self.skeletons = loaded.skeletons;
                 self.animations = loaded.animations;
             }
-            Err(e) => {
-                eprintln!("glTF not loaded ({}). Using only procedural meshes.", e);
-            }
+            Err(e) => eprintln!("glTF not loaded ({}). Using only procedural meshes.", e),
         }
     }
 
@@ -320,14 +494,20 @@ impl Game for DemoGame {
             }
         }
 
-        if !input.play_mode {
-            if input.key_pressed(KeyCode::KeyG) {
-                self.show_grid = !self.show_grid;
-            }
-            if input.key_pressed(KeyCode::KeyC) {
-                self.show_culling = !self.show_culling;
-            }
+        // Хоткеи ниже должны срабатывать только без Ctrl/Alt/Shift,
+        // иначе конфликтуют с глобальными хоткеями редактора.
+        let ctrl = input.key_down(KeyCode::ControlLeft)
+            || input.key_down(KeyCode::ControlRight);
+        let alt = input.key_down(KeyCode::AltLeft) || input.key_down(KeyCode::AltRight);
+        let shift = input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight);
+        let plain = !ctrl && !alt && !shift;
 
+        if !input.play_mode && plain {
+            if input.key_pressed(KeyCode::KeyG) { self.show_grid = !self.show_grid; }
+            if input.key_pressed(KeyCode::KeyC) { self.show_culling = !self.show_culling; }
+        }
+
+        if !input.play_mode {
             if input.key_pressed(KeyCode::F1) { self.postfx.debug_view = DebugView::Final; }
             if input.key_pressed(KeyCode::F2) { self.postfx.debug_view = DebugView::Ssao; }
             if input.key_pressed(KeyCode::F3) { self.postfx.debug_view = DebugView::GbufferNormal; }
@@ -337,31 +517,24 @@ impl Game for DemoGame {
         }
 
         if !input.play_mode && !input.editor_flying {
-            let lmb = input.mouse_down(winit::event::MouseButton::Left)
-                && !input.editor_captured;
+            let lmb = input.mouse_down(winit::event::MouseButton::Left) && !input.editor_captured;
             if lmb {
                 let (dx, dy) = input.mouse_delta;
-                if self.dragging {
-                    self.camera.orbit(dx * 0.005, dy * 0.005);
-                }
+                if self.dragging { self.camera.orbit(dx * 0.005, dy * 0.005); }
                 self.dragging = true;
             } else {
                 self.dragging = false;
             }
-
             if input.scroll_delta.abs() > 0.01 {
                 self.camera.zoom(input.scroll_delta * 0.05);
             }
-
             let speed = 8.0 * dt;
             let mut pan = (0.0, 0.0);
             if input.key_down(KeyCode::KeyW) { pan.1 -= speed; }
             if input.key_down(KeyCode::KeyS) { pan.1 += speed; }
             if input.key_down(KeyCode::KeyA) { pan.0 -= speed; }
             if input.key_down(KeyCode::KeyD) { pan.0 += speed; }
-            if pan != (0.0, 0.0) {
-                self.camera.pan(pan.0, pan.1);
-            }
+            if pan != (0.0, 0.0) { self.camera.pan(pan.0, pan.1); }
         }
 
         self.orbit_phase += dt * 0.5;
@@ -373,25 +546,18 @@ impl Game for DemoGame {
 
         if !self.spawned {
             self.spawned = true;
-
             rpg::spawn_scene(world);
+
+            spawn_elevator(world, (8.0, 8.0), vec![0.0, 3.0, 6.0, 9.0], 2.5);
 
             let mut index = 0;
             for inst in &self.gltf_instances {
                 let e = world.spawn();
-                let node_label = inst
-                    .node_name
-                    .clone()
-                    .unwrap_or_else(|| format!("Gltf_{}", index));
+                let node_label = inst.node_name.clone().unwrap_or_else(|| format!("Gltf_{}", index));
                 world.insert(e, Name(node_label));
                 let (scale, rot, trans) = inst.model.to_scale_rotation_translation();
                 let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 30.0);
-                world.insert(
-                    e,
-                    Transform::at(trans + offset)
-                        .with_rotation(rot)
-                        .with_scale(scale.x),
-                );
+                world.insert(e, Transform::at(trans + offset).with_rotation(rot).with_scale(scale.x));
                 world.insert(e, MeshHandle(inst.mesh_name.clone()));
                 world.insert(e, MaterialHandle(inst.material_name.clone()));
                 world.insert(e, TextureTiling::default());
@@ -404,38 +570,55 @@ impl Game for DemoGame {
                 index += 1;
             }
 
-            log::info!(
-                "Spawned RPG scene: village + forest + dungeon + boss + quests"
-            );
+            log::info!("Spawned RPG scene + elevator");
         }
 
         if self.spawned {
             let player_pos = self.camera.position();
+
+            // === Sensor-зона лифтов ===
+            let elevator_entities: Vec<Entity> =
+                world.query::<Elevator>().map(|(e, _)| e).collect();
+            for e in elevator_entities {
+                let (sensor_r, center, half) = match (
+                    world.get::<Elevator>(e).map(|el| el.sensor_radius),
+                    world.get::<Transform>(e),
+                ) {
+                    (Some(r), Some(t)) => (r, t.position, t.scale.abs() * 0.5),
+                    _ => continue,
+                };
+
+                let dx = player_pos.x - center.x;
+                let dz = player_pos.z - center.z;
+                let dist_xz = (dx * dx + dz * dz).sqrt();
+                let in_xz = dist_xz < sensor_r + half.x.max(half.z);
+
+                let dy = player_pos.y - center.y;
+                let in_y = dy > -1.0 && dy < 3.0;
+
+                if let Some(el) = world.get_mut::<Elevator>(e) {
+                    el.player_inside = in_xz && in_y;
+                }
+            }
+
             rpg::tick(&mut self.rpg, world, player_pos, dt);
 
             if input.play_mode && input.key_pressed(KeyCode::KeyE) {
                 let origin = self.camera.position();
                 let dir = self.camera.forward();
-                if let Some((target, dist)) = crate::editor::picking::pick_ray(
-                    world,
-                    renderer,
-                    origin,
-                    dir,
-                ) {
+                if let Some((target, dist)) = crate::editor::picking::pick_ray(world, renderer, origin, dir) {
                     if dist < self.rpg_interact_distance() {
                         let handled = rpg::try_interact(world, &mut self.rpg, target);
                         if !handled {
                             if let Some(&inter) = world.get::<Interactable>(target) {
                                 match inter {
-                                    Interactable::Pickup => {
-                                        world.despawn(target);
-                                    }
-                                    Interactable::Paint(c) => {
-                                        world.insert(target, Tint(c));
-                                    }
+                                    Interactable::Pickup => { world.despawn(target); }
+                                    Interactable::Paint(c) => { world.insert(target, Tint(c)); }
                                     Interactable::Toggle => {
                                         if let Some(sp) = world.get_mut::<Spinner>(target) {
                                             sp.speed = -sp.speed;
+                                        } else if let Some(el) = world.get_mut::<Elevator>(target) {
+                                            el.call(el.target_floor);
                                         }
                                     }
                                 }
@@ -460,37 +643,48 @@ impl Game for DemoGame {
             let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
                 player.time += dt * speed;
                 player.time
-            } else {
-                continue;
-            };
+            } else { continue };
 
             let Some(clip) = self.animations.get(&clip_name) else { continue };
             let duration = clip.duration;
-            let final_time = if looping && duration > 0.0 {
-                new_time % duration
-            } else {
-                new_time.min(duration)
-            };
+            let final_time = if looping && duration > 0.0 { new_time % duration } else { new_time.min(duration) };
 
             let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else { continue };
             let Some(skel) = self.skeletons.get(&skel_handle.0) else { continue };
 
             let local_pose = clip.local_pose(final_time, &skel.local_bind);
             let joint_matrices = skel.joint_matrices(&local_pose);
-
             renderer.update_skeleton(&skel_handle.0, &joint_matrices);
         }
 
         true
     }
 
-    fn apply_postfx(&mut self, postfx: PostFx) {
-        self.postfx = postfx;
+    fn apply_postfx(&mut self, postfx: PostFx) { self.postfx = postfx; }
+
+    // ============================================================
+    // Play-in-Editor hooks
+    // ============================================================
+
+    fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
+        log::info!("Play-in-Editor: snapshotting RPG state");
+        Some(Box::new(self.rpg.clone()))
+    }
+
+    fn on_play_exit(&mut self, state: Box<dyn Any>) {
+        match state.downcast::<RpgState>() {
+            Ok(rpg) => {
+                self.rpg = *rpg;
+                log::info!("Play-in-Editor: RPG state restored");
+            }
+            Err(_) => {
+                log::warn!("Play-in-Editor: failed to downcast RPG state");
+            }
+        }
     }
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
         use std::collections::HashMap;
-
         type BucketKey = (String, String, [u32; 4], bool, bool, [u32; 2]);
         let mut buckets: HashMap<BucketKey, Vec<InstanceData>> = HashMap::new();
         let planes = self.camera.frustum_planes();
@@ -498,139 +692,93 @@ impl Game for DemoGame {
 
         let lod_bias = self.postfx.lod_bias.max(0.01);
         let lod_dists = self.postfx.lod_distances;
-
         let mut lod_counts = [0usize; 4];
+
+        // Свежий трекер prev-матриц: entity, которых нет в этом кадре,
+        // автоматически исчезают из трекера.
+        let mut new_prev: HashMap<Entity, glam::Mat4> = HashMap::new();
 
         let entities: Vec<_> = world.entities().to_vec();
         for e in entities {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 {
-                    continue;
-                }
-            }
+            if let Some(v) = world.get::<Visible>(e) { if !v.0 { continue; } }
 
             let (Some(_t), Some(m), Some(mat)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
                 world.get::<MaterialHandle>(e),
-            ) else {
-                continue;
-            };
+            ) else { continue };
 
             let model = crate::game::world_matrix(world, e);
+            // Prev — из прошлого кадра, для новых entity == текущая.
+            let prev_model = self.prev_world_matrices.get(&e).copied().unwrap_or(model);
+            new_prev.insert(e, model);
 
             let Some(mesh) = renderer.meshes.get(&m.0) else { continue };
 
             if self.show_culling {
                 let (center, radius) = mesh.world_bounds(&model);
-                if !sphere_in_frustum(center, radius, &planes) {
-                    continue;
-                }
+                if !sphere_in_frustum(center, radius, &planes) { continue; }
             }
 
             let (world_center, world_radius) = mesh.world_bounds(&model);
             let dist = (world_center - cam_pos).length();
             let dist_effective = (dist - world_radius).max(0.0) / lod_bias;
 
-            let lod_level = if mesh.lods.is_empty() {
-                0
-            } else if dist_effective < lod_dists[0] {
-                0
-            } else if dist_effective < lod_dists[1] || mesh.lods.len() < 1 {
-                1
-            } else if dist_effective < lod_dists[2] || mesh.lods.len() < 2 {
-                2.min(mesh.lods.len())
-            } else {
-                3.min(mesh.lods.len())
-            };
+            let lod_level = if mesh.lods.is_empty() { 0 }
+                else if dist_effective < lod_dists[0] { 0 }
+                else if dist_effective < lod_dists[1] || mesh.lods.len() < 1 { 1 }
+                else if dist_effective < lod_dists[2] || mesh.lods.len() < 2 { 2.min(mesh.lods.len()) }
+                else { 3.min(mesh.lods.len()) };
 
             lod_counts[lod_level] += 1;
 
-            let mesh_name = if lod_level == 0 {
-                m.0.clone()
-            } else {
-                format!("{}__lod{}", m.0, lod_level - 1)
-            };
+            let mesh_name = if lod_level == 0 { m.0.clone() } else { format!("{}__lod{}", m.0, lod_level - 1) };
 
-            let material = renderer
-                .materials
-                .get(&mat.0)
-                .unwrap_or_else(|| renderer.materials_default());
-
+            let material = renderer.materials.get(&mat.0).unwrap_or_else(|| renderer.materials_default());
             let blend = material.alpha_mode == AlphaMode::Blend;
             let double_sided = material.double_sided;
 
             let color = world
                 .get::<Tint>(e)
                 .map(|t| t.0)
-                .unwrap_or(material.base_color);
+                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
 
-            // Per-axis UV scale — текстура тайлится одинаково по U и V
-            // относительно физического размера, а не растягивается.
-            let tiling_size = world
-                .get::<TextureTiling>(e)
-                .map(|t| t.size)
-                .unwrap_or(1.0);
+            let tiling_size = world.get::<TextureTiling>(e).map(|t| t.size).unwrap_or(1.0);
             let uv_scale = compute_uv_scale(mesh, &model, tiling_size);
-
-            // Ключ включает ОБА компонента UV, округлённые до 0.001.
-            // Иначе сущности с разным аспектом слились бы в один draw
-            // и получили бы одинаковый uv_scale.
             let uv_key = [
                 (uv_scale[0] * 1000.0).round() as i32 as u32,
                 (uv_scale[1] * 1000.0).round() as i32 as u32,
             ];
 
-            let key = (
-                mesh_name,
-                mat.0.clone(),
-                color.map(f32::to_bits),
-                blend,
-                double_sided,
-                uv_key,
-            );
-            let inst = InstanceData::new_with_uv(model, color, uv_scale);
+            let key = (mesh_name, mat.0.clone(), color.map(f32::to_bits), blend, double_sided, uv_key);
+            // Используем new_full: передаём prev_model для per-object motion.
+            let inst = InstanceData::new_full(model, prev_model, color, uv_scale);
             buckets.entry(key).or_default().push(inst);
         }
 
+        // Свапаем трекер — на следующем кадре prev будет уже этим.
+        self.prev_world_matrices = new_prev;
+
         self.lod_stats = lod_counts;
 
-        buckets
-            .into_iter()
-            .map(|((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {
-                mesh,
-                instances,
-                texture: Some(material_name),
-                blend,
-                double_sided,
-            })
-            .collect()
+        buckets.into_iter().map(|((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {
+            mesh,
+            instances,
+            texture: Some(material_name),
+            blend,
+            double_sided,
+        }).collect()
     }
 
-    fn collect_lines(
-        &mut self,
-        world: &mut World,
-        renderer: &Renderer,
-        selected: &[Entity],
-    ) -> Vec<LineVertex> {
+    fn collect_lines(&mut self, world: &mut World, renderer: &Renderer, selected: &[Entity]) -> Vec<LineVertex> {
         let mut batch = LineBatch::new();
-
         if self.show_grid {
             batch.grid(100.0, 2.0, [0.15, 0.18, 0.22, 1.0], [0.35, 0.40, 0.48, 1.0], 5);
             batch.axes(5.0);
         }
-
         for &e in selected {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 {
-                    continue;
-                }
-            }
-
-            if let (Some(_t), Some(mh)) = (
-                world.get::<Transform>(e),
-                world.get::<MeshHandle>(e),
-            ) {
+            if let Some(v) = world.get::<Visible>(e) { if !v.0 { continue; } }
+            if let (Some(_t), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e)) {
                 if let Some(mesh) = renderer.meshes.get(&mh.0) {
                     let model = crate::game::world_matrix(world, e);
                     let (center, radius) = mesh.world_bounds(&model);
@@ -638,7 +786,6 @@ impl Game for DemoGame {
                 }
             }
         }
-
         batch.vertices().to_vec()
     }
 
@@ -649,13 +796,8 @@ impl Game for DemoGame {
     fn camera(&self) -> &Camera3D { &self.camera }
     fn camera_mut(&mut self) -> &mut Camera3D { &mut self.camera }
 
-    fn rpg_hud(&self) -> Vec<(String, String)> {
-        self.rpg.hud_lines()
-    }
-
-    fn on_kill(&mut self, world: &mut World, target: Entity) {
-        rpg::on_kill(world, &mut self.rpg, target);
-    }
+    fn rpg_hud(&self) -> Vec<(String, String)> { self.rpg.hud_lines() }
+    fn on_kill(&mut self, world: &mut World, target: Entity) { rpg::on_kill(world, &mut self.rpg, target); }
 }
 
 fn main() {

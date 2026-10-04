@@ -59,9 +59,7 @@ struct Contact {
 
 impl PhysicsWorld {
     pub fn step(&mut self, world: &mut World, dt: f32) {
-        if !self.enabled || dt <= 0.0 {
-            return;
-        }
+        if !self.enabled || dt <= 0.0 { return; }
         let dt = dt.min(MAX_DT);
 
         let mut states = collect_states(world);
@@ -76,22 +74,16 @@ impl PhysicsWorld {
             match s.body_type {
                 BodyType::Dynamic if !s.sleeping => {
                     s.velocity += self.gravity * s.gravity_scale * dt;
-
                     let d = (1.0 - s.linear_damping * dt).max(0.0);
                     s.velocity *= d;
-
                     let vlen = s.velocity.length();
                     if vlen > MAX_LINEAR_VELOCITY {
                         s.velocity *= MAX_LINEAR_VELOCITY / vlen;
                     }
-
                     s.position += s.velocity * dt;
                 }
                 BodyType::Kinematic => {
-                    // Кинематические тела двигаются программно через
-                    // velocity. Гравитация и damping игнорируются — их
-                    // поведение полностью управляется пользователем
-                    // (двери, лифты, движущиеся платформы).
+                    // Кинематические тела двигаются программно через velocity.
                     s.position += s.velocity * dt;
                 }
                 _ => {}
@@ -118,16 +110,39 @@ impl PhysicsWorld {
             }
         }
 
-        // 5. Position correction (Baumgarte).
+        // 4b. Support transfer.
+        // Динамик, стоящий на kinematic-платформе, получает её velocity.
+        // Без этого ящик на лифте отстаёт и «проваливается» сквозь платформу.
+        //
+        // Контракт по контакту: normal указывает ОТ a К b.
+        // Если a — kinematic и normal.y > 0.5 → b стоит сверху a.
+        // Если b — kinematic и normal.y < -0.5 → a стоит сверху b.
+        for c in &contacts {
+            let a_kin = states[c.a].body_type == BodyType::Kinematic;
+            let b_kin = states[c.b].body_type == BodyType::Kinematic;
+            let a_dyn = states[c.a].body_type == BodyType::Dynamic;
+            let b_dyn = states[c.b].body_type == BodyType::Dynamic;
+
+            if a_kin && b_dyn && c.normal.y > 0.5 {
+                states[c.b].velocity = states[c.a].velocity;
+                states[c.b].sleeping = false;
+                states[c.b].sleep_timer = 0.0;
+            }
+            if b_kin && a_dyn && c.normal.y < -0.5 {
+                states[c.a].velocity = states[c.b].velocity;
+                states[c.a].sleeping = false;
+                states[c.a].sleep_timer = 0.0;
+            }
+        }
+
+        // 5. Position correction.
         for c in &contacts {
             resolve_position(c, &mut states);
         }
 
         // 6. Sleep management.
         for s in states.iter_mut() {
-            if s.body_type != BodyType::Dynamic {
-                continue;
-            }
+            if s.body_type != BodyType::Dynamic { continue; }
             let speed = s.velocity.length();
             if speed < SLEEP_LINEAR_THRESHOLD {
                 s.sleep_timer += dt;
@@ -202,7 +217,7 @@ fn write_back(world: &mut World, states: &[BodyState]) {
 }
 
 // ============================================================
-// Broad-phase (O(n²) с early-exit)
+// Broad-phase
 // ============================================================
 
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
@@ -213,12 +228,8 @@ fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
         for j in (i + 1)..n {
             let si = &states[i];
             let sj = &states[j];
-            if !can_move(si.body_type) && !can_move(sj.body_type) {
-                continue;
-            }
-            if si.sleeping && sj.sleeping {
-                continue;
-            }
+            if !can_move(si.body_type) && !can_move(sj.body_type) { continue; }
+            if si.sleeping && sj.sleeping { continue; }
             if aabb_overlap(aabbs[i], aabbs[j]) {
                 pairs.push((i, j));
             }
@@ -301,9 +312,7 @@ fn sphere_sphere(pa: Vec3, ra: f32, pb: Vec3, rb: f32, ia: usize, ib: usize) -> 
     let d = pb - pa;
     let dist_sq = d.length_squared();
     let r_sum = ra + rb;
-    if dist_sq >= r_sum * r_sum {
-        return None;
-    }
+    if dist_sq >= r_sum * r_sum { return None; }
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 { d / dist } else { Vec3::Y };
     let pen = r_sum - dist;
@@ -314,9 +323,7 @@ fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize)
     let closest = pc.clamp(center - half, center + half);
     let d = pc - closest;
     let dist_sq = d.length_squared();
-    if dist_sq >= r * r {
-        return None;
-    }
+    if dist_sq >= r * r { return None; }
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 {
         -(d / dist)
@@ -342,9 +349,7 @@ fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Op
     let ox = ha.x + hb.x - d.x.abs();
     let oy = ha.y + hb.y - d.y.abs();
     let oz = ha.z + hb.z - d.z.abs();
-    if ox <= 0.0 || oy <= 0.0 || oz <= 0.0 {
-        return None;
-    }
+    if ox <= 0.0 || oy <= 0.0 || oz <= 0.0 { return None; }
     let (pen, normal) = if ox <= oy && ox <= oz {
         (ox, Vec3::new(d.x.signum(), 0.0, 0.0))
     } else if oy <= oz {
@@ -363,15 +368,11 @@ fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;
     let inv_m_b = states[c.b].inv_mass;
     let inv_sum = inv_m_a + inv_m_b;
-    if inv_sum <= 0.0 {
-        return;
-    }
+    if inv_sum <= 0.0 { return; }
 
     let v_rel = states[c.b].velocity - states[c.a].velocity;
     let v_n = v_rel.dot(c.normal);
-    if v_n > 0.0 {
-        return;
-    }
+    if v_n > 0.0 { return; }
 
     let e = states[c.a]
         .material
@@ -408,14 +409,10 @@ fn resolve_position(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;
     let inv_m_b = states[c.b].inv_mass;
     let inv_sum = inv_m_a + inv_m_b;
-    if inv_sum <= 0.0 {
-        return;
-    }
+    if inv_sum <= 0.0 { return; }
 
     let pen = (c.penetration - CONTACT_SLOP).max(0.0);
-    if pen < 1e-6 {
-        return;
-    }
+    if pen < 1e-6 { return; }
 
     let correction = c.normal * (BAUMGARTE * pen / inv_sum);
     states[c.a].position -= correction * inv_m_a;

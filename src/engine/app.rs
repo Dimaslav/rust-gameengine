@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event::{DeviceEvent, ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
@@ -12,13 +14,14 @@ use crate::editor::placement;
 use crate::editor::ui::{self as editor_ui, Stats, UiAssets, UiState};
 use crate::editor::{BoxSelect, Editor, EditorAction};
 use crate::game::components::{
-    Chase, Health, Interactable, MaterialHandle, MeshHandle, Parent, SkeletonHandle, Spinner,
-    TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
+    Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle, MeshHandle, Parent,
+    SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction,
+    Velocity, Visible,
 };
-use crate::physics::PhysicsWorld;
+use crate::physics::{BodyType, PhysicsWorld};
 use crate::render::{
-    Camera3D, EguiFrameData, GpuLight, GpuPointLight, LineBatch, LineVertex, MeshDraw,
-    ParticleInstance, PostFx, Renderer,
+    camera::CameraMode, Camera3D, EguiFrameData, GpuLight, GpuPointLight, LineBatch, LineVertex,
+    MeshDraw, ParticleInstance, PostFx, Renderer,
 };
 use glam::Vec3;
 use super::audio::AudioSystem;
@@ -67,6 +70,16 @@ pub trait Game: 'static {
     fn rpg_hud(&self) -> Vec<(String, String)> { Vec::new() }
 
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
+
+    /// Хук перед входом в Play. Может вернуть произвольное состояние,
+    /// которое будет возвращено в `on_play_exit` при выходе. Движок
+    /// сохраняет `World` самостоятельно — здесь нужно только то,
+    /// что живёт вне ECS (например, RPG-счётчики).
+    fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
+
+    /// Восстановить состояние, полученное из `on_play_enter`.
+    /// Вызывается после того, как движок восстановил `World` из снапшота.
+    fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +89,24 @@ struct Projectile {
     age: f32,
     max_age: f32,
     damage: f32,
+}
+
+/// Снапшот состояния, который делается при входе в Play и восстанавливается
+/// при выходе. Содержит сериализованную сцену + состояние редактора +
+/// опциональный user-state из `Game::on_play_enter`.
+struct PlaySnapshot {
+    scene_ron: String,
+    saved_position: Vec3,
+    selection: Vec<Entity>,
+
+    camera_mode: CameraMode,
+    camera_pos: Vec3,
+    camera_yaw: f32,
+    camera_pitch: f32,
+    camera_target: Vec3,
+    camera_distance: f32,
+
+    game_state: Option<Box<dyn Any>>,
 }
 
 struct App<G: Game> {
@@ -100,11 +131,18 @@ struct App<G: Game> {
     audio: Option<AudioSystem>,
 
     physics: PhysicsWorld,
+
+    /// Снапшот для Play-in-Editor.
+    /// `Some` — в момент, когда идёт Play. `None` — вне Play.
+    play_snapshot: Option<PlaySnapshot>,
+
+    /// Предыдущее состояние каждого лифта — для детекта прибытия и ding.
+    elevator_prev_state: HashMap<Entity, ElevatorState>,
 }
 
 impl<G: Game> Drop for App<G> {
     fn drop(&mut self) {
-        let s = self.editor.state.collect_settings(
+        let mut s = self.editor.state.collect_settings(
             self.ui_state.show_renderer_panel,
             self.ui_state.show_stats_panel,
             self.ui_state.show_hierarchy_panel,
@@ -112,6 +150,9 @@ impl<G: Game> Drop for App<G> {
             self.ui_state.left_panel_width,
             self.ui_state.right_panel_width,
         );
+        // Сохраняем текущие графические настройки. При следующем
+        // запуске они будут применены в `run()` сразу после создания App.
+        s.postfx = self.game.postfx();
         if let Err(e) = s.save("editor.ron") {
             log::warn!("Failed to save editor settings: {}", e);
         } else {
@@ -143,6 +184,130 @@ impl<G: Game> App<G> {
         cam.target = t;
         cam.distance = r;
         log::info!("Camera preset {} applied", preset);
+    }
+
+    // ============================================================
+    // Play-in-Editor: захват и восстановление
+    // ============================================================
+
+    /// Захватить полный снапшот перед входом в Play.
+    ///
+    /// Вызывается ПОКА мир ещё в исходном состоянии. Вызывает
+    /// `game.on_play_enter`, чтобы получить user-state (RPG, счётчики).
+    fn capture_play_snapshot(&mut self) -> PlaySnapshot {
+        let scene_ron = crate::scene::save_scene_to_string(&self.world, None)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to snapshot scene for Play: {}", e);
+                String::new()
+            });
+
+        // Снимаем поля камеры в локальные копии ДО вызова on_play_enter.
+        // `self.game.camera()` отдаёт `&self.game` (immutable), а
+        // `on_play_enter` требует `&mut self.game`. Если держать `cam`
+        // живым до литерала PlaySnapshot — borrow-конфликт.
+        let cam = self.game.camera();
+        let camera_mode = cam.mode;
+        let camera_pos = cam.first_person_pos;
+        let camera_yaw = cam.yaw;
+        let camera_pitch = cam.pitch;
+        let camera_target = cam.target;
+        let camera_distance = cam.distance;
+
+        let game_state = self.game.on_play_enter(&self.world);
+
+        PlaySnapshot {
+            scene_ron,
+            saved_position: self.editor.state.play.saved_position,
+            selection: self.editor.state.selected.clone(),
+
+            camera_mode,
+            camera_pos,
+            camera_yaw,
+            camera_pitch,
+            camera_target,
+            camera_distance,
+
+            game_state,
+        }
+    }
+
+    /// Восстановить мир, камеру, selection, RPG-состояние.
+    ///
+    /// `World` полностью заменяется на новый, восстановленный из RON.
+    /// Selection ремапится через id_map (старые entity_id → новые).
+    fn restore_play_snapshot(&mut self, snap: PlaySnapshot) {
+        if snap.scene_ron.is_empty() {
+            log::error!("Play-in-Editor: empty snapshot, skipping restore");
+            return;
+        }
+
+        match crate::scene::load_scene_from_str_full(&snap.scene_ron) {
+            Ok((mut new_world, _spawn, id_map)) => {
+                new_world.sync_next_id();
+                self.world = new_world;
+
+                // Remap selection: старое id → новое id.
+                self.editor.state.selected = snap
+                    .selection
+                    .iter()
+                    .filter_map(|old| id_map.get(old).copied())
+                    .collect();
+                log::info!(
+                    "Play-in-Editor: world restored ({} entities, {} selected remapped)",
+                    self.world.len(),
+                    self.editor.state.selected.len()
+                );
+            }
+            Err(e) => {
+                log::error!("Failed to restore world after Play: {}", e);
+            }
+        }
+
+        // Camera state.
+        let cam = self.game.camera_mut();
+        cam.mode = snap.camera_mode;
+        cam.first_person_pos = snap.camera_pos;
+        cam.yaw = snap.camera_yaw;
+        cam.pitch = snap.camera_pitch;
+        cam.target = snap.camera_target;
+        cam.distance = snap.camera_distance;
+
+        // Editor play state.
+        self.editor.state.play.saved_position = snap.saved_position;
+
+        // Game user state.
+        if let Some(state) = snap.game_state {
+            self.game.on_play_exit(state);
+        }
+    }
+
+    // ============================================================
+    // Elevator ding
+    // ============================================================
+
+    fn update_elevator_ding(&mut self) {
+        let states: Vec<(Entity, ElevatorState)> = self
+            .world
+            .query::<Elevator>()
+            .map(|(e, el)| (e, el.state))
+            .collect();
+
+        for (e, state) in states {
+            let prev = self.elevator_prev_state.get(&e).copied();
+            if matches!(
+                (prev, state),
+                (Some(ElevatorState::Moving), ElevatorState::DoorsOpening)
+            ) {
+                if let Some(audio) = &self.audio {
+                    audio.play("ding");
+                }
+            }
+            self.elevator_prev_state.insert(e, state);
+        }
+
+        let live: std::collections::HashSet<Entity> =
+            self.world.query::<Elevator>().map(|(e, _)| e).collect();
+        self.elevator_prev_state.retain(|k, _| live.contains(k));
     }
 
     fn update_player(&mut self, dt: f32) {
@@ -181,6 +346,7 @@ impl<G: Game> App<G> {
         let gun_range = self.editor.state.play.gun_range;
         let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
+        let push_strength = self.editor.state.play.push_strength;
 
         let f = self.game.camera().forward();
         let fwd_xz = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
@@ -217,8 +383,26 @@ impl<G: Game> App<G> {
             radius: player_radius,
             height: player_height,
         };
-        let delta = motion + Vec3::new(0.0, dy, 0.0);
-        let (new_feet, landed) = collision::resolve_movement(
+
+        let support_delta_y = {
+            let mut dy_extra = 0.0_f32;
+            if let Some(support) = collision::find_support_entity(
+                &self.world,
+                &self.renderer,
+                feet,
+                &pcap,
+            ) {
+                if let Some(rb) = self.world.get::<crate::physics::RigidBody>(support) {
+                    if rb.body_type == BodyType::Kinematic {
+                        dy_extra = rb.velocity.y * dt;
+                    }
+                }
+            }
+            dy_extra
+        };
+
+        let delta = motion + Vec3::new(0.0, dy + support_delta_y, 0.0);
+        let (new_feet, landed, _support) = collision::resolve_movement(
             &self.world,
             &self.renderer,
             feet,
@@ -226,6 +410,25 @@ impl<G: Game> App<G> {
             &pcap,
             floor_y,
         );
+
+        // ============================================================
+        // Step 2: player pushes dynamic bodies it walked into.
+        //
+        // `new_feet - feet` — фактическое смещение (после коллизий),
+        // оно может быть меньше `delta` если что-то заблокировало движение.
+        // Передаём именно фактическое — иначе игрок «упирается в стену»,
+        // но всё равно толкает ящик на полную скорость.
+        // ============================================================
+        if push_strength > 0.0 {
+            crate::engine::character::push_dynamic_bodies(
+                &mut self.world,
+                new_feet,
+                new_feet - feet,
+                &pcap,
+                dt,
+                push_strength,
+            );
+        }
 
         if landed {
             vvel = 0.0;
@@ -274,8 +477,6 @@ impl<G: Game> App<G> {
             dir,
         );
 
-        // Highlight используется DemoGame-хуком `rpg::try_interact` для
-        // подсветки цели. Игровая логика взаимодействия — на стороне Game.
         let interact_dist = self.editor.state.play.interact_distance;
         let new_highlight = aim_hit.as_ref().and_then(|(e, d)| {
             if *d <= interact_dist { Some(*e) } else { None }
@@ -342,12 +543,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // ============================================================
-        // ВАЖНО: обработка клавиши `E` (Interactable) перенесена
-        // в `Game::update`. App только поддерживает `play.highlight`,
-        // чтобы UI знал, что подсветить.
-        // ============================================================
-
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
 
         // === Triggers ===
@@ -377,6 +572,23 @@ impl<G: Game> App<G> {
                     TriggerAction::Despawn => {
                         self.world.despawn(e);
                         continue;
+                    }
+                    TriggerAction::CallElevator { elevator, floor_idx } => {
+                        if let Some(el) = self.world.get_mut::<Elevator>(*elevator) {
+                            el.call(*floor_idx as usize);
+                        }
+                    }
+                    TriggerAction::PlaySound(name) => {
+                        if let Some(audio) = &self.audio {
+                            let n: &'static str = match name.as_str() {
+                                "shot" => "shot",
+                                "explosion" => "explosion",
+                                "pickup" => "pickup",
+                                "ding" => "ding",
+                                _ => "pickup",
+                            };
+                            audio.play(n);
+                        }
                     }
                 }
                 t.fired = true;
@@ -507,7 +719,9 @@ impl<G: Game> App<G> {
         }
 
         let floor_y = self.editor.state.play.floor_y;
-        let mut hits: Vec<(Vec3, Option<Entity>, f32)> = Vec::new();
+
+        // (hit_point, target_entity, damage, projectile_velocity_dir)
+        let mut hits: Vec<(Vec3, Option<Entity>, f32, Vec3)> = Vec::new();
         let mut alive: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
 
         for mut p in self.projectiles.drain(..) {
@@ -519,9 +733,11 @@ impl<G: Game> App<G> {
             let prev = p.position;
             p.position += p.velocity * dt;
 
+            let vel_dir = p.velocity.normalize_or_zero();
+
             if p.position.y <= floor_y {
                 let pt = Vec3::new(p.position.x, floor_y, p.position.z);
-                hits.push((pt, None, p.damage));
+                hits.push((pt, None, p.damage, vel_dir));
                 continue;
             }
 
@@ -538,7 +754,7 @@ impl<G: Game> App<G> {
             ) {
                 if t <= seg_len {
                     let hit_point = prev + dir * t;
-                    hits.push((hit_point, Some(e), p.damage));
+                    hits.push((hit_point, Some(e), p.damage, vel_dir));
                     continue;
                 }
             }
@@ -548,10 +764,20 @@ impl<G: Game> App<G> {
 
         self.projectiles = alive;
 
-        for (point, target, dmg) in hits {
+        for (point, target, dmg, vel_dir) in hits {
             self.spawn_burst(point, &particles::sparks(Vec3::Y));
 
             if let Some(e) = target {
+                // Step 2: динамическое тело получает импульс от попадания.
+                // Импульс ≈ dmg * 0.05, направление — вдоль снаряда.
+                // Величина подобрана «на глаз»: пистолетный выстрел (25 dmg)
+                // толкает ящик массой 1 кг на ~1.25 м/с.
+                if let Some(rb) = self.world.get_mut::<crate::physics::RigidBody>(e) {
+                    if rb.body_type == BodyType::Dynamic {
+                        rb.apply_impulse(vel_dir * dmg * 0.05);
+                    }
+                }
+
                 let mut died = false;
                 if let Some(h) = self.world.get_mut::<Health>(e) {
                     h.current -= dmg;
@@ -589,9 +815,6 @@ impl<G: Game> App<G> {
             self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
 
-        // Escape в Play-режиме — выход из Play. Не срабатывает, если
-        // открыт command palette или egui сейчас использует клавиатуру
-        // (иначе закроем оба).
         let egui_wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
         if self.input.key_pressed(KeyCode::Escape)
             && self.editor.state.play.active
@@ -645,6 +868,25 @@ impl<G: Game> App<G> {
             self.input.editor_flying = want_fly;
         }
 
+        // 1. Game update — сглаженный шаг.
+        let continue_running = self.game.update(
+            &mut self.world,
+            &self.input,
+            &mut self.renderer,
+            dt_smooth,
+        );
+        if !continue_running {
+            elwt.exit();
+            return;
+        }
+
+        // 2. Ding при прибытии лифта.
+        self.update_elevator_ding();
+
+        // 3. Physics.
+        self.physics.step(&mut self.world, dt_smooth);
+
+        // 4. Camera / player.
         if self.editor.state.play.active {
             self.input.editor_captured = false;
             self.update_player(dt_smooth);
@@ -678,16 +920,6 @@ impl<G: Game> App<G> {
         } else {
             self.editor.state.palette.preview_pos = None;
         }
-
-        let continue_running = self
-            .game
-            .update(&mut self.world, &self.input, &mut self.renderer, dt);
-        if !continue_running {
-            elwt.exit();
-            return;
-        }
-
-        self.physics.step(&mut self.world, dt_smooth);
 
         self.update_particles(dt);
         self.update_projectiles(dt);
@@ -1008,8 +1240,6 @@ impl<G: Game> App<G> {
             pixels_per_point,
         };
 
-        // time передаётся в renderer, чтобы skybox_time и temporal SSAO
-        // использовали реальный elapsed, а не += 1/60.
         let res = self.renderer.render(
             self.game.camera(),
             &draws,
@@ -1140,6 +1370,12 @@ impl<G: Game> App<G> {
             if let Some(t) = self.world.get::<TextureTiling>(*e).copied() {
                 self.world.insert(new_e, t);
             }
+            if let Some(el) = self.world.get::<Elevator>(*e).cloned() {
+                self.world.insert(new_e, el);
+            }
+            if let Some(sd) = self.world.get::<SlidingDoor>(*e).copied() {
+                self.world.insert(new_e, sd);
+            }
             if let Some(rb) = self.world.get::<crate::physics::RigidBody>(*e).copied() {
                 self.world.insert(new_e, rb);
             }
@@ -1216,11 +1452,19 @@ impl<G: Game> App<G> {
 
         match action {
             EditorAction::TogglePlay => {
-                let play = &mut self.editor.state.play;
-                play.active = !play.active;
-                self.input.play_mode = play.active;
+                let was_active = self.editor.state.play.active;
 
-                if play.active {
+                if !was_active {
+                    // ============================================================
+                    // ENTER PLAY: сначала снимаем снапшот, потом активируем.
+                    // Снапшот захватывает мир ДО того как play его изменит.
+                    // ============================================================
+                    self.play_snapshot = Some(self.capture_play_snapshot());
+
+                    let play = &mut self.editor.state.play;
+                    play.active = true;
+                    self.input.play_mode = true;
+
                     play.vertical_velocity = 0.0;
                     play.on_ground = true;
                     play.bob_distance = 0.0;
@@ -1256,16 +1500,39 @@ impl<G: Game> App<G> {
                         spawn.x, spawn.y, spawn.z
                     );
                 } else {
-                    play.saved_position = self.game.camera().first_person_pos;
-                    self.game.camera_mut().exit_fps();
+                    // ============================================================
+                    // EXIT PLAY: сначала восстанавливаем мир, потом
+                    // сбрасываем runtime-состояние play.
+                    // ============================================================
 
+                    self.game.camera_mut().exit_fps();
                     let _ = self.window.set_cursor_grab(CursorGrabMode::None);
                     self.window.set_cursor_visible(true);
+
+                    if let Some(snap) = self.play_snapshot.take() {
+                        self.restore_play_snapshot(snap);
+                    }
+
+                    let play = &mut self.editor.state.play;
+                    play.active = false;
+                    self.input.play_mode = false;
+
+                    play.vertical_velocity = 0.0;
+                    play.on_ground = true;
+                    play.bob_distance = 0.0;
+                    play.bob_current = 0.0;
+                    play.health = play.max_health;
+                    play.ammo = play.max_ammo;
+                    play.fire_cooldown = 0.0;
+                    play.interact_cooldown = 0.0;
+                    play.highlight = None;
+                    play.crouching = false;
+                    play.current_eye_height = play.eye_height;
 
                     self.particles.clear();
                     self.projectiles.clear();
 
-                    log::info!("Exited play mode");
+                    log::info!("Exited play mode (world restored from snapshot)");
                 }
             }
             EditorAction::SpawnPlayerHere => {
@@ -1809,7 +2076,14 @@ pub fn run<G: Game>(mut game: G) {
         projectiles: Vec::new(),
         audio: AudioSystem::new(),
         physics: PhysicsWorld::default(),
+        play_snapshot: None,
+        elevator_prev_state: HashMap::new(),
     };
+
+    // Применяем сохранённые графические настройки к игре.
+    // `EditorState::new()` уже загрузил `editor.ron` в `settings.postfx`.
+    let initial_postfx = app.editor.state.settings.postfx;
+    app.game.apply_postfx(initial_postfx);
 
     event_loop
         .run(move |event, elwt| {

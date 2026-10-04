@@ -16,11 +16,14 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
 pub const SHADOW_SLOT_COUNT: u64 = 9;
+
+pub const TAA_JITTER_SEQUENCE: u32 = 8;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -45,6 +48,8 @@ pub struct CameraUniform {
     pub inv_view: [[f32; 4]; 4],
     pub camera_pos: [f32; 4],
     pub near_far: [f32; 4],
+    pub prev_view_proj: [[f32; 4]; 4],
+    pub screen_size: [f32; 4],
 }
 
 #[repr(C)]
@@ -128,6 +133,14 @@ pub struct SsaoUniform {
     pub proj_scale: [f32; 4],
     pub params: [f32; 4],
     pub time: [f32; 4],
+    pub view: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct TaaParams {
+    pub values: [f32; 4],
+    pub screen: [f32; 4],
 }
 
 #[repr(C)]
@@ -172,7 +185,11 @@ pub struct MeshDraw {
     pub double_sided: bool,
 }
 
-#[derive(Copy, Clone)]
+/// Настройки постобработки и графики.
+///
+/// Сохраняются в `editor.ron` (см. `EditorSettings::postfx`) и применяются
+/// при старте игры. Редактируются в панели Renderer в редакторе.
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostFx {
     pub bloom_threshold: f32,
     pub bloom_strength: f32,
@@ -195,11 +212,10 @@ pub struct PostFx {
     pub shadow_normal_bias: f32,
     pub shadow_fade_start: f32,
     pub shadow_fade_end: f32,
-    /// Множитель дистанции LOD. 1.0 — стандарт; 2.0 — LOD переключается
-    /// позже (выше качество, ниже FPS).
     pub lod_bias: f32,
-    /// Дистанции LOD. На каждом уровне — свой порог.
     pub lod_distances: [f32; 4],
+    pub taa_strength: f32,
+    pub taa_sharpening: f32,
 }
 
 impl Default for PostFx {
@@ -228,6 +244,8 @@ impl Default for PostFx {
             shadow_fade_end: 200.0,
             lod_bias: 1.0,
             lod_distances: [30.0, 80.0, 200.0, 500.0],
+            taa_strength: 1.0,
+            taa_sharpening: 0.1,
         }
     }
 }

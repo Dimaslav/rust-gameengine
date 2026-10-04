@@ -21,14 +21,15 @@ pub struct PlayState {
     pub look_sensitivity: f32,
 
     // === Crouch (приседание) ===
-    /// Высота глаз при приседании.
     pub crouch_height: f32,
-    /// Множитель скорости при приседании.
     pub crouch_speed_mult: f32,
-    /// Текущая интерполированная высота глаз (runtime).
     pub current_eye_height: f32,
-    /// Нажат ли Ctrl в текущем кадре (runtime).
     pub crouching: bool,
+
+    // === Character controller (Step 2) ===
+    /// Множитель скорости, передаваемой dynamic-телам при контакте.
+    /// 0.0 = push отключён, 1.0 = тела едут со скоростью игрока.
+    pub push_strength: f32,
 
     // === Бой / HUD ===
     pub health: f32,
@@ -37,17 +38,13 @@ pub struct PlayState {
     pub max_ammo: u32,
     pub damage_per_shot: f32,
     pub gun_range: f32,
-    /// Скорость пули в м/с. 0 → hit-scan (мгновенно).
     pub bullet_speed: f32,
-    /// Текущий cooldown стрельбы в секундах.
     pub fire_cooldown: f32,
     pub fire_cooldown_max: f32,
-    /// Кулдаун E, чтобы не сработал несколько раз подряд.
     pub interact_cooldown: f32,
     pub interact_cooldown_max: f32,
     pub interact_distance: f32,
 
-    /// Entity под прицелом (для подсветки и E).
     pub highlight: Option<Entity>,
 
     // === Head bob ===
@@ -85,6 +82,8 @@ impl Default for PlayState {
             crouch_speed_mult: 0.5,
             current_eye_height: 1.7,
             crouching: false,
+
+            push_strength: 1.0,
 
             health: 100.0,
             max_health: 100.0,

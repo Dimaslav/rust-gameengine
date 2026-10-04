@@ -2,9 +2,9 @@ pub mod components;
 pub mod rpg;
 
 pub use components::{
-    AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name, Parent,
-    SkeletonHandle, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction, Velocity,
-    Visible,
+    AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
+    MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
+    Transform, Trigger, TriggerAction, Velocity, Visible,
 };
 
 use glam::Mat4;

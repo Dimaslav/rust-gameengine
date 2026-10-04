@@ -5,6 +5,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::render::PostFx;
+
 use super::camera_bookmarks::CameraBookmarks;
 
 const MAX_RECENT: usize = 8;
@@ -40,6 +42,11 @@ pub struct EditorSettings {
     /// Закладки камеры (9 слотов).
     #[serde(default)]
     pub camera_bookmarks: CameraBookmarks,
+
+    /// Графические настройки (PostFx). Сохраняются между запусками.
+    /// При отсутствии в старом `editor.ron` — берётся `PostFx::default()`.
+    #[serde(default)]
+    pub postfx: PostFx,
 }
 
 impl Default for EditorSettings {
@@ -62,6 +69,7 @@ impl Default for EditorSettings {
             palette_grid_step: 0.5,
             recent_scenes: Vec::new(),
             camera_bookmarks: CameraBookmarks::new(),
+            postfx: PostFx::default(),
         }
     }
 }
