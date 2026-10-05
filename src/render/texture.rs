@@ -6,6 +6,11 @@ pub struct Texture {
     pub sampler: wgpu::Sampler,
     pub bind_group: wgpu::BindGroup,
     pub size: (u32, u32),
+    /// Путь к файлу-источнику, если текстура загружена с диска.
+    /// `None` для процедурных текстур (например, `checker`), потому
+    /// что их не нужно перезагружать при load сцены — они создаются
+    /// при старте движка.
+    pub source_path: Option<String>,
 }
 
 impl Texture {
@@ -28,7 +33,12 @@ impl Texture {
         path: &str,
     ) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        Self::from_bytes(device, queue, layout, &bytes, path)
+        let img = image::load_from_memory(&bytes)?.to_rgba8();
+        let (width, height) = img.dimensions();
+        let mut tex = Self::from_rgba(device, queue, layout, &img, width, height, path)?;
+        // Запоминаем путь — понадобится для сериализации сцены.
+        tex.source_path = Some(path.to_string());
+        Ok(tex)
     }
 
     /// sRGB-текстура (base color, emissive). Аппаратное декодирование в linear.
@@ -90,8 +100,6 @@ impl Texture {
             view_formats: &[],
         });
 
-        // wgpu 25: `ImageCopyTexture` → `TexelCopyTextureInfo`,
-        //          `ImageDataLayout` → `TexelCopyBufferLayout`.
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -109,14 +117,19 @@ impl Texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // ИСПРАВЛЕНО: был Nearest/Nearest/Nearest, из-за чего decals
+        // (единственный потребитель `tex.sampler` напрямую) выглядели
+        // блочно при растяжении. Repeat по U/V — потому что для decals
+        // часто нужен тайлинг; для материалов это неважно, там свой
+        // sampler из SamplerDesc.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("texture_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -141,6 +154,7 @@ impl Texture {
             sampler,
             bind_group,
             size: (width, height),
+            source_path: None,
         })
     }
 

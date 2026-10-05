@@ -1,11 +1,15 @@
 pub mod components;
+pub mod decals;
+pub mod lights;
 pub mod rpg;
 
+pub use decals::Decal;
 pub use components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
 };
+pub use lights::{DirectionalLight, PointLight};
 
 use glam::Mat4;
 use crate::ecs::{Entity, World};

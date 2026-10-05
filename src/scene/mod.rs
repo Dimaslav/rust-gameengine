@@ -14,6 +14,9 @@ pub use prefab::{
     prefab_from_selection, save_prefab_to_file, PrefabFile,
 };
 pub use serialize::{
-    load_scene_from_file, load_scene_from_str, load_scene_from_str_full, save_scene_to_file,
-    save_scene_to_string, SceneFile,
+    load_scene_from_file, load_scene_from_str, load_scene_from_str_full,
+    load_scene_with_assets_from_file, load_scene_with_assets_from_str,
+    save_scene_to_file, save_scene_to_string,
+    save_scene_with_assets_to_file, save_scene_with_assets_to_string,
+    SceneFile,
 };

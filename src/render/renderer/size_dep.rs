@@ -19,8 +19,88 @@ pub struct BloomChain {
     pub downsample_bgs: Vec<wgpu::BindGroup>,
     pub upsample_bgs: Vec<wgpu::BindGroup>,
     pub prefilter_uniform: wgpu::Buffer,
-    pub _downsample_uniforms: Vec<wgpu::Buffer>,
-    pub _upsample_uniforms: Vec<wgpu::Buffer>,
+    pub downsample_uniforms: Vec<wgpu::Buffer>,
+    pub upsample_uniforms: Vec<wgpu::Buffer>,
+    /// Размер экрана на момент построения цепочки (src для prefilter).
+    pub screen_size: (u32, u32),
+}
+
+impl BloomChain {
+    /// Обновить threshold / knee / radius во всех uniform'ах цепочки,
+    /// сохранив texel-размеры каждого уровня.
+    ///
+    /// Вызывается каждый кадр из `Renderer::render`. Раньше
+    /// downsample/upsample-uniform'ы были `_`-полями и никогда не
+    /// обновлялись — ползунок `bloom_radius` менял только prefilter,
+    /// то есть на итоговый ореол не влиял.
+    pub fn update_params(
+        &self,
+        queue: &wgpu::Queue,
+        threshold: f32,
+        knee: f32,
+        radius: f32,
+    ) {
+        let knee = knee.max(1e-4);
+        let radius = radius.max(0.5);
+
+        // --- Prefilter: src = screen, dst = mip0.
+        let src = self.screen_size;
+        let dst = self.mips[0].size;
+        let data = BloomParams {
+            texel: [
+                1.0 / src.0.max(1) as f32,
+                1.0 / src.1.max(1) as f32,
+                1.0 / dst.0.max(1) as f32,
+                1.0 / dst.1.max(1) as f32,
+            ],
+            params: [threshold, knee, radius, 0.0],
+        };
+        queue.write_buffer(&self.prefilter_uniform, 0, bytemuck::bytes_of(&data));
+
+        // --- Downsample: src = mips[i], dst = mips[i + 1].
+        for i in 0..self.downsample_uniforms.len() {
+            let src = self.mips[i].size;
+            let dst = self.mips[i + 1].size;
+            let data = BloomParams {
+                texel: [
+                    1.0 / src.0.max(1) as f32,
+                    1.0 / src.1.max(1) as f32,
+                    1.0 / dst.0.max(1) as f32,
+                    1.0 / dst.1.max(1) as f32,
+                ],
+                params: [threshold, knee, radius, 0.0],
+            };
+            queue.write_buffer(
+                &self.downsample_uniforms[i],
+                0,
+                bytemuck::bytes_of(&data),
+            );
+        }
+
+        // --- Upsample.
+        // В build-цикле: `for src_level in (1..BLOOM_MIP_COUNT).rev()`.
+        // upsample_uniforms[0] соответствует src_level = BLOOM_MIP_COUNT - 1,
+        // upsample_uniforms[last] — src_level = 1.
+        for i in 0..self.upsample_uniforms.len() {
+            let src_level = BLOOM_MIP_COUNT - 1 - i;
+            let src = self.mips[src_level].size;
+            let dst = self.mips[src_level - 1].size;
+            let data = BloomParams {
+                texel: [
+                    1.0 / src.0.max(1) as f32,
+                    1.0 / src.1.max(1) as f32,
+                    1.0 / dst.0.max(1) as f32,
+                    1.0 / dst.1.max(1) as f32,
+                ],
+                params: [threshold, knee, radius, 0.0],
+            };
+            queue.write_buffer(
+                &self.upsample_uniforms[i],
+                0,
+                bytemuck::bytes_of(&data),
+            );
+        }
+    }
 }
 
 pub struct SizeDependent {
@@ -41,7 +121,7 @@ pub struct SizeDependent {
     pub _volumetric_fog_tex: wgpu::Texture,
     /// Bind group для compute-прохода.
     pub volumetric_compute_bg: wgpu::BindGroup,
-    /// Bind group для composite-прохода.
+    /// Bind group для composite-прохода (fog + SSR).
     pub volumetric_composite_bg: wgpu::BindGroup,
 
     pub bloom_chain: BloomChain,
@@ -214,7 +294,6 @@ pub fn build_size_dependent(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    // TAA теперь читает hdr_fog (с fog), не hdr.
                     resource: wgpu::BindingResource::TextureView(&hdr_fog_view),
                 },
                 wgpu::BindGroupEntry {
@@ -249,8 +328,8 @@ pub fn build_size_dependent(
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
 
     // ============================================================
-    // Volumetric composite bind group (после создания hdr_fog,
-    // gbuffer_depth_view).
+    // Volumetric composite bind group (fog + SSR).
+    // SSR читает normal / albedo / emissive / camera.
     // ============================================================
     let volumetric_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("volumetric_composite_bg"),
@@ -275,6 +354,23 @@ pub fn build_size_dependent(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: volumetric_uniform.as_entire_binding(),
+            },
+            // SSR-источники:
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_albedo_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_emissive_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: camera_buffer.as_entire_binding(),
             },
         ],
     });
@@ -717,8 +813,9 @@ fn build_bloom_chain(
         downsample_bgs,
         upsample_bgs,
         prefilter_uniform,
-        _downsample_uniforms: downsample_uniforms,
-        _upsample_uniforms: upsample_uniforms,
+        downsample_uniforms,
+        upsample_uniforms,
+        screen_size: (screen_w, screen_h),
     }
 }
 

@@ -2,9 +2,10 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::ecs::World;
+use crate::render::Renderer;
 
 const MAX_UNDO: usize = 50;
-/// Cooldown защищает от шторма правок (drag). Но если пользователь
+/// Cooldown защищает от шторма правок (drag). Если пользователь
 /// явно вызвал операцию (AddCube, Delete) — она идёт через push_forced.
 const PUSH_COOLDOWN_MS: u128 = 300;
 
@@ -26,31 +27,28 @@ impl UndoStack {
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
 
-    /// Публичная проверка: можно ли сейчас положить снапшот
-    /// (не истёк ли cooldown).
-    ///
-    /// Используется в `App::redraw` — чтобы решить, делать ли
-    /// дорогостоящий snapshot ДО egui. Если cooldown активен,
-    /// снимок заведомо не будет принят `push`'ем, и тратить
-    /// время на сериализацию сцены бессмысленно.
+    /// Проверка, истёк ли cooldown — используется в `App::redraw`,
+    /// чтобы решить, снимать ли дорогой snapshot до egui.
     pub fn can_push_now(&self) -> bool {
         self.last_push.elapsed().as_millis() >= PUSH_COOLDOWN_MS
     }
 
-    /// Cooldown'ится (для drag/inspector). Возвращает false, если снапшот
-    /// **не** был положен.
-    pub fn push(&mut self, world: &World) -> bool {
+    /// Cooldown'ится (для drag/inspector). Возвращает false, если
+    /// снапшот **не** был положен.
+    ///
+    /// Сохраняет и `World`, и материалы/текстуры из `Renderer` —
+    /// чтобы Ctrl+Z откатывал всё сразу.
+    pub fn push(&mut self, world: &World, renderer: &Renderer) -> bool {
         if !self.can_push_now() {
             return false;
         }
-        self.push_forced(world)
+        self.push_forced(world, renderer)
     }
 
-    /// Принудительно положить снапшот текущего `world` без учёта
-    /// cooldown. Используется для операций, которые пользователь
-    /// вызвал явно (AddCube, Delete, Duplicate, Paste, ...).
-    pub fn push_forced(&mut self, world: &World) -> bool {
-        match crate::scene::save_scene_to_string(world, None) {
+    /// Принудительный снапшот без cooldown. Для явных операций:
+    /// AddCube, Delete, Duplicate, Paste, MakeUnique, …
+    pub fn push_forced(&mut self, world: &World, renderer: &Renderer) -> bool {
+        match crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
             Ok(s) => {
                 self.push_snapshot_internal(s);
                 true
@@ -62,10 +60,7 @@ impl UndoStack {
         }
     }
 
-    /// Положить уже сериализованный снапшот. Идентичен `push()`,
-    /// но не сериализует — используется для снимков, взятых РАНЕЕ
-    /// (например, до UI в `App::redraw`). Возвращает `false`,
-    /// если cooldown активен.
+    /// Готовый снапшот (например, снятый до UI в `App::redraw`).
     pub fn push_snapshot(&mut self, snapshot: String) -> bool {
         if !self.can_push_now() {
             return false;
@@ -74,8 +69,6 @@ impl UndoStack {
         true
     }
 
-    /// Общая запись в стек. Без проверок cooldown — вызывающий
-    /// обязан проверить сам.
     fn push_snapshot_internal(&mut self, snapshot: String) {
         if self.undo.len() >= MAX_UNDO {
             self.undo.pop_front();
@@ -85,12 +78,17 @@ impl UndoStack {
         self.last_push = Instant::now();
     }
 
-    pub fn undo(&mut self, world: &World) -> Option<World> {
+    /// Восстановить предыдущее состояние. Возвращает загруженный World
+    /// и синхронно восстанавливает материалы в `Renderer`.
+    pub fn undo(&mut self, world: &World, renderer: &mut Renderer) -> Option<World> {
         let prev = self.undo.pop_back()?;
-        if let Ok(current) = crate::scene::save_scene_to_string(world, None) {
+
+        // Текущее (с материалами) — в redo.
+        if let Ok(current) = crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
             self.redo.push(current);
         }
-        match crate::scene::load_scene_from_str(&prev) {
+
+        match crate::scene::load_scene_with_assets_from_str(&prev, renderer) {
             Ok((mut w, _spawn)) => {
                 w.sync_next_id();
                 Some(w)
@@ -102,15 +100,17 @@ impl UndoStack {
         }
     }
 
-    pub fn redo(&mut self, world: &World) -> Option<World> {
+    pub fn redo(&mut self, world: &World, renderer: &mut Renderer) -> Option<World> {
         let next = self.redo.pop()?;
-        if let Ok(current) = crate::scene::save_scene_to_string(world, None) {
+
+        if let Ok(current) = crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
             if self.undo.len() >= MAX_UNDO {
                 self.undo.pop_front();
             }
             self.undo.push_back(current);
         }
-        match crate::scene::load_scene_from_str(&next) {
+
+        match crate::scene::load_scene_with_assets_from_str(&next, renderer) {
             Ok((mut w, _spawn)) => {
                 w.sync_next_id();
                 Some(w)

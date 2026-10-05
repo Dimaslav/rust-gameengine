@@ -1,10 +1,11 @@
 //! Коллизии игрока со сценой.
 //!
 //! Использует компонент `Collider` (Sphere/Aabb/Capsule) вместо AABB
-//! меша. Работает с Parent-цепочкой через `game::world_matrix`.
+//! меша. Это даёт корректные коллизии для стен, дверей, NPC и любых
+//! объектов, у которых меш не совпадает с логикой.
 //!
 //! **Dynamic-тела не блокируют игрока по XZ** — он проходит сквозь их
-//! footprint, а `character::push_dynamic_bodies` затем толкает
+//! footprint, а `character::push_dynamic_bodies` после этого толкает
 //! пересекающиеся тела. По Y dynamic-тела блокируют — можно стоять
 //! на ящике.
 
@@ -15,6 +16,7 @@ use crate::game::components::Visible;
 use crate::physics::{BodyType, Collider, RigidBody};
 
 const CAPSULE_SAMPLES: usize = 8;
+/// Допуск по Y для определения «стоит на поверхности».
 const SUPPORT_TOLERANCE: f32 = 0.15;
 
 #[derive(Clone, Copy)]
@@ -55,6 +57,7 @@ fn capsule_hits_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
     false
 }
 
+/// Мировой AABB для коллайдера сущности.
 fn collider_world_aabb(col: &Collider, world_pos: Vec3, world_scale: Vec3) -> (Vec3, Vec3) {
     match col {
         Collider::Sphere { radius } => {
@@ -74,6 +77,7 @@ fn collider_world_aabb(col: &Collider, world_pos: Vec3, world_scale: Vec3) -> (V
     }
 }
 
+/// Мировая позиция и мировой масштаб сущности (с учётом Parent).
 fn world_pos_scale(world: &World, e: Entity) -> Option<(Vec3, Vec3)> {
     let model = crate::game::world_matrix(world, e);
     let (s, _, t) = model.to_scale_rotation_translation();
@@ -157,6 +161,11 @@ pub fn find_support_entity(
 }
 
 /// Разрешает движение `delta` из `start_feet` с учётом коллизий.
+///
+/// Возвращает `(new_feet, on_ground, support_entity)`.
+///
+/// XZ — с игнорированием dynamic-тел (player passes through, потом толкает).
+/// Y  — со всеми телами (можно стоять на ящике).
 pub fn resolve_movement(
     world: &World,
     start_feet: Vec3,
@@ -186,7 +195,7 @@ pub fn resolve_movement(
     let can_step_up = start_feet.y <= floor_y + 1e-3;
     let step_heights = [0.15_f32, 0.30, 0.45];
 
-    // X — без dynamic.
+    // === X — без dynamic ===
     if delta.x.abs() > 1e-6 {
         let try_pos = pos + Vec3::new(delta.x, 0.0, 0.0);
         if !capsule_hits(world, try_pos, cap) {
@@ -202,7 +211,7 @@ pub fn resolve_movement(
         }
     }
 
-    // Z — без dynamic.
+    // === Z — без dynamic ===
     if delta.z.abs() > 1e-6 {
         let try_pos = pos + Vec3::new(0.0, 0.0, delta.z);
         if !capsule_hits(world, try_pos, cap) {
@@ -218,7 +227,7 @@ pub fn resolve_movement(
         }
     }
 
-    // Y — с dynamic (можно стоять на ящике).
+    // === Y — субшагами, со всеми телами ===
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
         let steps = (delta.y.abs() / max_step).ceil().max(1.0) as i32;

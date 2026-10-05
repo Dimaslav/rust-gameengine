@@ -84,12 +84,24 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// ============================================================
+// Specular BRDF: single-scatter + multi-scatter GGX
+// ============================================================
+
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
     let a2 = a * a;
     let n_dot_h2 = n_dot_h * n_dot_h;
     let denom = n_dot_h2 * (a2 - 1.0) + 1.0;
     return a2 / (PI * denom * denom + 1e-6);
+}
+
+fn multi_scatter_ggx_energy(f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let r = roughness;
+    let a = clamp(1.0 - 0.28 * r * (1.0 - 0.7 * r), 0.0, 1.0);
+    let f_avg = f0 + (vec3<f32>(1.0) - f0) / 21.0;
+    let f_ms = f0 * a / (vec3<f32>(1.0) - f_avg * (1.0 - a) + 1e-4);
+    return f_ms;
 }
 
 fn geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
@@ -114,9 +126,17 @@ fn pbr_light(
     let f = fresnel_schlick(h_dot_v, f0);
     let d = distribution_ggx(n_dot_h, roughness);
     let g = geometry_smith(n_dot_v, n_dot_l, roughness);
-    let specular = (d * g) * f / (4.0 * n_dot_v * n_dot_l + 1e-4);
+
+    let specular_ss = (d * g) * f / (4.0 * n_dot_v * n_dot_l + 1e-4);
+
+    let f_ms = multi_scatter_ggx_energy(f0, roughness);
+    let specular_ms = f_ms * (1.0 - n_dot_v) * (1.0 - roughness);
+
+    let specular = specular_ss + specular_ms;
+
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
+
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
@@ -132,39 +152,198 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
     let n_dot_v = max(dot(n, v), 0.0);
     let brdf = textureSampleLevel(t_brdf_lut, s_env, vec2<f32>(n_dot_v, roughness), 0.0).rg;
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-    return prefiltered * (f0 * brdf.x + brdf.y);
+    let f_ms = multi_scatter_ggx_energy(f0, roughness);
+    let scale = f0 * brdf.x + brdf.y + f_ms * (1.0 - brdf.x - brdf.y);
+    return prefiltered * scale;
 }
 
-fn sample_csm_poisson(world_pos: vec3<f32>, cascade: i32, bias: f32) -> f32 {
+// ============================================================
+// CSM shadows с PCSS (Percentage-Closer Soft Shadows)
+// ============================================================
+//
+// Алгоритм (Fernando 2005):
+//
+//   ФАЗА 1. Blocker search.
+//     Сэмплим фиксированное «окно» (search_radius) в shadow map.
+//     Для каждого сэмпла: если окклюдер ближе к свету, чем наш
+//     фрагмент — накапливаем его depth и считаем.
+//     Получаем avg_blocker_depth.
+//
+//   ФАЗА 2. Penumbra estimation.
+//     Чем дальше blocker от фрагмента (и ближе к свету), тем шире
+//     полутень. Формула:
+//       penumbra = (frag_depth - avg_blocker) / avg_blocker
+//       filter_radius = base_radius * penumbra
+//
+//   ФАЗА 3. PCF с найденным радиусом.
+//     16 сэмплов по спирали (Poisson-like) с переменным шагом.
+//
+// Стоимость: 16 + 16 = 32 сэмпла вместо прежних 12. Качество
+// несравнимо: тени мягко размываются по мере удаления от окклюдера.
+
+const POISSON_16 = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>( 0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870),
+    vec2<f32>( 0.34495938,  0.29387760),
+    vec2<f32>(-0.91588581,  0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543,  0.27676845),
+    vec2<f32>( 0.97484398,  0.75648379),
+    vec2<f32>( 0.44323325, -0.97511554),
+    vec2<f32>( 0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>( 0.79197514,  0.19090188),
+    vec2<f32>(-0.24188840,  0.99706507),
+    vec2<f32>(-0.81409955,  0.91437590),
+    vec2<f32>( 0.19984126,  0.78641367),
+    vec2<f32>( 0.14383161, -0.14100790),
+);
+
+const CSM_SIZE: i32 = 2048;
+const CSM_SIZE_F: f32 = 2048.0;
+
+fn csm_uv_and_depth(
+    world_pos: vec3<f32>,
+    cascade: i32,
+) -> vec3<f32> {
+    // xyz: uv.x, uv.y, linear depth. z = -1 если вне frustum.
     let light_clip = lights.cascade_vp[cascade] * vec4<f32>(world_pos, 1.0);
+    if (light_clip.w < 1e-6) {
+        return vec3<f32>(0.0, 0.0, -1.0);
+    }
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
-    if (ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
-    let depth = ndc.z - bias;
-    let texel = 1.0 / 2048.0;
-    let r = 1.5;
-    let s = texel * r;
-    var shadow = 0.0;
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.326, -0.406) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.840, -0.074) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.696,  0.457) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.203,  0.621) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.962, -0.195) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.473, -0.480) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.519,  0.767) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.185, -0.893) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.507,  0.064) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>( 0.896,  0.412) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.322, -0.933) * s, cascade, depth);
-    shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.792, -0.598) * s, cascade, depth);
-    return shadow / 12.0;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec3<f32>(0.0, 0.0, -1.0);
+    }
+    if (ndc.z < 0.0 || ndc.z > 1.0) {
+        return vec3<f32>(0.0, 0.0, -1.0);
+    }
+    return vec3<f32>(uv.x, uv.y, ndc.z);
+}
+
+// ФАЗА 1. Blocker search в фиксированном окне.
+// Возвращает (avg_blocker_depth, blocker_count).
+//
+// ВАЖНО: `s_csm` — это sampler_comparison. `textureSampleLevel` через
+// него запрещён (нужен reference). Но в blocker search нам НЕ нужно
+// сравнение — нужны сырые depth-значения из shadow map.
+// Поэтому используем textureLoad: работает в пиксельных координатах,
+// без сэмплера вообще.
+fn pcss_blocker_search(
+    uv: vec2<f32>,
+    frag_depth: f32,
+    cascade: i32,
+    texel: f32,
+    search_radius: f32,
+) -> vec2<f32> {
+    var sum: f32 = 0.0;
+    var count: f32 = 0.0;
+
+    let step = texel * search_radius;
+
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) {
+        let offset = POISSON_16[i] * step;
+        let sample_uv = uv + offset;
+
+        // textureLoad работает в целочисленных пиксельных координатах.
+        let pixel = vec2<i32>(sample_uv * CSM_SIZE_F);
+
+        // Границы.
+        if (pixel.x < 0 || pixel.y < 0 || pixel.x >= CSM_SIZE || pixel.y >= CSM_SIZE) {
+            continue;
+        }
+
+        let sample_depth = textureLoad(t_csm, pixel, cascade, 0);
+
+        // Окклюдер — только если он БЛИЖЕ к свету, чем фрагмент
+        // (в shadow map «ближе к свету» = меньше depth).
+        if (sample_depth < frag_depth) {
+            sum += sample_depth;
+            count += 1.0;
+        }
+    }
+
+    if (count < 0.5) {
+        // Никаких окклюдеров — тени нет.
+        return vec2<f32>(0.0, -1.0);
+    }
+    return vec2<f32>(sum / count, count);
+}
+
+// ФАЗА 3. PCF с переменным радиусом.
+// Здесь наоборот — используем textureSampleCompareLevel, потому что
+// sampler_comparison ожидает именно сравнение.
+fn pcss_filter(
+    uv: vec2<f32>,
+    frag_depth: f32,
+    cascade: i32,
+    texel: f32,
+    filter_radius: f32,
+    bias: f32,
+) -> f32 {
+    var shadow: f32 = 0.0;
+    let step = texel * filter_radius;
+
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) {
+        let offset = POISSON_16[i] * step;
+        // textureSampleCompareLevel возвращает 0 (в тени) или 1 (освещён).
+        shadow += textureSampleCompareLevel(
+            t_csm, s_csm,
+            uv + offset,
+            cascade,
+            frag_depth - bias,
+        );
+    }
+    return shadow / 16.0;
+}
+
+fn sample_csm_pcss(
+    world_pos: vec3<f32>,
+    cascade: i32,
+    bias: f32,
+) -> f32 {
+    let uvz = csm_uv_and_depth(world_pos, cascade);
+    if (uvz.z < 0.0) { return 1.0; } // вне frustum — считаем освещённым
+
+    let uv = uvz.xy;
+    let frag_depth = uvz.z;
+
+    let texel: f32 = 1.0 / CSM_SIZE_F;
+
+    // Параметры PCSS.
+    //   search_radius — фиксированное окно поиска блокеров, в текселах.
+    //   filter_min — минимальный радиус фильтра. 1.0 = обычный PCF.
+    //   filter_max — максимальный радиус. Ограничивает «размазывание».
+    let search_radius: f32 = 6.0;
+    let filter_min: f32 = 1.0;
+    let filter_max: f32 = 12.0;
+
+    // ФАЗА 1.
+    let blocker = pcss_blocker_search(uv, frag_depth, cascade, texel, search_radius);
+    if (blocker.y < 0.0) {
+        return 1.0; // нет окклюдеров → нет тени
+    }
+    let avg_blocker_depth = blocker.x;
+
+    // ФАЗА 2. Penumbra estimate.
+    let penumbra = max(frag_depth - avg_blocker_depth, 0.0) / max(avg_blocker_depth, 1e-4);
+    let filter_radius = clamp(
+        filter_min + (filter_max - filter_min) * penumbra,
+        filter_min,
+        filter_max,
+    );
+
+    // ФАЗА 3.
+    return pcss_filter(uv, frag_depth, cascade, texel, filter_radius, bias);
 }
 
 fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let s = lights.shadow_params;
     let base_bias = s.x;
     let normal_bias = s.y;
+
     let ndl = clamp(dot(n, l), 0.0, 1.0);
     let slope = 1.0 - ndl;
     let bias = base_bias * (1.0 + normal_bias * slope);
@@ -173,8 +352,9 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
     if (view_depth > lights.cascade_splits.x) { cascade = 1; }
     if (view_depth > lights.cascade_splits.y) { cascade = 2; }
 
-    var shadow = sample_csm_poisson(world_pos, cascade, bias);
+    var shadow = sample_csm_pcss(world_pos, cascade, bias);
 
+    // Смешивание на границе каскадов (blend zone 15% от диапазона).
     if (cascade < 2) {
         var split_end = lights.cascade_splits.y;
         var split_prev = lights.cascade_splits.x;
@@ -185,19 +365,22 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
         let range = split_end - split_prev;
         let blend_zone = range * 0.15;
         let dist_to_edge = split_end - view_depth;
+
         if (dist_to_edge < blend_zone && dist_to_edge > 0.0) {
             let t = dist_to_edge / blend_zone;
-            let shadow_next = sample_csm_poisson(world_pos, cascade + 1, bias);
+            let shadow_next = sample_csm_pcss(world_pos, cascade + 1, bias);
             shadow = mix(shadow_next, shadow, t);
         }
     }
 
+    // Дальний fade-out (дальше — тени полностью исчезают).
     let fade_start = s.z;
     let fade_end = s.w;
     if (view_depth > fade_start) {
         let fade = clamp((view_depth - fade_start) / max(fade_end - fade_start, 1e-4), 0.0, 1.0);
         shadow = mix(shadow, 1.0, fade);
     }
+
     return shadow;
 }
 
@@ -207,13 +390,16 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
     let to_frag = world_pos - pos;
     let dist = length(to_frag);
     if (dist > far) { return 1.0; }
+
     let dir = to_frag / max(dist, 0.0001);
     let bias = lights.shadow_params.x * 3.0;
     let depth = dist / far - bias;
+
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.99);
     let t1 = normalize(cross(up, dir));
     let t2 = cross(dir, t1);
     let s = far * 2.0 / 1024.0 * 1.5;
+
     var shadow = 0.0;
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 *  0.707 + t2 *  0.707) * s), depth);
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 * -0.707 + t2 *  0.707) * s), depth);
@@ -225,6 +411,10 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir -  t2 * s), depth);
     return shadow / 8.0;
 }
+
+// ============================================================
+// fs_main
+// ============================================================
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
@@ -258,6 +448,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     var direct = vec3<f32>(0.0);
 
+    // Directional lights.
     let dir_count = lights.counts.x;
     for (var i: u32 = 0u; i < dir_count; i = i + 1u) {
         let dir_p = lights.dir_lights[i * 2u];
@@ -268,6 +459,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }
 
+    // Point lights.
     let pt_count = lights.counts.y;
     for (var i: u32 = 0u; i < pt_count; i = i + 1u) {
         let pos_p = lights.point_lights[i * 2u];
@@ -280,6 +472,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let atten = clamp(1.0 - dist / range, 0.0, 1.0);
         let atten2 = atten * atten;
         let radiance = col_p.rgb * col_p.a * atten2;
+
         var shadow = 1.0;
         if (i == 0u) {
             shadow = compute_point_shadow(world_pos, 0u);
@@ -289,6 +482,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     var color = ibl_diff + ibl_spec + direct + emissive;
 
+    // Height fog.
     let fog_density = lights.fog_params.x;
     if (fog_density > 0.0) {
         let dist = length(world_pos - camera.camera_pos.xyz);

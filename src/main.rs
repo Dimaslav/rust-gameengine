@@ -1,11 +1,3 @@
-// Крейт — игра/приложение, не библиотека. Публичные API доступны
-// через `pub use`, но не все используются в рантайме. Часть из них —
-// точки расширения (Material::with_normal_texture, particles::dust_cloud,
-// physics::apply_force и т.д.), которые не должны ломать сборку.
-//
-// `unused_imports` — глушим оптом, потому что `cargo fix` на Windows
-// падает с STATUS_ACCESS_VIOLATION при компиляции crate `windows`.
-// Ручная чистка 26 импортов не стоит времени.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
@@ -23,13 +15,15 @@ use std::collections::HashMap;
 use ecs::{Entity, System, World};
 use engine::{run, Game, Input};
 use game::components::{
-    AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
-    MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
-    Transform, Trigger, TriggerAction, Velocity, Visible,
+    AnimationPlayer, Elevator, ElevatorState, Interactable, MaterialHandle, MeshHandle, Name,
+    Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform, Trigger,
+    TriggerAction, Velocity, Visible,
 };
+use game::decals::Decal;
+use game::lights::{DirectionalLight, PointLight};
 use game::rpg::{self, RpgState};
 use glam::{Quat, Vec3};
-use physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
+use physics::{BodyType, Collider, RigidBody};
 use render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GltfInstance, GpuLight,
     GpuPointLight, InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx,
@@ -203,10 +197,6 @@ impl System for SlidingDoorSystem {
     }
 }
 
-// ============================================================
-// Спавн лифта
-// ============================================================
-
 fn spawn_elevator(
     world: &mut World,
     xz: (f32, f32),
@@ -218,7 +208,6 @@ fn spawn_elevator(
 
     let plat_scale = Vec3::new(3.0, 0.2, 3.0);
 
-    // === Платформа ===
     let plat = world.spawn();
     world.insert(plat, Name("Elevator".into()));
     world.insert(
@@ -240,7 +229,6 @@ fn spawn_elevator(
     el.sensor_radius = 2.0;
     world.insert(plat, el);
 
-    // === Двери ===
     for side in [-1.0_f32, 1.0] {
         let d = world.spawn();
         world.insert(
@@ -265,7 +253,6 @@ fn spawn_elevator(
         world.insert(d, MeshHandle("cube".into()));
         world.insert(d, MaterialHandle("rpg_door".into()));
         world.insert(d, Parent(plat));
-        // Двери получают коллайдер, чтобы блокировать игрока.
         world.insert(d, Collider::aabb(Vec3::splat(0.5)));
 
         let local_slide_distance = 1.4 / plat_scale.x;
@@ -275,7 +262,6 @@ fn spawn_elevator(
         );
     }
 
-    // === Стены шахты ===
     let shaft_height = (top_y - y0) + 6.0;
     let shaft_center_y = (y0 + top_y) * 0.5 + 1.0;
 
@@ -299,7 +285,6 @@ fn spawn_elevator(
         world.insert(w, Collider::aabb(Vec3::splat(0.5)));
     }
 
-    // === Кнопки ===
     for (idx, &y) in floors_y.iter().enumerate() {
         let b = world.spawn();
         world.insert(b, Name(format!("ElevatorButton_{}", idx)));
@@ -335,8 +320,6 @@ fn spawn_elevator(
 struct DemoGame {
     camera: Camera3D,
     systems: Vec<Box<dyn System>>,
-    dir_lights: Vec<GpuLight>,
-    point_lights: Vec<GpuPointLight>,
     postfx: PostFx,
     spawned: bool,
     dragging: bool,
@@ -357,23 +340,6 @@ struct DemoGame {
 
 impl DemoGame {
     fn new() -> Self {
-        // Интенсивности подобраны так, чтобы после ACES-тонмаппинга
-        // сцена не пересвечивалась вместе с IBL. Было (2.5, 12.0) —
-        // солнце + точки выжигали всё в белый.
-        let dir_lights = vec![
-            // Солнце: intensity 1.2 — «дневное, но не выжигающее».
-            GpuLight { direction: [0.4, 1.0, 0.3, 1.2], color: [1.0, 0.98, 0.9, 0.0] },
-            // Мягкий контровой свет.
-            GpuLight { direction: [-0.6, 0.3, -0.7, 0.3], color: [1.0, 0.5, 0.3, 0.0] },
-        ];
-        let point_lights = vec![
-            // Локальные акценты: intensity 4.0 — заметные пятна,
-            // но не «выжигание» всего вокруг.
-            GpuPointLight { position: [0.0, 3.0, 0.0, 18.0], color: [1.0, 0.4, 0.2, 4.0] },
-            GpuPointLight { position: [10.0, 4.0, 10.0, 14.0], color: [0.2, 0.6, 1.0, 3.0] },
-            GpuPointLight { position: [-10.0, 4.0, -10.0, 14.0], color: [0.4, 1.0, 0.4, 3.0] },
-        ];
-
         Self {
             camera: Camera3D::new(16.0 / 9.0),
             systems: vec![
@@ -382,8 +348,6 @@ impl DemoGame {
                 Box::new(ElevatorSystem),
                 Box::new(SlidingDoorSystem),
             ],
-            dir_lights,
-            point_lights,
             postfx: PostFx {
                 bloom_threshold: 1.2,
                 bloom_strength: 0.6,
@@ -410,7 +374,7 @@ impl DemoGame {
                 lod_distances: [30.0, 80.0, 200.0, 500.0],
                 taa_strength: 1.0,
                 taa_sharpening: 0.1,
-                volumetric_density: 0.025,
+                volumetric_density: 0.005,
                 volumetric_scattering: 0.4,
                 volumetric_phase_g: 0.6,
             },
@@ -547,16 +511,59 @@ impl Game for DemoGame {
 
         self.orbit_phase += dt * 0.5;
         let (sp, cp) = self.orbit_phase.sin_cos();
-        self.point_lights[1].position[0] = cp * 12.0;
-        self.point_lights[1].position[2] = sp * 12.0;
-        self.point_lights[2].position[0] = -cp * 12.0;
-        self.point_lights[2].position[2] = -sp * 12.0;
+        let pts: Vec<Entity> = world.query::<PointLight>().map(|(e, _)| e).collect();
+        if pts.len() >= 3 {
+            if let Some(t) = world.get_mut::<Transform>(pts[1]) {
+                t.position.x = cp * 12.0;
+                t.position.z = sp * 12.0;
+            }
+            if let Some(t) = world.get_mut::<Transform>(pts[2]) {
+                t.position.x = -cp * 12.0;
+                t.position.z = -sp * 12.0;
+            }
+        }
 
         if !self.spawned {
             self.spawned = true;
             rpg::spawn_scene(world);
 
+            {
+                let e = world.spawn();
+                world.insert(e, Name("Sun".into()));
+                world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
+                world.insert(e, DirectionalLight::sun());
+            }
+            {
+                let e = world.spawn();
+                world.insert(e, Name("FillLight".into()));
+                world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
+                world.insert(e, DirectionalLight::fill());
+            }
+            for (i, (pos, color, intensity, range)) in [
+                ([0.0_f32, 3.0, 0.0], [1.0_f32, 0.4, 0.2], 4.0_f32, 18.0_f32),
+                ([10.0, 4.0, 10.0], [0.2, 0.6, 1.0], 3.0, 14.0),
+                ([-10.0, 4.0, -10.0], [0.4, 1.0, 0.4], 3.0, 14.0),
+            ].iter().enumerate() {
+                let e = world.spawn();
+                world.insert(e, Name(format!("PointLight_{}", i)));
+                world.insert(e, Transform::at(Vec3::from_array(*pos)));
+                world.insert(e, PointLight::new(*color, *intensity, *range));
+            }
+
             spawn_elevator(world, (8.0, 8.0), vec![0.0, 3.0, 6.0, 9.0], 2.5);
+
+            // Пример decals: красные пятна на полу.
+            for i in 0..5 {
+                let e = world.spawn();
+                let x = (i as f32 - 2.0) * 3.0;
+                world.insert(e, Name(format!("BloodDecal_{}", i)));
+                world.insert(e, Transform::at(Vec3::new(x, 0.06, 4.0))
+                    .with_scale_xyz(2.0, 0.2, 2.0));
+                world.insert(e, Decal {
+                    texture: "checker".into(),
+                    tint: [0.8, 0.05, 0.05, 0.9],
+                });
+            }
 
             let mut index = 0;
             for inst in &self.gltf_instances {
@@ -578,7 +585,7 @@ impl Game for DemoGame {
                 index += 1;
             }
 
-            log::info!("Spawned RPG scene + elevator");
+            log::info!("Spawned RPG scene + lights + elevator + decals");
         }
 
         if self.spawned {
@@ -703,6 +710,9 @@ impl Game for DemoGame {
         for e in entities {
             if let Some(v) = world.get::<Visible>(e) { if !v.0 { continue; } }
 
+            // Decal entity пропускаем — её рендерит отдельный pass.
+            if world.has::<Decal>(e) { continue; }
+
             let (Some(_t), Some(m), Some(mat)) = (
                 world.get::<Transform>(e),
                 world.get::<MeshHandle>(e),
@@ -715,7 +725,6 @@ impl Game for DemoGame {
 
             let Some(mesh) = renderer.meshes.get(&m.0) else { continue };
 
-            // Frustum culling.
             if self.show_culling {
                 let (center, radius) = mesh.world_bounds(&model);
                 if !sphere_in_frustum(center, radius, &planes) { continue; }
@@ -787,8 +796,31 @@ impl Game for DemoGame {
         batch.vertices().to_vec()
     }
 
-    fn dir_lights(&self) -> Vec<GpuLight> { self.dir_lights.clone() }
-    fn point_lights(&self) -> Vec<GpuPointLight> { self.point_lights.clone() }
+    fn dir_lights(&self, world: &World) -> Vec<GpuLight> {
+        world
+            .query::<DirectionalLight>()
+            .map(|(_, l)| GpuLight {
+                direction: [l.direction.x, l.direction.y, l.direction.z, l.intensity],
+                color: [l.color[0], l.color[1], l.color[2], 0.0],
+            })
+            .take(4)
+            .collect()
+    }
+
+    fn point_lights(&self, world: &World) -> Vec<GpuPointLight> {
+        world
+            .query::<PointLight>()
+            .filter_map(|(e, l)| {
+                let t = world.get::<Transform>(e)?;
+                Some(GpuPointLight {
+                    position: [t.position.x, t.position.y, t.position.z, l.range],
+                    color: [l.color[0], l.color[1], l.color[2], l.intensity],
+                })
+            })
+            .take(16)
+            .collect()
+    }
+
     fn ambient(&self) -> [f32; 3] { [0.15, 0.17, 0.22] }
     fn postfx(&self) -> PostFx { self.postfx }
     fn camera(&self) -> &Camera3D { &self.camera }

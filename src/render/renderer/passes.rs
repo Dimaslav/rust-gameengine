@@ -218,6 +218,87 @@ pub(super) fn encode_gbuffer_pass(
 }
 
 // ============================================================
+// Decals
+// ============================================================
+
+pub(super) fn encode_decal_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    decals: &[crate::render::decal::DecalDraw],
+) {
+    if decals.is_empty() {
+        return;
+    }
+    if !decals.iter().any(|d| !d.instances.is_empty()) {
+        return;
+    }
+
+    // ИСПРАВЛЕНО: раньше здесь был Some(depth_stencil_attachment с
+    // gbuffer_depth_view), и в этом же pass'е та же depth-текстура
+    // читалась через decal_depth_bind_group. wgpu 25 валит валидацию:
+    //   "Current usage RESOURCE and new usage DEPTH_STENCIL_WRITE"
+    //   (DEPTH_STENCIL_WRITE — эксклюзивный, нельзя смешивать).
+    //
+    // Decal-шейдер сам делает всю depth-логику через textureLoad и
+    // discard, поэтому GPU depth-attachment ему не нужен. Убираем его.
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("decal_pass"),
+        color_attachments: &[
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.gbuffer_albedo_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.gbuffer_normal_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.gbuffer_emissive_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: &r.sd.motion_view,
+                resolve_target: None,
+                ops: load(),
+            }),
+        ],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_bind_group(0, &r.camera_bind_group, &[]);
+    pass.set_bind_group(2, &r.decal_depth_bind_group, &[]);
+
+    let Some(cube) = r.meshes.get("cube") else { return; };
+    pass.set_vertex_buffer(0, cube.vertex_buffer.slice(..));
+    pass.set_index_buffer(cube.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+    pass.set_pipeline(&r.decal_pipeline);
+
+    let stride = std::mem::size_of::<crate::render::decal::DecalInstance>() as u64;
+    let mut offset: u64 = 0;
+
+    for d in decals {
+        if d.instances.is_empty() {
+            offset += d.instances.len() as u64 * stride;
+            continue;
+        }
+        let Some(bg) = r.decal_texture_bind_groups.get(&d.texture) else {
+            offset += d.instances.len() as u64 * stride;
+            continue;
+        };
+        pass.set_bind_group(1, bg, &[]);
+        pass.set_vertex_buffer(1, r.decal_instance_buffer.slice(offset..));
+        pass.draw_indexed(0..cube.index_count, 0, 0..d.instances.len() as u32);
+        offset += d.instances.len() as u64 * stride;
+    }
+}
+
+// ============================================================
 // SSAO
 // ============================================================
 

@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 // ============================================================
 // Alpha / sampler types
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlphaMode {
     Opaque,
     Mask,
@@ -15,13 +17,13 @@ impl Default for AlphaMode {
     fn default() -> Self { Self::Opaque }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WrapMode { Repeat, ClampToEdge, MirroredRepeat }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SamplerFilter { Nearest, Linear }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SamplerDesc {
     pub wrap_u: WrapMode,
     pub wrap_v: WrapMode,
@@ -70,7 +72,7 @@ impl SamplerDesc {
 // Material
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub base_color: [f32; 4],
     pub base_color_texture: Option<String>,
@@ -159,6 +161,18 @@ impl Material {
 
     pub fn is_blend(&self) -> bool {
         self.alpha_mode == AlphaMode::Blend
+    }
+
+    /// Имена текстур, на которые ссылается материал.
+    /// Используется при сериализации сцены — чтобы собрать только
+    /// релевантные текстуры.
+    pub fn referenced_textures(&self) -> Vec<&str> {
+        let mut out = Vec::with_capacity(4);
+        if let Some(n) = &self.base_color_texture { out.push(n.as_str()); }
+        if let Some(n) = &self.metallic_roughness_texture { out.push(n.as_str()); }
+        if let Some(n) = &self.normal_texture { out.push(n.as_str()); }
+        if let Some(n) = &self.emissive_texture { out.push(n.as_str()); }
+        out
     }
 }
 

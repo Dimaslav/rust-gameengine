@@ -1,8 +1,18 @@
 //! Сцена: снимок всех сущностей в RON + spawn игрока.
+//!
+//! Две пары API:
+//!
+//! * `save_scene_to_*` / `load_scene_from_*` — только World.
+//!   Используются там, где Renderer недоступен или не нужен
+//!   (undo/redo, Play-in-Editor snapshot).
+//!
+//! * `save_scene_with_assets_to_*` / `load_scene_with_assets_from_*` —
+//!   World + материалы + пути к текстурам. Используются для Save/Load
+//!   файла сцены пользователем.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ecs::{Entity, World};
@@ -11,7 +21,9 @@ use crate::game::components::{
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
 };
+use crate::game::lights::{DirectionalLight, PointLight};
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
+use crate::render::{Material, Renderer};
 use glam::Vec3;
 
 #[derive(Serialize, Deserialize, Default)]
@@ -20,6 +32,16 @@ pub struct SceneFile {
     pub entities: Vec<EntitySnapshot>,
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
+
+    /// Материалы, на которые ссылаются entity сцены.
+    #[serde(default)]
+    pub materials: HashMap<String, Material>,
+
+    /// Пути к файлам текстур для материалов. Ключ — имя текстуры,
+    /// значение — путь на диске. Процедурные текстуры (`checker`)
+    /// здесь отсутствуют — они создаются при старте движка.
+    #[serde(default)]
+    pub texture_paths: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -47,6 +69,9 @@ pub struct EntitySnapshot {
     #[serde(default)] pub rigid_body: Option<RigidBody>,
     #[serde(default)] pub collider: Option<Collider>,
     #[serde(default)] pub physics_material: Option<PhysicsMaterial>,
+
+    #[serde(default)] pub dir_light: Option<DirectionalLightSnapshot>,
+    #[serde(default)] pub point_light: Option<PointLightSnapshot>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -79,7 +104,6 @@ pub struct ChaseSnapshot { pub speed: f32, pub stop_distance: f32 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerSnapshot {
     pub radius: f32,
-    /// "teleport" | "tint" | "despawn" | "call_elevator" | "play_sound"
     pub action: String,
     pub param: [f32; 4],
     pub once: bool,
@@ -102,7 +126,6 @@ pub struct ElevatorSnapshot {
     pub speed: f32,
     #[serde(default)] pub acceleration: f32,
     #[serde(default)] pub current_velocity: f32,
-    /// "idle" | "moving" | "doors_opening" | "doors_open" | "doors_closing"
     pub state: String,
     pub doors_open: f32,
     pub door_speed: f32,
@@ -170,8 +193,52 @@ pub struct SlidingDoorSnapshot {
     pub closed_position: [f32; 3],
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct DirectionalLightSnapshot {
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+impl DirectionalLightSnapshot {
+    fn from_light(l: &DirectionalLight) -> Self {
+        Self {
+            direction: l.direction.to_array(),
+            color: l.color,
+            intensity: l.intensity,
+        }
+    }
+    fn to_light(&self) -> DirectionalLight {
+        DirectionalLight {
+            direction: Vec3::from_array(self.direction),
+            color: self.color,
+            intensity: self.intensity,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct PointLightSnapshot {
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub range: f32,
+}
+
+impl PointLightSnapshot {
+    fn from_light(l: &PointLight) -> Self {
+        Self {
+            color: l.color,
+            intensity: l.intensity,
+            range: l.range,
+        }
+    }
+    fn to_light(&self) -> PointLight {
+        PointLight::new(self.color, self.intensity, self.range)
+    }
+}
+
 // ============================================================
-// Save
+// Save (World only, без материалов)
 // ============================================================
 
 pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result<String> {
@@ -184,6 +251,8 @@ pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result
     let file = SceneFile {
         entities,
         player_spawn: player_spawn.map(|p| p.to_array()),
+        materials: HashMap::new(),
+        texture_paths: HashMap::new(),
     };
     let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
         .context("serialize scene")?;
@@ -196,6 +265,87 @@ pub fn save_scene_to_file(
     player_spawn: Option<Vec3>,
 ) -> Result<()> {
     let text = save_scene_to_string(world, player_spawn)?;
+    std::fs::write(path.as_ref(), text)
+        .with_context(|| format!("write scene to {}", path.as_ref().display()))?;
+    Ok(())
+}
+
+// ============================================================
+// Save (World + материалы + текстуры из Renderer)
+// ============================================================
+
+/// Собрать материалы, на которые ссылаются entity сцены.
+fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Material> {
+    let mut used: HashSet<String> = HashSet::new();
+    for &e in world.entities() {
+        if let Some(mh) = world.get::<MaterialHandle>(e) {
+            used.insert(mh.0.clone());
+        }
+    }
+
+    let mut out = HashMap::new();
+    for name in used {
+        if let Some(mat) = renderer.materials.get(&name) {
+            out.insert(name, mat.clone());
+        }
+    }
+    out
+}
+
+/// Собрать пути ко всем текстурам, на которые ссылаются материалы.
+///
+/// Процедурные текстуры (без `source_path`) пропускаются — они
+/// создаются при старте движка и не нуждаются в перезагрузке.
+fn collect_texture_paths(
+    renderer: &Renderer,
+    materials: &HashMap<String, Material>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for mat in materials.values() {
+        for tex_name in mat.referenced_textures() {
+            if out.contains_key(tex_name) {
+                continue;
+            }
+            if let Some(path) = renderer.texture_source_path(tex_name) {
+                out.insert(tex_name.to_string(), path.to_string());
+            }
+        }
+    }
+    out
+}
+
+pub fn save_scene_with_assets_to_string(
+    world: &World,
+    renderer: &Renderer,
+    player_spawn: Option<Vec3>,
+) -> Result<String> {
+    let mut entities = Vec::new();
+    for &e in world.entities() {
+        if let Some(snap) = snapshot_entity(world, e) {
+            entities.push(snap);
+        }
+    }
+    let materials = collect_materials(world, renderer);
+    let texture_paths = collect_texture_paths(renderer, &materials);
+
+    let file = SceneFile {
+        entities,
+        player_spawn: player_spawn.map(|p| p.to_array()),
+        materials,
+        texture_paths,
+    };
+    let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+        .context("serialize scene")?;
+    Ok(text)
+}
+
+pub fn save_scene_with_assets_to_file(
+    world: &World,
+    renderer: &Renderer,
+    path: impl AsRef<Path>,
+    player_spawn: Option<Vec3>,
+) -> Result<()> {
+    let text = save_scene_with_assets_to_string(world, renderer, player_spawn)?;
     std::fs::write(path.as_ref(), text)
         .with_context(|| format!("write scene to {}", path.as_ref().display()))?;
     Ok(())
@@ -297,41 +447,139 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     if let Some(col) = world.get::<Collider>(e) { s.collider = Some(*col); any = true; }
     if let Some(mat) = world.get::<PhysicsMaterial>(e) { s.physics_material = Some(*mat); any = true; }
 
+    if let Some(l) = world.get::<DirectionalLight>(e) {
+        s.dir_light = Some(DirectionalLightSnapshot::from_light(l));
+        any = true;
+    }
+    if let Some(l) = world.get::<PointLight>(e) {
+        s.point_light = Some(PointLightSnapshot::from_light(l));
+        any = true;
+    }
+
     if any { Some(s) } else { None }
 }
 
 // ============================================================
-// Load
+// Load (World only)
 // ============================================================
 
-/// Загрузка сцены из строки. Two-pass: сначала spawn всех entity,
-/// затем восстановление Parent по id_map.
-///
-/// Для Play-in-Editor сценариев, где нужно знать соответствие
-/// old_entity_id → new_entity (например, чтобы отремапить selection
-/// после restore), используйте `load_scene_from_str_full`.
 pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
     let (world, spawn, _) = load_scene_from_str_full(text)?;
     Ok((world, spawn))
 }
 
-/// Как `load_scene_from_str`, но дополнительно возвращает карту
-/// `old_entity_id → new_entity` — нужно для ремапа selection,
-/// триггеров с `CallElevator` и любых других ссылок по entity id
-/// после Play-in-Editor snapshot restore.
 pub fn load_scene_from_str_full(
     text: &str,
 ) -> Result<(World, Option<Vec3>, HashMap<u32, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
+
     let mut world = World::new();
+    let id_map = spawn_all_entities(&mut world, file.entities);
+    fix_call_elevator_refs(&mut world, &id_map);
 
-    let mut id_map: HashMap<u32, Entity> = HashMap::with_capacity(file.entities.len());
-    let mut pending_parent: Vec<(Entity, Option<u32>)> = Vec::with_capacity(file.entities.len());
+    let spawn = file.player_spawn.map(Vec3::from_array);
+    Ok((world, spawn, id_map))
+}
 
-    for snap in file.entities {
+pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec3>)> {
+    let text = std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("read scene {}", path.as_ref().display()))?;
+    load_scene_from_str(&text)
+}
+
+// ============================================================
+// Load (World + материалы + текстуры в Renderer)
+// ============================================================
+
+/// Загрузить сцену вместе с материалами и текстурами.
+///
+/// Порядок:
+///   1. Парсим SceneFile.
+///   2. Регистрируем текстуры в Renderer — только те, у которых
+///      сохранён `path` (процедурные уже есть в памяти).
+///   3. Регистрируем материалы (с уже подгруженными текстурами).
+///   4. Спавним entity.
+pub fn load_scene_with_assets_from_str(
+    text: &str,
+    renderer: &mut Renderer,
+) -> Result<(World, Option<Vec3>)> {
+    let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
+
+    // ШАГ 1. Текстуры. Загружаем с диска те, что сохранили путь.
+    // Если текстура уже есть в Renderer (например, встроенная
+    // `checker`) — не перезагружаем.
+    let mut restored_tex = 0usize;
+    let mut failed_tex = 0usize;
+    for (name, path) in &file.texture_paths {
+        if renderer.textures.contains_key(name) {
+            continue;
+        }
+        match renderer.load_texture(name, path) {
+            Ok(()) => restored_tex += 1,
+            Err(e) => {
+                log::warn!(
+                    "Scene load: texture '{}' from '{}' failed: {}",
+                    name, path, e
+                );
+                failed_tex += 1;
+            }
+        }
+    }
+    if restored_tex + failed_tex > 0 {
+        log::info!(
+            "Scene load: {} textures restored, {} failed",
+            restored_tex, failed_tex
+        );
+    }
+
+    // ШАГ 2. Материалы. Ссылаются на уже подгруженные текстуры.
+    for (name, material) in &file.materials {
+        if renderer.has_material(name) {
+            renderer.update_material(name, material.clone());
+        } else {
+            renderer.add_material(name.clone(), material.clone());
+        }
+    }
+    if !file.materials.is_empty() {
+        log::info!(
+            "Scene load: {} materials restored",
+            file.materials.len()
+        );
+    }
+
+    // ШАГ 3. Entity.
+    let mut world = World::new();
+    let id_map = spawn_all_entities(&mut world, file.entities);
+    fix_call_elevator_refs(&mut world, &id_map);
+
+    let spawn = file.player_spawn.map(Vec3::from_array);
+    Ok((world, spawn))
+}
+
+pub fn load_scene_with_assets_from_file(
+    path: impl AsRef<Path>,
+    renderer: &mut Renderer,
+) -> Result<(World, Option<Vec3>)> {
+    let text = std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("read scene {}", path.as_ref().display()))?;
+    load_scene_with_assets_from_str(&text, renderer)
+}
+
+// ============================================================
+// Общие helper'ы
+// ============================================================
+
+fn spawn_all_entities(
+    world: &mut World,
+    entities: Vec<EntitySnapshot>,
+) -> HashMap<u32, Entity> {
+    let mut id_map: HashMap<u32, Entity> = HashMap::with_capacity(entities.len());
+    let mut pending_parent: Vec<(Entity, Option<u32>)> = Vec::with_capacity(entities.len());
+
+    for snap in entities {
         let old_id = snap.entity_id;
         let old_parent = snap.parent;
-        let new_e = spawn_snapshot(&mut world, snap);
+        let new_e = spawn_snapshot(world, snap);
         if let Some(old) = old_id {
             id_map.insert(old, new_e);
         }
@@ -346,8 +594,10 @@ pub fn load_scene_from_str_full(
         }
     }
 
-    // Триггеры с `call_elevator` ссылались на старые id — перепривязываем.
-    // Это делается в 3-м проходе, после того как весь id_map построен.
+    id_map
+}
+
+fn fix_call_elevator_refs(world: &mut World, id_map: &HashMap<u32, Entity>) {
     let trigger_entities: Vec<Entity> =
         world.query::<Trigger>().map(|(e, _)| e).collect();
     for e in trigger_entities {
@@ -359,19 +609,8 @@ pub fn load_scene_from_str_full(
             }
         }
     }
-
-    let spawn = file.player_spawn.map(Vec3::from_array);
-    Ok((world, spawn, id_map))
 }
 
-pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec3>)> {
-    let text = std::fs::read_to_string(path.as_ref())
-        .with_context(|| format!("read scene {}", path.as_ref().display()))?;
-    load_scene_from_str(&text)
-}
-
-/// Спавнит entity из снимка. `Parent` НЕ ставится — им управляет
-/// вызывающий (чтобы two-pass корректно разрешал ссылки).
 pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
@@ -409,8 +648,6 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             "tint" => TriggerAction::Tint(t.param),
             "despawn" => TriggerAction::Despawn,
             "call_elevator" => TriggerAction::CallElevator {
-                // При спавне используем старый id — вызывающий код
-                // перепривяжет его через id_map в 3-м проходе.
                 elevator: t.param[0] as u32,
                 floor_idx: t.param[1] as u32,
             },
@@ -454,6 +691,9 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     if let Some(rb) = snap.rigid_body { world.insert(e, rb); }
     if let Some(col) = snap.collider { world.insert(e, col); }
     if let Some(mat) = snap.physics_material { world.insert(e, mat); }
+
+    if let Some(l) = snap.dir_light { world.insert(e, l.to_light()); }
+    if let Some(l) = snap.point_light { world.insert(e, l.to_light()); }
 
     e
 }

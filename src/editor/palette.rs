@@ -1,26 +1,16 @@
-//! Палитра примитивов и пресетов для click-to-place.
+//! Палитра примитивов, источников света, decals и пресетов.
 
 use glam::Vec3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteItem {
-    // Примитивы
-    Cube,
-    Sphere,
-    Cylinder,
-    Cone,
-    Capsule,
-    Plane,
-    // Пресеты (несколько компонентов сразу)
-    Enemy,
-    Pickup,
-    Switch,
-    TriggerCube,
-    Ground,
+    Cube, Sphere, Cylinder, Cone, Capsule, Plane,
+    Sun, PointLight,
+    Decal,
+    Enemy, Pickup, Switch, TriggerCube, Ground,
 }
 
 impl PaletteItem {
-    /// Все элементы в порядке отображения в палитре.
     pub fn all_primitives() -> &'static [PaletteItem] {
         &[
             PaletteItem::Cube,
@@ -30,6 +20,14 @@ impl PaletteItem {
             PaletteItem::Capsule,
             PaletteItem::Plane,
         ]
+    }
+
+    pub fn all_lights() -> &'static [PaletteItem] {
+        &[PaletteItem::Sun, PaletteItem::PointLight]
+    }
+
+    pub fn all_decals() -> &'static [PaletteItem] {
+        &[PaletteItem::Decal]
     }
 
     pub fn all_presets() -> &'static [PaletteItem] {
@@ -42,6 +40,14 @@ impl PaletteItem {
         ]
     }
 
+    pub fn is_light(&self) -> bool {
+        matches!(self, PaletteItem::Sun | PaletteItem::PointLight)
+    }
+
+    pub fn is_decal(&self) -> bool {
+        matches!(self, PaletteItem::Decal)
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             PaletteItem::Cube => "Cube",
@@ -50,6 +56,9 @@ impl PaletteItem {
             PaletteItem::Cone => "Cone",
             PaletteItem::Capsule => "Capsule",
             PaletteItem::Plane => "Plane",
+            PaletteItem::Sun => "☀ Sun",
+            PaletteItem::PointLight => "💡 Point",
+            PaletteItem::Decal => "🎨 Decal",
             PaletteItem::Enemy => "Enemy",
             PaletteItem::Pickup => "Pickup",
             PaletteItem::Switch => "Switch",
@@ -58,7 +67,6 @@ impl PaletteItem {
         }
     }
 
-    /// Меш, который будет назначен при спавне.
     pub fn mesh(&self) -> &'static str {
         match self {
             PaletteItem::Cube => "cube",
@@ -67,16 +75,18 @@ impl PaletteItem {
             PaletteItem::Cone => "cone",
             PaletteItem::Capsule => "capsule",
             PaletteItem::Plane => "quad",
+            PaletteItem::Decal => "cube",
             PaletteItem::Enemy => "sphere",
             PaletteItem::Pickup => "sphere",
             PaletteItem::Switch => "cube",
             PaletteItem::TriggerCube => "cube",
             PaletteItem::Ground => "ground",
+            PaletteItem::Sun | PaletteItem::PointLight => {
+                panic!("PaletteItem::mesh() called on light")
+            }
         }
     }
 
-    /// Материал без текстуры: плоский цвет + metallic/roughness.
-    /// Текстурированные (checker) материалы для палитры не используются.
     pub fn material(&self) -> &'static str {
         match self {
             PaletteItem::Cube => "flat_blue",
@@ -85,16 +95,18 @@ impl PaletteItem {
             PaletteItem::Cone => "flat_red",
             PaletteItem::Capsule => "flat_blue",
             PaletteItem::Plane => "ground",
+            PaletteItem::Decal => "flat_blue",
             PaletteItem::Enemy => "flat_red",
             PaletteItem::Pickup => "emissive",
             PaletteItem::Switch => "flat_blue",
             PaletteItem::TriggerCube => "glass",
             PaletteItem::Ground => "ground",
+            PaletteItem::Sun | PaletteItem::PointLight => {
+                panic!("PaletteItem::material() called on light")
+            }
         }
     }
 
-    /// Смещение по Y при спавне: чтобы примитив стоял на земле,
-    /// а не тонул в неё. Возвращает половину высоты AABB.
     pub fn half_height(&self) -> f32 {
         match self {
             PaletteItem::Cube => 0.5,
@@ -103,6 +115,9 @@ impl PaletteItem {
             PaletteItem::Cone => 0.5,
             PaletteItem::Capsule => 0.75,
             PaletteItem::Plane => 0.0,
+            PaletteItem::Sun => 10.0,
+            PaletteItem::PointLight => 3.0,
+            PaletteItem::Decal => 0.06,
             PaletteItem::Enemy => 0.4,
             PaletteItem::Pickup => 0.2,
             PaletteItem::Switch => 0.5,
@@ -115,20 +130,11 @@ impl PaletteItem {
         match self {
             PaletteItem::Pickup => 0.4,
             PaletteItem::Enemy => 0.8,
+            PaletteItem::Sun | PaletteItem::PointLight | PaletteItem::Decal => 1.0,
             _ => 1.0,
         }
     }
 
-    /// Размер одного тайла текстуры в мировых единицах по умолчанию.
-    ///
-    /// Значение отвечает на вопрос: «сколько метров (world units) занимает
-    /// одна копия текстуры». Меньше — текстура чаще повторяется (мельче),
-    /// больше — крупнее.
-    ///
-    /// - Ground — меш 200×200, тайл крупный (8 м), иначе текстура была бы
-    ///   слишком мелкой и превратилась бы в шум.
-    /// - TriggerCube — заметно крупнее обычного, чтобы куб выделялся.
-    /// - Прочее — стандартный 1.0 (один тайл на 1 м).
     pub fn default_tiling_size(&self) -> f32 {
         match self {
             PaletteItem::Ground => 8.0,
@@ -137,21 +143,16 @@ impl PaletteItem {
         }
     }
 
-    /// Нужно ли применить snap к Y (для наземных примитивов).
     pub fn snaps_to_ground(&self) -> bool {
-        !matches!(self, PaletteItem::Ground)
+        !matches!(self, PaletteItem::Ground | PaletteItem::Decal)
     }
 }
 
 pub struct PaletteState {
-    /// Активная «кисть». `None` — обычный режим редактирования.
     pub active: Option<PaletteItem>,
-    /// Позиция ghost-превью (обновляется App каждый кадр).
     pub preview_pos: Option<Vec3>,
-    /// Snap к сетке при клике (Ctrl).
     pub snap_to_grid: bool,
     pub grid_step: f32,
-    /// Если true — кисть не сбрасывается после спавна (можно ставить много).
     pub keep_active: bool,
 }
 

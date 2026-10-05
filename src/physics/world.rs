@@ -160,9 +160,6 @@ fn collect_states(world: &World) -> Vec<BodyState> {
         let Some(rb) = world.get::<RigidBody>(e).copied() else { continue };
         let Some(col) = world.get::<Collider>(e).copied() else { continue };
 
-        // Entity с Parent симулировать нельзя без обратного перехода
-        // из мировых координат в локальные. Пропускаем их — debug-лог,
-        // чтобы не забивать консоль warn-спамом каждый кадр.
         if world.get::<Parent>(e).is_some() {
             log::debug!(
                 "Physics: entity #{} имеет Parent — пропускаем (симуляция в мире не поддерживается)",
