@@ -1,4 +1,13 @@
-#![allow(dead_code, unused_imports)]
+// Крейт — игра/приложение, не библиотека. Публичные API доступны
+// через `pub use`, но не все используются в рантайме. Часть из них —
+// точки расширения (Material::with_normal_texture, particles::dust_cloud,
+// physics::apply_force и т.д.), которые не должны ломать сборку.
+//
+// `unused_imports` — глушим оптом, потому что `cargo fix` на Windows
+// падает с STATUS_ACCESS_VIOLATION при компиляции crate `windows`.
+// Ручная чистка 26 импортов не стоит времени.
+#![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod ecs;
 mod editor;
@@ -83,8 +92,6 @@ impl System for MovementSystem {
     }
 }
 
-/// Управляет лифтами: FSM с trapezoid-профилем, sensor-дверь, синхронизация
-/// SlidingDoor детей, запись velocity.y в kinematic RigidBody.
 struct ElevatorSystem;
 impl System for ElevatorSystem {
     fn update(&mut self, world: &mut World, dt: f32) {
@@ -137,7 +144,6 @@ impl System for ElevatorSystem {
                 ElevatorState::Moving => {
                     let arrived = el.update_moving(current_y, dt);
                     if arrived {
-                        el.stop_velocity();
                         el.state = ElevatorState::DoorsOpening;
                     }
                 }
@@ -259,6 +265,8 @@ fn spawn_elevator(
         world.insert(d, MeshHandle("cube".into()));
         world.insert(d, MaterialHandle("rpg_door".into()));
         world.insert(d, Parent(plat));
+        // Двери получают коллайдер, чтобы блокировать игрока.
+        world.insert(d, Collider::aabb(Vec3::splat(0.5)));
 
         let local_slide_distance = 1.4 / plat_scale.x;
         world.insert(
@@ -344,23 +352,26 @@ struct DemoGame {
 
     rpg: RpgState,
 
-    /// Предыдущие world-матрицы per-entity. Нужно для per-object motion
-    /// vectors в G-buffer. Каждый кадр пересобирается заново из текущих
-    /// `Transform`'ов — entity, которых больше нет, выпадают автоматически.
-    /// Для новых entity (без записи в этом HashMap) prev == curr.
     prev_world_matrices: HashMap<Entity, glam::Mat4>,
 }
 
 impl DemoGame {
     fn new() -> Self {
+        // Интенсивности подобраны так, чтобы после ACES-тонмаппинга
+        // сцена не пересвечивалась вместе с IBL. Было (2.5, 12.0) —
+        // солнце + точки выжигали всё в белый.
         let dir_lights = vec![
-            GpuLight { direction: [0.4, 1.0, 0.3, 2.5], color: [1.0, 0.98, 0.9, 0.0] },
-            GpuLight { direction: [-0.6, 0.3, -0.7, 0.4], color: [1.0, 0.5, 0.3, 0.0] },
+            // Солнце: intensity 1.2 — «дневное, но не выжигающее».
+            GpuLight { direction: [0.4, 1.0, 0.3, 1.2], color: [1.0, 0.98, 0.9, 0.0] },
+            // Мягкий контровой свет.
+            GpuLight { direction: [-0.6, 0.3, -0.7, 0.3], color: [1.0, 0.5, 0.3, 0.0] },
         ];
         let point_lights = vec![
-            GpuPointLight { position: [0.0, 3.0, 0.0, 18.0], color: [1.0, 0.4, 0.2, 12.0] },
-            GpuPointLight { position: [10.0, 4.0, 10.0, 14.0], color: [0.2, 0.6, 1.0, 10.0] },
-            GpuPointLight { position: [-10.0, 4.0, -10.0, 14.0], color: [0.4, 1.0, 0.4, 10.0] },
+            // Локальные акценты: intensity 4.0 — заметные пятна,
+            // но не «выжигание» всего вокруг.
+            GpuPointLight { position: [0.0, 3.0, 0.0, 18.0], color: [1.0, 0.4, 0.2, 4.0] },
+            GpuPointLight { position: [10.0, 4.0, 10.0, 14.0], color: [0.2, 0.6, 1.0, 3.0] },
+            GpuPointLight { position: [-10.0, 4.0, -10.0, 14.0], color: [0.4, 1.0, 0.4, 3.0] },
         ];
 
         Self {
@@ -398,10 +409,10 @@ impl DemoGame {
                 lod_bias: 1.0,
                 lod_distances: [30.0, 80.0, 200.0, 500.0],
                 taa_strength: 1.0,
-                // Меньше, чем 0.3 — иначе unsharp-mask усиливает per-frame
-                // шум (SSAO, шум теней). 0.1 — компромисс: edges немного
-                // подчёркнуты, но шум не «кипит».
                 taa_sharpening: 0.1,
+                volumetric_density: 0.025,
+                volumetric_scattering: 0.4,
+                volumetric_phase_g: 0.6,
             },
             spawned: false,
             dragging: false,
@@ -426,7 +437,6 @@ impl Game for DemoGame {
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
         renderer.add_mesh("quad", Mesh::plane(&renderer.device, 2.0, 1));
-        // Вертикальный билборд (XY). Нужен для листвы/растительности.
         renderer.add_mesh("quad_xy", Mesh::plane_xy(&renderer.device, 2.0, 1));
         renderer.add_mesh("cylinder", Mesh::cylinder(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("cone",     Mesh::cone(&renderer.device, 0.5, 1.0, 24));
@@ -494,8 +504,6 @@ impl Game for DemoGame {
             }
         }
 
-        // Хоткеи ниже должны срабатывать только без Ctrl/Alt/Shift,
-        // иначе конфликтуют с глобальными хоткеями редактора.
         let ctrl = input.key_down(KeyCode::ControlLeft)
             || input.key_down(KeyCode::ControlRight);
         let alt = input.key_down(KeyCode::AltLeft) || input.key_down(KeyCode::AltRight);
@@ -576,7 +584,6 @@ impl Game for DemoGame {
         if self.spawned {
             let player_pos = self.camera.position();
 
-            // === Sensor-зона лифтов ===
             let elevator_entities: Vec<Entity> =
                 world.query::<Elevator>().map(|(e, _)| e).collect();
             for e in elevator_entities {
@@ -662,10 +669,6 @@ impl Game for DemoGame {
 
     fn apply_postfx(&mut self, postfx: PostFx) { self.postfx = postfx; }
 
-    // ============================================================
-    // Play-in-Editor hooks
-    // ============================================================
-
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
         log::info!("Play-in-Editor: snapshotting RPG state");
         Some(Box::new(self.rpg.clone()))
@@ -694,8 +697,6 @@ impl Game for DemoGame {
         let lod_dists = self.postfx.lod_distances;
         let mut lod_counts = [0usize; 4];
 
-        // Свежий трекер prev-матриц: entity, которых нет в этом кадре,
-        // автоматически исчезают из трекера.
         let mut new_prev: HashMap<Entity, glam::Mat4> = HashMap::new();
 
         let entities: Vec<_> = world.entities().to_vec();
@@ -709,12 +710,12 @@ impl Game for DemoGame {
             ) else { continue };
 
             let model = crate::game::world_matrix(world, e);
-            // Prev — из прошлого кадра, для новых entity == текущая.
             let prev_model = self.prev_world_matrices.get(&e).copied().unwrap_or(model);
             new_prev.insert(e, model);
 
             let Some(mesh) = renderer.meshes.get(&m.0) else { continue };
 
+            // Frustum culling.
             if self.show_culling {
                 let (center, radius) = mesh.world_bounds(&model);
                 if !sphere_in_frustum(center, radius, &planes) { continue; }
@@ -751,14 +752,11 @@ impl Game for DemoGame {
             ];
 
             let key = (mesh_name, mat.0.clone(), color.map(f32::to_bits), blend, double_sided, uv_key);
-            // Используем new_full: передаём prev_model для per-object motion.
             let inst = InstanceData::new_full(model, prev_model, color, uv_scale);
             buckets.entry(key).or_default().push(inst);
         }
 
-        // Свапаем трекер — на следующем кадре prev будет уже этим.
         self.prev_world_matrices = new_prev;
-
         self.lod_stats = lod_counts;
 
         buckets.into_iter().map(|((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {

@@ -4,10 +4,9 @@
 // prev_vp_unjit — **unjittered** view-proj прошлого кадра.
 // pixel_center_uv = frag_coord.xy / screen_size.xy (без jitter'а).
 //
-// На статике: prev_P == P, prev_vp_unjit == curr_vp_unjit →
-//   motion = (pixel_center - jitter_curr) - pixel_center = -jitter_curr.
-// TAA сэмплит history в `pixel_center + motion = pixel_center - jitter_curr`
-// — это unjittered prev позиция P. Стабильно, без тряски.
+// @invariant на @builtin(position) обязателен: pipeline использует
+// depth_compare: Equal (см. make_gbuffer_pipeline), и без явной пометки
+// драйвер может округлить z по-разному в разных проходах.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -71,7 +70,10 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) frag_coord: vec4<f32>,
+    // @invariant ОБЯЗАТЕЛЕН: pipeline использует depth_compare: Equal.
+    // Без него драйвер может округлить z по-разному в разных проходах,
+    // и Equal будет случайно фейлиться на части пикселей → мерцание.
+    @builtin(position) @invariant frag_coord: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,

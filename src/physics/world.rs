@@ -83,7 +83,6 @@ impl PhysicsWorld {
                     s.position += s.velocity * dt;
                 }
                 BodyType::Kinematic => {
-                    // Кинематические тела двигаются программно через velocity.
                     s.position += s.velocity * dt;
                 }
                 _ => {}
@@ -111,12 +110,6 @@ impl PhysicsWorld {
         }
 
         // 4b. Support transfer.
-        // Динамик, стоящий на kinematic-платформе, получает её velocity.
-        // Без этого ящик на лифте отстаёт и «проваливается» сквозь платформу.
-        //
-        // Контракт по контакту: normal указывает ОТ a К b.
-        // Если a — kinematic и normal.y > 0.5 → b стоит сверху a.
-        // Если b — kinematic и normal.y < -0.5 → a стоит сверху b.
         for c in &contacts {
             let a_kin = states[c.a].body_type == BodyType::Kinematic;
             let b_kin = states[c.b].body_type == BodyType::Kinematic;
@@ -166,14 +159,19 @@ fn collect_states(world: &World) -> Vec<BodyState> {
     for &e in world.entities() {
         let Some(rb) = world.get::<RigidBody>(e).copied() else { continue };
         let Some(col) = world.get::<Collider>(e).copied() else { continue };
-        let Some(t) = world.get::<Transform>(e) else { continue };
 
+        // Entity с Parent симулировать нельзя без обратного перехода
+        // из мировых координат в локальные. Пропускаем их — debug-лог,
+        // чтобы не забивать консоль warn-спамом каждый кадр.
         if world.get::<Parent>(e).is_some() {
-            log::warn!(
-                "Physics: entity #{} has Parent — Parent ignored (physics works in world space)",
+            log::debug!(
+                "Physics: entity #{} имеет Parent — пропускаем (симуляция в мире не поддерживается)",
                 e
             );
+            continue;
         }
+
+        let Some(t) = world.get::<Transform>(e) else { continue };
 
         let material = world
             .get::<PhysicsMaterial>(e)

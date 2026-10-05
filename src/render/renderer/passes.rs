@@ -9,10 +9,6 @@ use super::gpu_types::*;
 use super::size_dep::BLOOM_MIP_COUNT;
 use super::Renderer;
 
-// ============================================================
-// Приватные helpers
-// ============================================================
-
 #[inline]
 fn fullscreen_triangle(pass: &mut wgpu::RenderPass<'_>) {
     pass.draw(0..3, 0..1);
@@ -105,7 +101,7 @@ fn depth_load() -> wgpu::Operations<f32> {
 }
 
 // ============================================================
-// Shadow pass
+// Shadow
 // ============================================================
 
 pub(super) fn encode_shadow_pass(
@@ -168,7 +164,7 @@ pub(super) fn encode_cube_shadow_all(
 }
 
 // ============================================================
-// G-buffer (4 MRT: albedo, normal+depth, emissive, motion)
+// G-buffer
 // ============================================================
 
 pub(super) fn encode_gbuffer_pass(
@@ -348,7 +344,7 @@ pub(super) fn encode_forward_pass(
 }
 
 // ============================================================
-// Particles (billboard)
+// Particles
 // ============================================================
 
 pub(super) fn encode_particles_pass(
@@ -383,7 +379,7 @@ pub(super) fn encode_particles_pass(
 }
 
 // ============================================================
-// Transparent (forward, blend) — 2 MRT: HDR + motion
+// Transparent
 // ============================================================
 
 pub(super) fn encode_transparent_pass(
@@ -398,15 +394,11 @@ pub(super) fn encode_transparent_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("transparent_pass"),
         color_attachments: &[
-            // MRT 0: HDR, alpha blending.
             Some(wgpu::RenderPassColorAttachment {
                 view: &r.sd.hdr_view,
                 resolve_target: None,
                 ops: load(),
             }),
-            // MRT 1: motion, REPLACE (пишем поверх G-buffer motion
-            // только там, где transparent реально виден — back-to-front,
-            // последний (ближайший) побеждает).
             Some(wgpu::RenderPassColorAttachment {
                 view: &r.sd.motion_view,
                 resolve_target: None,
@@ -437,13 +429,49 @@ pub(super) fn encode_transparent_pass(
 }
 
 // ============================================================
+// Volumetric fog
+// ============================================================
+
+pub(super) fn encode_volumetric_compute(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("volumetric_compute_pass"),
+        timestamp_writes: None,
+    });
+    cpass.set_pipeline(&r.volumetric_pipeline);
+    cpass.set_bind_group(0, &r.sd.volumetric_compute_bg, &[]);
+    let gx = (VOLUMETRIC_GRID_W + 7) / 8;
+    let gy = (VOLUMETRIC_GRID_H + 7) / 8;
+    let gz = (VOLUMETRIC_GRID_D + 3) / 4;
+    cpass.dispatch_workgroups(gx, gy, gz);
+}
+
+pub(super) fn encode_volumetric_composite(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("volumetric_composite_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_fog_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::BLACK),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.volumetric_composite_pipeline);
+    pass.set_bind_group(0, &r.sd.volumetric_composite_bg, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
 // TAA
 // ============================================================
-//
-// Читает hdr_view (current) + motion_view + taa_resolved_views[read_idx],
-// пишет в taa_resolved_views[write_idx].
-//
-// Индексы выбираются в Renderer::render() по frame_index % 2.
+
 pub(super) fn encode_taa_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -470,7 +498,7 @@ pub(super) fn encode_taa_pass(
 }
 
 // ============================================================
-// Bloom mip chain — читают TAA resolved[write_idx]
+// Bloom chain
 // ============================================================
 
 pub(super) fn encode_bloom_prefilter(

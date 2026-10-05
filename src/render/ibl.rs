@@ -1,12 +1,4 @@
 //! IBL (Image-Based Lighting).
-//!
-//! Загружает equirectangular HDRI, генерирует:
-//! - env_cubemap
-//! - irradiance_cubemap (32×32 на грань)
-//! - prefiltered_cubemap (256, mip-chain по roughness)
-//! - brdf_lut (2D, split-sum)
-//!
-//! Если HDRI не найдена — генерирует процедурный fallback.
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -49,16 +41,29 @@ pub struct IblResources {
 }
 
 impl IblResources {
-    /// Загружает HDRI с диска; при ошибке — процедурный fallback.
     pub fn load_or_default(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         path: impl AsRef<Path>,
     ) -> Result<Self> {
-        match Self::load(device, queue, &path) {
-            Ok(r) => Ok(r),
+        let path_ref = path.as_ref();
+        if !path_ref.exists() {
+            log::warn!(
+                "IBL: '{}' не найден → процедурное небо",
+                path_ref.display()
+            );
+            return Self::procedural(device, queue);
+        }
+        match Self::load(device, queue, path_ref) {
+            Ok(r) => {
+                log::info!("IBL: загружено небо из '{}'", path_ref.display());
+                Ok(r)
+            }
             Err(e) => {
-                log::warn!("HDRI не загружена ({}), генерирую процедурное небо", e);
+                log::warn!(
+                    "IBL: HDRI не загружена ({}), процедурный fallback",
+                    e
+                );
                 Self::procedural(device, queue)
             }
         }
@@ -71,7 +76,6 @@ impl IblResources {
     ) -> Result<Self> {
         let path = path.as_ref();
 
-        // === 1. HDRI → RGBA32F ===
         let img = image::open(path)
             .with_context(|| format!("failed to open HDRI: {}", path.display()))?
             .to_rgb32f();
@@ -98,14 +102,14 @@ impl IblResources {
         });
 
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &equirect_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             bytemuck::cast_slice(&rgba),
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(w * 16),
                 rows_per_image: Some(h),
@@ -124,7 +128,6 @@ impl IblResources {
             ..Default::default()
         });
 
-        // === 2. Промежуточные cubemaps ===
         let (env_tex, env_views, env_view_all) =
             create_cubemap(device, "env_cube", ENV_SIZE, 1);
         let (irr_tex, irr_views, irr_view_all) =
@@ -132,7 +135,6 @@ impl IblResources {
         let (pre_tex, pre_views, pre_view_all) =
             create_cubemap(device, "prefiltered", PREFILTER_SIZE, PREFILTER_MIPS);
 
-        // === 3. BRDF LUT ===
         let brdf_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("brdf_lut"),
             size: wgpu::Extent3d {
@@ -149,7 +151,6 @@ impl IblResources {
         });
         let brdf_view = brdf_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // === 4. Пайплайны ===
         let equirect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("equirect_to_cube"),
             source: wgpu::ShaderSource::Wgsl(
@@ -248,13 +249,13 @@ impl IblResources {
                 layout: Some(&pl),
                 vertex: wgpu::VertexState {
                     module: shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: shader,
-                    entry_point: entry,
+                    entry_point: Some(entry),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: None,
@@ -266,6 +267,7 @@ impl IblResources {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
+                cache: None,
             })
         };
 
@@ -294,7 +296,6 @@ impl IblResources {
             ..Default::default()
         });
 
-        // === 5. Прогон ===
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ibl_encoder"),
         });
@@ -423,7 +424,6 @@ impl IblResources {
             }
         }
 
-        // BRDF LUT
         {
             let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -437,6 +437,8 @@ impl IblResources {
             });
             let dummy_view = dummy_tex.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::Cube),
+                base_array_layer: 0,
+                array_layer_count: Some(6),
                 ..Default::default()
             });
             let dummy_buf = create_uniform_buffer(device, &FaceUniform::zeroed());
@@ -492,7 +494,14 @@ impl IblResources {
         })
     }
 
-    /// Fallback: 1×1 cubemap со средним цветом неба.
+    /// Fallback: 1×1 cubemap с цветом неба.
+    ///
+    /// Значения — HDR (до ACES tonemap). Умеренные, чтобы:
+    ///   1. Skybox после ACES выглядел светло-голубым, НЕ белым.
+    ///   2. IBL-diffuse (ambient) не выжигал всю сцену.
+    ///
+    /// Если увеличить — вся сцена станет белёсой; если уменьшить —
+    /// небо станет тёмным и сцена уйдёт в тень.
     fn procedural(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self> {
         fn f32_to_f16(v: f32) -> u16 {
             let bits = v.to_bits();
@@ -529,23 +538,28 @@ impl IblResources {
         let irr_tex = make_cube(device, "irr_dummy");
         let pre_tex = make_cube(device, "pre_dummy");
 
+        // Умеренно-голубое небо. После ACES даст светло-голубой,
+        // не белый. IBL-diffuse от этих значений не выжигает albedo.
+        // Было (0.8, 1.0, 1.3) → пересвет всего в белый.
+        let (r, g, b) = (0.35_f32, 0.5_f32, 0.75_f32);
+
         let mut sky_px = Vec::with_capacity(8);
-        sky_px.extend_from_slice(&f32_to_f16(0.5).to_le_bytes());
-        sky_px.extend_from_slice(&f32_to_f16(0.6).to_le_bytes());
-        sky_px.extend_from_slice(&f32_to_f16(0.8).to_le_bytes());
+        sky_px.extend_from_slice(&f32_to_f16(r).to_le_bytes());
+        sky_px.extend_from_slice(&f32_to_f16(g).to_le_bytes());
+        sky_px.extend_from_slice(&f32_to_f16(b).to_le_bytes());
         sky_px.extend_from_slice(&f32_to_f16(1.0).to_le_bytes());
 
         for face in 0..6u32 {
             for tex in [&env_tex, &irr_tex, &pre_tex] {
                 queue.write_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: tex,
                         mip_level: 0,
                         origin: wgpu::Origin3d { x: 0, y: 0, z: face },
                         aspect: wgpu::TextureAspect::All,
                     },
                     &sky_px,
-                    wgpu::ImageDataLayout {
+                    wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(8),
                         rows_per_image: Some(1),
@@ -580,14 +594,14 @@ impl IblResources {
             f32_to_f16(0.0).to_le_bytes()[1],
         ];
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &brdf_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &brdf_px,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),
                 rows_per_image: Some(1),
@@ -601,14 +615,20 @@ impl IblResources {
 
         let env_cube_view = env_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::Cube),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
             ..Default::default()
         });
         let irr_view = irr_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::Cube),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
             ..Default::default()
         });
         let pre_view = pre_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::Cube),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
             ..Default::default()
         });
         let brdf_view = brdf_tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -620,6 +640,7 @@ impl IblResources {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 

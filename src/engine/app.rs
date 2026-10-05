@@ -2,10 +2,12 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+
+use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::KeyCode;
-use winit::window::{CursorGrabMode, Window, WindowBuilder};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::ecs::{Entity, World};
 use crate::editor::gizmo::{self, GizmoMode};
@@ -24,6 +26,7 @@ use crate::render::{
     MeshDraw, ParticleInstance, PostFx, Renderer,
 };
 use glam::Vec3;
+
 use super::audio::AudioSystem;
 use super::collision::{self, PlayerCapsule};
 use super::input::Input;
@@ -71,14 +74,8 @@ pub trait Game: 'static {
 
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
 
-    /// Хук перед входом в Play. Может вернуть произвольное состояние,
-    /// которое будет возвращено в `on_play_exit` при выходе. Движок
-    /// сохраняет `World` самостоятельно — здесь нужно только то,
-    /// что живёт вне ECS (например, RPG-счётчики).
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
 
-    /// Восстановить состояние, полученное из `on_play_enter`.
-    /// Вызывается после того, как движок восстановил `World` из снапшота.
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 }
 
@@ -91,9 +88,6 @@ struct Projectile {
     damage: f32,
 }
 
-/// Снапшот состояния, который делается при входе в Play и восстанавливается
-/// при выходе. Содержит сериализованную сцену + состояние редактора +
-/// опциональный user-state из `Game::on_play_enter`.
 struct PlaySnapshot {
     scene_ron: String,
     saved_position: Vec3,
@@ -109,7 +103,7 @@ struct PlaySnapshot {
     game_state: Option<Box<dyn Any>>,
 }
 
-struct App<G: Game> {
+pub struct App<G: Game> {
     game: G,
     world: World,
     input: Input,
@@ -132,11 +126,8 @@ struct App<G: Game> {
 
     physics: PhysicsWorld,
 
-    /// Снапшот для Play-in-Editor.
-    /// `Some` — в момент, когда идёт Play. `None` — вне Play.
     play_snapshot: Option<PlaySnapshot>,
 
-    /// Предыдущее состояние каждого лифта — для детекта прибытия и ding.
     elevator_prev_state: HashMap<Entity, ElevatorState>,
 }
 
@@ -150,8 +141,6 @@ impl<G: Game> Drop for App<G> {
             self.ui_state.left_panel_width,
             self.ui_state.right_panel_width,
         );
-        // Сохраняем текущие графические настройки. При следующем
-        // запуске они будут применены в `run()` сразу после создания App.
         s.postfx = self.game.postfx();
         if let Err(e) = s.save("editor.ron") {
             log::warn!("Failed to save editor settings: {}", e);
@@ -162,6 +151,58 @@ impl<G: Game> Drop for App<G> {
 }
 
 impl<G: Game> App<G> {
+    fn new(elwt: &ActiveEventLoop, mut game: G) -> Self {
+        let window = Arc::new(
+            elwt.create_window(
+                Window::default_attributes()
+                    .with_title("Rust Engine 3D")
+                    .with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
+            )
+            .expect("create window failed"),
+        );
+
+        let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+
+        let mut world = World::new();
+        game.camera_mut()
+            .set_viewport(renderer.size.width, renderer.size.height);
+        game.init(&mut world, &mut renderer);
+
+        let editor = Editor::new(
+            &window,
+            &renderer.device,
+            renderer.config.format,
+            egui::ViewportId::ROOT,
+        );
+
+        let mut app = Self {
+            game,
+            world,
+            input: Input::new(),
+            time: Time::new(),
+            window: window.clone(),
+            renderer,
+            editor,
+            ui_state: UiState::new(),
+            mouse_press_pos: None,
+            viewport_rect: None,
+            rmb_press_time: None,
+            rmb_press_pos: None,
+            rmb_dragged: false,
+            particles: Vec::new(),
+            projectiles: Vec::new(),
+            audio: AudioSystem::new(),
+            physics: PhysicsWorld::default(),
+            play_snapshot: None,
+            elevator_prev_state: HashMap::new(),
+        };
+
+        let initial_postfx = app.editor.state.settings.postfx;
+        app.game.apply_postfx(initial_postfx);
+
+        app
+    }
+
     fn apply_camera_preset(&mut self, preset: u8) {
         let cam = self.game.camera_mut();
         let t = cam.target;
@@ -186,14 +227,6 @@ impl<G: Game> App<G> {
         log::info!("Camera preset {} applied", preset);
     }
 
-    // ============================================================
-    // Play-in-Editor: захват и восстановление
-    // ============================================================
-
-    /// Захватить полный снапшот перед входом в Play.
-    ///
-    /// Вызывается ПОКА мир ещё в исходном состоянии. Вызывает
-    /// `game.on_play_enter`, чтобы получить user-state (RPG, счётчики).
     fn capture_play_snapshot(&mut self) -> PlaySnapshot {
         let scene_ron = crate::scene::save_scene_to_string(&self.world, None)
             .unwrap_or_else(|e| {
@@ -201,10 +234,6 @@ impl<G: Game> App<G> {
                 String::new()
             });
 
-        // Снимаем поля камеры в локальные копии ДО вызова on_play_enter.
-        // `self.game.camera()` отдаёт `&self.game` (immutable), а
-        // `on_play_enter` требует `&mut self.game`. Если держать `cam`
-        // живым до литерала PlaySnapshot — borrow-конфликт.
         let cam = self.game.camera();
         let camera_mode = cam.mode;
         let camera_pos = cam.first_person_pos;
@@ -231,10 +260,6 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Восстановить мир, камеру, selection, RPG-состояние.
-    ///
-    /// `World` полностью заменяется на новый, восстановленный из RON.
-    /// Selection ремапится через id_map (старые entity_id → новые).
     fn restore_play_snapshot(&mut self, snap: PlaySnapshot) {
         if snap.scene_ron.is_empty() {
             log::error!("Play-in-Editor: empty snapshot, skipping restore");
@@ -246,7 +271,6 @@ impl<G: Game> App<G> {
                 new_world.sync_next_id();
                 self.world = new_world;
 
-                // Remap selection: старое id → новое id.
                 self.editor.state.selected = snap
                     .selection
                     .iter()
@@ -263,7 +287,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // Camera state.
         let cam = self.game.camera_mut();
         cam.mode = snap.camera_mode;
         cam.first_person_pos = snap.camera_pos;
@@ -272,18 +295,12 @@ impl<G: Game> App<G> {
         cam.target = snap.camera_target;
         cam.distance = snap.camera_distance;
 
-        // Editor play state.
         self.editor.state.play.saved_position = snap.saved_position;
 
-        // Game user state.
         if let Some(state) = snap.game_state {
             self.game.on_play_exit(state);
         }
     }
-
-    // ============================================================
-    // Elevator ding
-    // ============================================================
 
     fn update_elevator_ding(&mut self) {
         let states: Vec<(Entity, ElevatorState)> = self
@@ -388,7 +405,6 @@ impl<G: Game> App<G> {
             let mut dy_extra = 0.0_f32;
             if let Some(support) = collision::find_support_entity(
                 &self.world,
-                &self.renderer,
                 feet,
                 &pcap,
             ) {
@@ -404,21 +420,12 @@ impl<G: Game> App<G> {
         let delta = motion + Vec3::new(0.0, dy + support_delta_y, 0.0);
         let (new_feet, landed, _support) = collision::resolve_movement(
             &self.world,
-            &self.renderer,
             feet,
             delta,
             &pcap,
             floor_y,
         );
 
-        // ============================================================
-        // Step 2: player pushes dynamic bodies it walked into.
-        //
-        // `new_feet - feet` — фактическое смещение (после коллизий),
-        // оно может быть меньше `delta` если что-то заблокировало движение.
-        // Передаём именно фактическое — иначе игрок «упирается в стену»,
-        // но всё равно толкает ящик на полную скорость.
-        // ============================================================
         if push_strength > 0.0 {
             crate::engine::character::push_dynamic_bodies(
                 &mut self.world,
@@ -483,7 +490,6 @@ impl<G: Game> App<G> {
         });
         self.editor.state.play.highlight = new_highlight;
 
-        // === Стрельба ===
         let lmb = self.input.mouse_down(MouseButton::Left);
         let can_fire = lmb
             && self.editor.state.play.fire_cooldown <= 0.0
@@ -545,7 +551,6 @@ impl<G: Game> App<G> {
 
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
 
-        // === Triggers ===
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
         for e in triggers {
             let trigger_data = self.world.get::<Trigger>(e).cloned();
@@ -562,9 +567,13 @@ impl<G: Game> App<G> {
             if dist <= t.radius {
                 match &t.action {
                     TriggerAction::Teleport(target) => {
-                        let new_pos = Vec3::from_array(*target);
-                        self.game.camera_mut().first_person_pos = new_pos;
+                        // target — точка НОГ. Камера = точка ног + eye_height.
+                        let new_feet = Vec3::from_array(*target);
+                        let eye_h = self.editor.state.play.current_eye_height;
+                        self.game.camera_mut().first_person_pos =
+                            new_feet + Vec3::Y * eye_h;
                         self.editor.state.play.vertical_velocity = 0.0;
+                        self.editor.state.play.on_ground = true;
                     }
                     TriggerAction::Tint(c) => {
                         self.world.insert(e, Tint(*c));
@@ -598,7 +607,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // === Chase ===
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
@@ -720,7 +728,6 @@ impl<G: Game> App<G> {
 
         let floor_y = self.editor.state.play.floor_y;
 
-        // (hit_point, target_entity, damage, projectile_velocity_dir)
         let mut hits: Vec<(Vec3, Option<Entity>, f32, Vec3)> = Vec::new();
         let mut alive: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
 
@@ -768,10 +775,6 @@ impl<G: Game> App<G> {
             self.spawn_burst(point, &particles::sparks(Vec3::Y));
 
             if let Some(e) = target {
-                // Step 2: динамическое тело получает импульс от попадания.
-                // Импульс ≈ dmg * 0.05, направление — вдоль снаряда.
-                // Величина подобрана «на глаз»: пистолетный выстрел (25 dmg)
-                // толкает ящик массой 1 кг на ~1.25 м/с.
                 if let Some(rb) = self.world.get_mut::<crate::physics::RigidBody>(e) {
                     if rb.body_type == BodyType::Dynamic {
                         rb.apply_impulse(vel_dir * dmg * 0.05);
@@ -802,7 +805,7 @@ impl<G: Game> App<G> {
         }
     }
 
-    fn redraw(&mut self, elwt: &EventLoopWindowTarget<()>) {
+    fn redraw(&mut self, elwt: &ActiveEventLoop) {
         self.time.tick();
         self.input.tick_begin_frame();
 
@@ -868,7 +871,6 @@ impl<G: Game> App<G> {
             self.input.editor_flying = want_fly;
         }
 
-        // 1. Game update — сглаженный шаг.
         let continue_running = self.game.update(
             &mut self.world,
             &self.input,
@@ -880,13 +882,10 @@ impl<G: Game> App<G> {
             return;
         }
 
-        // 2. Ding при прибытии лифта.
         self.update_elevator_ding();
 
-        // 3. Physics.
         self.physics.step(&mut self.world, dt_smooth);
 
-        // 4. Camera / player.
         if self.editor.state.play.active {
             self.input.editor_captured = false;
             self.update_player(dt_smooth);
@@ -1047,7 +1046,13 @@ impl<G: Game> App<G> {
             selected_material,
         };
 
-        let raw_input = self.editor.egui_state.take_egui_input(&self.window);
+        let pre_ui_undo_snapshot: Option<String> = if self.editor.state.undo.can_push_now() {
+            crate::scene::save_scene_to_string(&self.world, None).ok()
+        } else {
+            None
+        };
+
+        let raw_input = self.editor.egui_state.take_egui_input(&*self.window);
 
         let lod_counts = self.game.lod_stats();
 
@@ -1068,6 +1073,9 @@ impl<G: Game> App<G> {
             Vec::new()
         };
 
+        let dir_lights_pre = self.game.dir_lights();
+        let point_lights_pre = self.game.point_lights();
+
         let stats = Stats {
             fps: self.time.fps(),
             frame_time_max_ms: self.time.frame_time_max_ms(),
@@ -1075,8 +1083,8 @@ impl<G: Game> App<G> {
             entities: self.world.len(),
             draws: 0,
             instances: 0,
-            dir_lights: 0,
-            point_lights: 0,
+            dir_lights: dir_lights_pre.len(),
+            point_lights: point_lights_pre.len(),
             lod_counts,
             lod_triangles: [0; 4],
             sel_entities: self.editor.state.selected.len(),
@@ -1118,7 +1126,7 @@ impl<G: Game> App<G> {
 
         self.editor
             .egui_state
-            .handle_platform_output(&self.window, full_output.platform_output);
+            .handle_platform_output(&*self.window, full_output.platform_output);
 
         let clipped_primitives =
             egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -1134,7 +1142,14 @@ impl<G: Game> App<G> {
 
         if self.editor.state.undo_requested {
             self.editor.state.undo_requested = false;
-            self.editor.state.undo.push(&self.world);
+            match pre_ui_undo_snapshot {
+                Some(snap) => { self.editor.state.undo.push_snapshot(snap); }
+                None => {
+                    if self.editor.state.undo.can_push_now() {
+                        self.editor.state.undo.push(&self.world);
+                    }
+                }
+            }
         }
 
         for (entity, name, mat) in self.editor.state.dirty_materials.drain(..) {
@@ -1177,6 +1192,19 @@ impl<G: Game> App<G> {
 
         let selected = self.editor.state.selected.clone();
         let draws = self.game.collect_draws(&mut self.world, &self.renderer);
+
+        if self.time.frame_count == 60 || self.time.frame_count % 300 == 0 {
+            let total_inst: usize = draws.iter().map(|d| d.instances.len()).sum();
+            log::info!(
+                "Frame {}: draws={} instances={} dir_lights={} point_lights={}",
+                self.time.frame_count,
+                draws.len(),
+                total_inst,
+                dir_lights_pre.len(),
+                point_lights_pre.len(),
+            );
+        }
+
         let mut lines = self
             .game
             .collect_lines(&mut self.world, &self.renderer, &selected);
@@ -1315,7 +1343,16 @@ impl<G: Game> App<G> {
         }
     }
 
+    /// ИСПРАВЛЕНО: сохраняет Parent-связи внутри выделения,
+    /// рекурсивно копирует все компоненты.
     fn duplicate_selected(&mut self) {
+        use crate::game::components::{
+            AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name,
+            Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform,
+            Velocity, Visible,
+        };
+        use crate::physics::{Collider, PhysicsMaterial, RigidBody};
+
         let originals: Vec<Entity> = self
             .editor
             .state
@@ -1328,67 +1365,87 @@ impl<G: Game> App<G> {
             return;
         }
 
-        let mut new_selected = Vec::with_capacity(originals.len());
-        for e in &originals {
+        // Первый проход: создать "пустые" новые entity, запомнить маппинг.
+        let mut old_to_new: HashMap<Entity, Entity> = HashMap::new();
+        for &e in &originals {
             let new_e = self.world.spawn();
+            old_to_new.insert(e, new_e);
+        }
 
-            if let Some(t) = self.world.get::<Transform>(*e).copied() {
+        // Второй проход: перенести компоненты.
+        for &e in &originals {
+            let new_e = old_to_new[&e];
+
+            if let Some(t) = self.world.get::<Transform>(e).copied() {
                 let mut nt = t;
                 nt.position += Vec3::new(1.0, 0.0, 0.0);
                 self.world.insert(new_e, nt);
             }
-            if let Some(n) = self.world.get::<crate::game::components::Name>(*e).cloned() {
-                self.world.insert(
-                    new_e,
-                    crate::game::components::Name(format!("{}_copy", n.0)),
-                );
+            if let Some(n) = self.world.get::<Name>(e).cloned() {
+                self.world.insert(new_e, Name(format!("{}_copy", n.0)));
             }
-            if let Some(m) = self.world.get::<MeshHandle>(*e).cloned() {
+            if let Some(m) = self.world.get::<MeshHandle>(e).cloned() {
                 self.world.insert(new_e, m);
             }
-            if let Some(m) = self.world.get::<MaterialHandle>(*e).cloned() {
+            if let Some(m) = self.world.get::<MaterialHandle>(e).cloned() {
                 self.world.insert(new_e, m);
             }
-            if let Some(s) = self.world.get::<SkeletonHandle>(*e).cloned() {
+            if let Some(s) = self.world.get::<SkeletonHandle>(e).cloned() {
                 self.world.insert(new_e, s);
             }
-            if let Some(s) = self.world.get::<Spinner>(*e).copied() {
+            if let Some(a) = self.world.get::<AnimationPlayer>(e).cloned() {
+                self.world.insert(new_e, a);
+            }
+            if let Some(s) = self.world.get::<Spinner>(e).copied() {
                 self.world.insert(new_e, s);
             }
-            if let Some(v) = self.world.get::<Velocity>(*e).copied() {
+            if let Some(v) = self.world.get::<Velocity>(e).copied() {
                 self.world.insert(new_e, v);
             }
-            if let Some(h) = self.world.get::<Health>(*e).copied() {
+            if let Some(h) = self.world.get::<Health>(e).copied() {
                 self.world.insert(new_e, h);
             }
-            if let Some(c) = self.world.get::<Chase>(*e).copied() {
+            if let Some(c) = self.world.get::<Chase>(e).copied() {
                 self.world.insert(new_e, c);
             }
-            if let Some(&i) = self.world.get::<Interactable>(*e) {
+            if let Some(&i) = self.world.get::<Interactable>(e) {
                 self.world.insert(new_e, i);
             }
-            if let Some(t) = self.world.get::<TextureTiling>(*e).copied() {
+            if let Some(t) = self.world.get::<TextureTiling>(e).copied() {
                 self.world.insert(new_e, t);
             }
-            if let Some(el) = self.world.get::<Elevator>(*e).cloned() {
+            if let Some(t) = self.world.get::<Tint>(e).copied() {
+                self.world.insert(new_e, t);
+            }
+            if let Some(v) = self.world.get::<Visible>(e).copied() {
+                self.world.insert(new_e, v);
+            }
+            if let Some(el) = self.world.get::<Elevator>(e).cloned() {
                 self.world.insert(new_e, el);
             }
-            if let Some(sd) = self.world.get::<SlidingDoor>(*e).copied() {
+            if let Some(sd) = self.world.get::<SlidingDoor>(e).copied() {
                 self.world.insert(new_e, sd);
             }
-            if let Some(rb) = self.world.get::<crate::physics::RigidBody>(*e).copied() {
+            if let Some(rb) = self.world.get::<RigidBody>(e).copied() {
                 self.world.insert(new_e, rb);
             }
-            if let Some(col) = self.world.get::<crate::physics::Collider>(*e).copied() {
+            if let Some(col) = self.world.get::<Collider>(e).copied() {
                 self.world.insert(new_e, col);
             }
-            if let Some(mat) = self.world.get::<crate::physics::PhysicsMaterial>(*e).copied() {
+            if let Some(mat) = self.world.get::<PhysicsMaterial>(e).copied() {
                 self.world.insert(new_e, mat);
             }
 
-            new_selected.push(new_e);
+            // Parent: если родитель тоже в выделении — на нового родителя,
+            // иначе — на старого (сохраняем связь).
+            if let Some(&Parent(p)) = self.world.get::<Parent>(e) {
+                let new_parent = old_to_new.get(&p).copied().unwrap_or(p);
+                self.world.insert(new_e, Parent(new_parent));
+            }
         }
 
+        // Уникализация материалов.
+        let new_selected: Vec<Entity> = originals.iter().map(|e| old_to_new[e]).collect();
         for &ne in &new_selected {
             self.ensure_unique_material_for(ne);
         }
@@ -1455,10 +1512,6 @@ impl<G: Game> App<G> {
                 let was_active = self.editor.state.play.active;
 
                 if !was_active {
-                    // ============================================================
-                    // ENTER PLAY: сначала снимаем снапшот, потом активируем.
-                    // Снапшот захватывает мир ДО того как play его изменит.
-                    // ============================================================
                     self.play_snapshot = Some(self.capture_play_snapshot());
 
                     let play = &mut self.editor.state.play;
@@ -1500,11 +1553,6 @@ impl<G: Game> App<G> {
                         spawn.x, spawn.y, spawn.z
                     );
                 } else {
-                    // ============================================================
-                    // EXIT PLAY: сначала восстанавливаем мир, потом
-                    // сбрасываем runtime-состояние play.
-                    // ============================================================
-
                     self.game.camera_mut().exit_fps();
                     let _ = self.window.set_cursor_grab(CursorGrabMode::None);
                     self.window.set_cursor_visible(true);
@@ -1560,33 +1608,56 @@ impl<G: Game> App<G> {
                 log::info!("Copied {} entities to clipboard", n);
             }
             EditorAction::PasteEntity => {
+                // ИСПРАВЛЕНО: сохраняет иерархию через ремап old_id → new_e.
+                use std::collections::HashMap;
+
                 let snaps = self.editor.state.clipboard_entities.clone();
                 if snaps.is_empty() {
                     return;
                 }
                 self.editor.state.undo.push_forced(&self.world);
 
-                let mut new_selected = Vec::new();
                 let offset = Vec3::new(1.0, 0.0, 1.0);
-                for mut snap in snaps {
-                    if let Some(ref mut t) = snap.transform {
-                        t.position[0] += offset.x;
-                        t.position[1] += offset.y;
-                        t.position[2] += offset.z;
+
+                let mut old_to_new: HashMap<u32, Entity> = HashMap::new();
+                let mut new_selected: Vec<Entity> = Vec::with_capacity(snaps.len());
+
+                for (idx, mut snap) in snaps.iter().cloned().enumerate() {
+                    let old_id = snap.entity_id.unwrap_or(idx as u32);
+
+                    // Смещение — только корневым (у кого parent None).
+                    if snap.parent.is_none() {
+                        if let Some(ref mut t) = snap.transform {
+                            t.position[0] += offset.x;
+                            t.position[1] += offset.y;
+                            t.position[2] += offset.z;
+                        }
                     }
-                    snap.parent = None;
                     snap.entity_id = None;
                     if let Some(ref mut n) = snap.name {
                         n.push_str("_paste");
                     }
+
                     let e = crate::scene::serialize::spawn_snapshot(&mut self.world, snap);
+                    old_to_new.insert(old_id, e);
                     new_selected.push(e);
                 }
+
+                // Второй проход: восстановить Parent через ремап.
+                for (idx, &new_e) in new_selected.iter().enumerate() {
+                    let old_parent = snaps[idx].parent;
+                    if let Some(op) = old_parent {
+                        if let Some(&new_parent) = old_to_new.get(&op) {
+                            self.world.insert(new_e, Parent(new_parent));
+                        }
+                    }
+                }
+
                 for &ne in &new_selected {
                     self.ensure_unique_material_for(ne);
                 }
                 self.editor.state.selected = new_selected;
-                log::info!("Pasted entities");
+                log::info!("Pasted entities (hierarchy preserved)");
             }
             EditorAction::MakeMaterialUnique => {
                 let Some(e) = self.editor.state.primary() else { return; };
@@ -1686,22 +1757,31 @@ impl<G: Game> App<G> {
                 self.editor.state.select_single(e);
             }
             EditorAction::DeleteSelected => {
+                // ИСПРАВЛЕНО: рекурсивное удаление всех потомков.
+                use std::collections::HashSet;
+
                 if self.editor.state.selected.is_empty() {
                     return;
                 }
                 self.editor.state.undo.push_forced(&self.world);
-                let victims: Vec<Entity> = self.editor.state.selected.clone();
-                let mut all_victims = victims.clone();
-                for &v in &victims {
+
+                // Рекурсивный сбор всех потомков выделенных.
+                let mut to_delete: HashSet<Entity> =
+                    self.editor.state.selected.iter().copied().collect();
+                let mut stack: Vec<Entity> = self.editor.state.selected.clone();
+
+                while let Some(parent) = stack.pop() {
                     for &c in self.world.entities() {
                         if let Some(Parent(p)) = self.world.get::<Parent>(c).copied() {
-                            if p == v && !all_victims.contains(&c) {
-                                all_victims.push(c);
+                            if p == parent && to_delete.insert(c) {
+                                stack.push(c);
                             }
                         }
                     }
                 }
-                for e in all_victims {
+
+                let victims: Vec<Entity> = to_delete.into_iter().collect();
+                for e in victims {
                     self.world.despawn(e);
                 }
                 self.editor.state.selected.clear();
@@ -2029,343 +2109,380 @@ impl<G: Game> App<G> {
             EditorAction::PlacePalette | EditorAction::ClearPalette => {}
         }
     }
-}
 
-pub fn run<G: Game>(mut game: G) {
-    env_logger::init();
+    fn on_window_event(
+        &mut self,
+        elwt: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let consumed = self.editor.on_window_event(&self.window, &event);
+        let wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
+        let in_play = self.editor.state.play.active;
 
-    let event_loop = EventLoop::new().unwrap();
+        match event {
+            WindowEvent::CloseRequested => elwt.exit(),
 
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Rust Engine 3D")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
-            .build(&event_loop)
-            .unwrap(),
-    );
+            WindowEvent::Resized(size) => {
+                self.renderer.resize(size);
+                self.game
+                    .camera_mut()
+                    .set_viewport(size.width, size.height);
+            }
 
-    let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+            WindowEvent::KeyboardInput { ref event, .. } if !wants_keyboard => {
+                self.input.on_key(event);
 
-    let mut world = World::new();
-    game.camera_mut()
-        .set_viewport(renderer.size.width, renderer.size.height);
-    game.init(&mut world, &mut renderer);
+                if self.editor.state.flying
+                    && event.state == ElementState::Pressed
+                    && event.physical_key
+                        == winit::keyboard::PhysicalKey::Code(KeyCode::Escape)
+                {
+                    self.game.camera_mut().exit_fly();
+                    self.editor.state.flying = false;
+                    self.input.editor_flying = false;
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                    self.window.set_cursor_visible(true);
+                }
+            }
 
-    let editor = Editor::new(
-        &window,
-        &renderer.device,
-        renderer.config.format,
-        egui::ViewportId::ROOT,
-    );
+            // ИСПРАВЛЕНО: MouseInput всегда обновляет Input; редакторские
+            // взаимодействия только вне Play-режима.
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.input.on_mouse_button(button, state);
 
-    let mut app = App {
-        game,
-        world,
-        input: Input::new(),
-        time: Time::new(),
-        window: window.clone(),
-        renderer,
-        editor,
-        ui_state: UiState::new(),
-        mouse_press_pos: None,
-        viewport_rect: None,
-        rmb_press_time: None,
-        rmb_press_pos: None,
-        rmb_dragged: false,
-        particles: Vec::new(),
-        projectiles: Vec::new(),
-        audio: AudioSystem::new(),
-        physics: PhysicsWorld::default(),
-        play_snapshot: None,
-        elevator_prev_state: HashMap::new(),
-    };
+                if !in_play {
+                    let in_active_drag = self.editor.state.gizmo.drag.is_some()
+                        || self.editor.state.box_select.is_some();
+                    let allow = !consumed || in_active_drag;
 
-    // Применяем сохранённые графические настройки к игре.
-    // `EditorState::new()` уже загрузил `editor.ron` в `settings.postfx`.
-    let initial_postfx = app.editor.state.settings.postfx;
-    app.game.apply_postfx(initial_postfx);
+                    let (mx, my) = self.input.mouse_pos;
+                    let in_vp = self.in_viewport(mx, my);
 
-    event_loop
-        .run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Poll);
-
-            match event {
-                Event::WindowEvent { event, window_id } if window_id == app.window.id() => {
-                    let _consumed = app.editor.on_window_event(&app.window, &event);
-                    let wants_keyboard = app.editor.egui_ctx.wants_keyboard_input();
-                    let in_play = app.editor.state.play.active;
-
-                    match event {
-                        WindowEvent::CloseRequested => elwt.exit(),
-
-                        WindowEvent::Resized(size) => {
-                            app.renderer.resize(size);
-                            app.game
-                                .camera_mut()
-                                .set_viewport(size.width, size.height);
-                        }
-
-                        WindowEvent::KeyboardInput { ref event, .. } if !wants_keyboard => {
-                            app.input.on_key(event);
-
-                            if app.editor.state.flying
-                                && event.state == ElementState::Pressed
-                                && event.physical_key
-                                    == winit::keyboard::PhysicalKey::Code(KeyCode::Escape)
-                            {
-                                app.game.camera_mut().exit_fly();
-                                app.editor.state.flying = false;
-                                app.input.editor_flying = false;
-                                let _ = app.window.set_cursor_grab(CursorGrabMode::None);
-                                app.window.set_cursor_visible(true);
-                            }
-                        }
-
-                        WindowEvent::MouseInput { state, button, .. } if !in_play => {
-                            app.input.on_mouse_button(button, state);
-
-                            let (mx, my) = app.input.mouse_pos;
-                            let in_vp = app.in_viewport(mx, my);
-
-                            if button == MouseButton::Left && in_vp {
-                                match state {
-                                    ElementState::Pressed => {
-                                        if app.editor.state.palette.active.is_some() {
-                                            if let Some(item) = app.editor.state.palette.active {
-                                                if let Some(pos) =
-                                                    app.editor.state.palette.preview_pos
-                                                {
-                                                    let ctrl = app.input.key_down(KeyCode::ControlLeft)
-                                                        || app.input.key_down(KeyCode::ControlRight);
-                                                    let snap = ctrl
-                                                        || app.editor.state.palette.snap_to_grid;
-                                                    let step = app.editor.state.palette.grid_step;
-                                                    let final_pos = if snap {
-                                                        placement::snap_to_grid(pos, step)
-                                                    } else {
-                                                        pos
-                                                    };
-                                                    app.spawn_palette_item(item, final_pos);
-                                                    if !app.editor.state.palette.keep_active {
-                                                        app.editor.state.palette.active = None;
-                                                    }
-                                                }
+                    if allow && button == MouseButton::Left && in_vp {
+                        match state {
+                            ElementState::Pressed => {
+                                if self.editor.state.palette.active.is_some() {
+                                    if let Some(item) = self.editor.state.palette.active {
+                                        if let Some(pos) =
+                                            self.editor.state.palette.preview_pos
+                                        {
+                                            let ctrl = self
+                                                .input
+                                                .key_down(KeyCode::ControlLeft)
+                                                || self.input
+                                                    .key_down(KeyCode::ControlRight);
+                                            let snap = ctrl
+                                                || self.editor.state.palette.snap_to_grid;
+                                            let step = self.editor.state.palette.grid_step;
+                                            let final_pos = if snap {
+                                                placement::snap_to_grid(pos, step)
+                                            } else {
+                                                pos
+                                            };
+                                            self.spawn_palette_item(item, final_pos);
+                                            if !self.editor.state.palette.keep_active {
+                                                self.editor.state.palette.active = None;
                                             }
-                                            app.mouse_press_pos = None;
-                                        } else {
-                                            let started_gizmo =
-                                                if !app.editor.state.selected.is_empty() {
-                                                    let ax = gizmo::pick_axis(
-                                                        &app.world,
-                                                        &app.editor.state.selected,
-                                                        app.game.camera(),
-                                                        app.editor.state.gizmo.mode,
-                                                        &app.renderer,
-                                                        mx, my,
-                                                    );
+                                        }
+                                    }
+                                    self.mouse_press_pos = None;
+                                } else {
+                                    let started_gizmo =
+                                        if !self.editor.state.selected.is_empty() {
+                                            let ax = gizmo::pick_axis(
+                                                &self.world,
+                                                &self.editor.state.selected,
+                                                self.game.camera(),
+                                                self.editor.state.gizmo.mode,
+                                                &self.renderer,
+                                                mx, my,
+                                            );
 
-                                                    if let Some(axis) = ax {
-                                                        let alt = app.input.key_down(KeyCode::AltLeft)
-                                                            || app.input.key_down(KeyCode::AltRight);
-                                                        if alt {
-                                                            app.editor.state.undo.push_forced(&app.world);
-                                                            app.duplicate_selected();
-                                                        }
+                                            if let Some(axis) = ax {
+                                                let alt = self
+                                                    .input
+                                                    .key_down(KeyCode::AltLeft)
+                                                    || self.input
+                                                        .key_down(KeyCode::AltRight);
+                                                if alt {
+                                                    self.editor.state.undo
+                                                        .push_forced(&self.world);
+                                                    self.duplicate_selected();
+                                                }
 
-                                                        if let Some(drag) = gizmo::begin_drag(
-                                                            &app.world,
-                                                            &app.editor.state.selected,
-                                                            axis,
-                                                            app.editor.state.gizmo.mode,
-                                                            app.game.camera(),
-                                                            &app.renderer,
-                                                            mx, my,
-                                                        ) {
-                                                            app.editor.state.undo.push_forced(&app.world);
-                                                            app.editor.state.gizmo.drag = Some(drag);
-                                                            app.editor.state.gizmo.hovered = Some(axis);
-                                                            true
-                                                        } else {
-                                                            false
-                                                        }
-                                                    } else {
-                                                        false
-                                                    }
+                                                if let Some(drag) = gizmo::begin_drag(
+                                                    &self.world,
+                                                    &self.editor.state.selected,
+                                                    axis,
+                                                    self.editor.state.gizmo.mode,
+                                                    self.game.camera(),
+                                                    &self.renderer,
+                                                    mx, my,
+                                                ) {
+                                                    self.editor.state.undo
+                                                        .push_forced(&self.world);
+                                                    self.editor.state.gizmo.drag =
+                                                        Some(drag);
+                                                    self.editor.state.gizmo.hovered =
+                                                        Some(axis);
+                                                    true
                                                 } else {
                                                     false
-                                                };
-
-                                            if !started_gizmo {
-                                                app.editor.state.box_select = Some(BoxSelect {
-                                                    start: (mx, my),
-                                                    current: (mx, my),
-                                                });
-                                                app.mouse_press_pos = None;
-                                            }
-                                        }
-                                    }
-                                    ElementState::Released => {
-                                        app.editor.state.gizmo.drag = None;
-
-                                        if let Some(bs) = app.editor.state.box_select.take() {
-                                            let dx = bs.current.0 - bs.start.0;
-                                            let dy = bs.current.1 - bs.start.1;
-
-                                            if dx * dx + dy * dy < 9.0 {
-                                                app.try_pick((mx, my));
+                                                }
                                             } else {
-                                                let entities =
-                                                    crate::editor::picking::entities_in_screen_rect(
-                                                        &app.world,
-                                                        &app.renderer,
-                                                        app.game.camera(),
-                                                        (bs.start.0, bs.start.1,
-                                                         bs.current.0, bs.current.1),
-                                                    );
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
 
-                                                let shift = app.input.key_down(KeyCode::ShiftLeft)
-                                                    || app.input.key_down(KeyCode::ShiftRight);
+                                    if !started_gizmo {
+                                        self.editor.state.box_select = Some(BoxSelect {
+                                            start: (mx, my),
+                                            current: (mx, my),
+                                        });
+                                        self.mouse_press_pos = None;
+                                    }
+                                }
+                            }
+                            ElementState::Released => {
+                                self.editor.state.gizmo.drag = None;
 
-                                                if shift {
-                                                    for e in entities {
-                                                        if !app.editor.state.selected.contains(&e) {
-                                                            app.editor.state.selected.push(e);
-                                                        }
-                                                    }
-                                                } else {
-                                                    app.editor.state.selected = entities;
+                                if let Some(bs) = self.editor.state.box_select.take() {
+                                    let dx = bs.current.0 - bs.start.0;
+                                    let dy = bs.current.1 - bs.start.1;
+
+                                    if dx * dx + dy * dy < 9.0 {
+                                        self.try_pick((mx, my));
+                                    } else {
+                                        let entities =
+                                            crate::editor::picking::entities_in_screen_rect(
+                                                &self.world,
+                                                &self.renderer,
+                                                self.game.camera(),
+                                                (bs.start.0, bs.start.1,
+                                                 bs.current.0, bs.current.1),
+                                            );
+
+                                        let shift =
+                                            self.input.key_down(KeyCode::ShiftLeft)
+                                                || self.input
+                                                    .key_down(KeyCode::ShiftRight);
+
+                                        if shift {
+                                            for e in entities {
+                                                if !self.editor.state.selected.contains(&e) {
+                                                    self.editor.state.selected.push(e);
                                                 }
                                             }
-                                            app.mouse_press_pos = None;
-                                        } else if let Some((px, py)) = app.mouse_press_pos.take() {
-                                            let dx = mx - px;
-                                            let dy = my - py;
-                                            if dx * dx + dy * dy < 9.0 {
-                                                app.try_pick((mx, my));
-                                            }
+                                        } else {
+                                            self.editor.state.selected = entities;
+                                        }
+                                    }
+                                    self.mouse_press_pos = None;
+                                } else if let Some((px, py)) = self.mouse_press_pos.take() {
+                                    let dx = mx - px;
+                                    let dy = my - py;
+                                    if dx * dx + dy * dy < 9.0 {
+                                        self.try_pick((mx, my));
+                                    }
+                                }
+                            }
+                        }
+                    } else if allow && button == MouseButton::Right {
+                        match state {
+                            ElementState::Pressed => {
+                                self.rmb_press_time = Some(Instant::now());
+                                self.rmb_press_pos = Some(self.input.mouse_pos);
+                                self.rmb_dragged = false;
+                            }
+                            ElementState::Released => {
+                                let was_drag = self.rmb_dragged;
+                                if !was_drag && in_vp {
+                                    if let Some(t) = self.rmb_press_time {
+                                        if t.elapsed().as_millis() < 300 {
+                                            self.editor.state.context_menu_pos =
+                                                Some(self.input.mouse_pos);
                                         }
                                     }
                                 }
-                            } else if button == MouseButton::Right {
-                                match state {
-                                    ElementState::Pressed => {
-                                        app.rmb_press_time = Some(Instant::now());
-                                        app.rmb_press_pos = Some(app.input.mouse_pos);
-                                        app.rmb_dragged = false;
-                                    }
-                                    ElementState::Released => {
-                                        let was_drag = app.rmb_dragged;
-                                        if !was_drag && in_vp {
-                                            if let Some(t) = app.rmb_press_time {
-                                                if t.elapsed().as_millis() < 300 {
-                                                    app.editor.state.context_menu_pos =
-                                                        Some(app.input.mouse_pos);
-                                                }
-                                            }
-                                        }
-                                        app.rmb_press_time = None;
-                                        app.rmb_press_pos = None;
-                                        app.rmb_dragged = false;
-                                    }
-                                }
+                                self.rmb_press_time = None;
+                                self.rmb_press_pos = None;
+                                self.rmb_dragged = false;
                             }
                         }
-
-                        WindowEvent::CursorMoved { position, .. } => {
-                            app.input.on_mouse_move(position.x as f32, position.y as f32);
-
-                            let (mx, my) = app.input.mouse_pos;
-                            let in_vp = app.in_viewport(mx, my);
-
-                            if let Some(bs) = &mut app.editor.state.box_select {
-                                bs.current = (mx, my);
-                            }
-
-                            if app.input.mouse_down(MouseButton::Right) {
-                                if let Some((px, py)) = app.rmb_press_pos {
-                                    if !app.rmb_dragged {
-                                        let dx = mx - px;
-                                        let dy = my - py;
-                                        if dx * dx + dy * dy > 25.0 {
-                                            app.rmb_dragged = true;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !in_play
-                                && !app.editor.state.flying
-                                && !app.editor.state.selected.is_empty()
-                                && app.editor.state.box_select.is_none()
-                            {
-                                if let Some(drag) = app.editor.state.gizmo.drag.clone() {
-                                    let snap = app.input.key_down(KeyCode::ControlLeft)
-                                        || app.input.key_down(KeyCode::ControlRight)
-                                        || app.editor.state.gizmo.snap_enabled;
-                                    gizmo::apply_drag_with_mode(
-                                        &mut app.world,
-                                        &drag,
-                                        app.editor.state.gizmo.mode,
-                                        snap,
-                                        app.game.camera(),
-                                        &app.renderer,
-                                        mx, my,
-                                    );
-                                } else if in_vp {
-                                    let h = gizmo::pick_axis(
-                                        &app.world,
-                                        &app.editor.state.selected,
-                                        app.game.camera(),
-                                        app.editor.state.gizmo.mode,
-                                        &app.renderer,
-                                        mx, my,
-                                    );
-                                    app.editor.state.gizmo.hovered = h;
-                                } else {
-                                    app.editor.state.gizmo.hovered = None;
-                                }
-                            }
-                        }
-
-                        WindowEvent::CursorEntered { .. } => {
-                            app.input.on_cursor_enter();
-                        }
-                        WindowEvent::CursorLeft { .. } => {
-                            app.input.on_cursor_enter();
-                        }
-
-                        WindowEvent::MouseWheel { delta, .. } if !in_play => {
-                            let (mx, my) = app.input.mouse_pos;
-                            if app.in_viewport(mx, my) {
-                                let d = match delta {
-                                    MouseScrollDelta::LineDelta(_, y) => y,
-                                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
-                                };
-                                app.input.on_scroll(d);
-                            }
-                        }
-
-                        WindowEvent::RedrawRequested => {
-                            app.redraw(elwt);
-                            app.window.request_redraw();
-                        }
-
-                        _ => {}
+                    } else if !allow
+                        && button == MouseButton::Right
+                        && state == ElementState::Released
+                    {
+                        self.rmb_press_time = None;
+                        self.rmb_press_pos = None;
+                        self.rmb_dragged = false;
                     }
                 }
-
-                Event::DeviceEvent {
-                    event: DeviceEvent::MouseMotion { delta }, ..
-                } => {
-                    app.input.on_mouse_motion_device(delta.0 as f32, delta.1 as f32);
-                }
-
-                Event::AboutToWait => {
-                    app.window.request_redraw();
-                }
-
-                _ => {}
             }
-        })
-        .unwrap();
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input
+                    .on_mouse_move(position.x as f32, position.y as f32);
+
+                let in_active_drag = self.editor.state.gizmo.drag.is_some()
+                    || self.editor.state.box_select.is_some();
+                if consumed && !in_active_drag {
+                    // egui активно взаимодействует с курсором.
+                } else {
+                    let (mx, my) = self.input.mouse_pos;
+                    let in_vp = self.in_viewport(mx, my);
+
+                    if let Some(bs) = &mut self.editor.state.box_select {
+                        bs.current = (mx, my);
+                    }
+
+                    if self.input.mouse_down(MouseButton::Right) {
+                        if let Some((px, py)) = self.rmb_press_pos {
+                            if !self.rmb_dragged {
+                                let dx = mx - px;
+                                let dy = my - py;
+                                if dx * dx + dy * dy > 25.0 {
+                                    self.rmb_dragged = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !in_play
+                        && !self.editor.state.flying
+                        && !self.editor.state.selected.is_empty()
+                        && self.editor.state.box_select.is_none()
+                    {
+                        if let Some(drag) = self.editor.state.gizmo.drag.clone() {
+                            let snap = self.input.key_down(KeyCode::ControlLeft)
+                                || self.input.key_down(KeyCode::ControlRight)
+                                || self.editor.state.gizmo.snap_enabled;
+                            gizmo::apply_drag_with_mode(
+                                &mut self.world,
+                                &drag,
+                                self.editor.state.gizmo.mode,
+                                snap,
+                                self.game.camera(),
+                                &self.renderer,
+                                mx, my,
+                            );
+                        } else if in_vp {
+                            let h = gizmo::pick_axis(
+                                &self.world,
+                                &self.editor.state.selected,
+                                self.game.camera(),
+                                self.editor.state.gizmo.mode,
+                                &self.renderer,
+                                mx, my,
+                            );
+                            self.editor.state.gizmo.hovered = h;
+                        } else {
+                            self.editor.state.gizmo.hovered = None;
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::CursorEntered { .. } => {
+                self.input.on_cursor_enter();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.input.on_cursor_enter();
+            }
+
+            WindowEvent::MouseWheel { delta, .. } if !in_play => {
+                if !consumed {
+                    let (mx, my) = self.input.mouse_pos;
+                    if self.in_viewport(mx, my) {
+                        let d = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y,
+                            MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+                        };
+                        self.input.on_scroll(d);
+                    }
+                }
+            }
+
+            WindowEvent::RedrawRequested => {
+                self.redraw(elwt);
+                self.window.request_redraw();
+            }
+
+            _ => {}
+        }
+    }
+
+    fn on_device_event(&mut self, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.input
+                .on_mouse_motion_device(delta.0 as f32, delta.1 as f32);
+        }
+    }
+}
+
+struct AppHandler<G: Game> {
+    app: Option<App<G>>,
+    game_init: Option<G>,
+}
+
+impl<G: Game> ApplicationHandler for AppHandler<G> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.app.is_some() {
+            return;
+        }
+        let game = self
+            .game_init
+            .take()
+            .expect("resumed called twice with no Game");
+        let app = App::new(event_loop, game);
+        self.app = Some(app);
+        event_loop.set_control_flow(ControlFlow::Poll);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if let Some(app) = self.app.as_mut() {
+            app.on_window_event(event_loop, window_id, event);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let Some(app) = self.app.as_mut() {
+            app.on_device_event(event);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Poll);
+        if let Some(app) = self.app.as_ref() {
+            app.window.request_redraw();
+        }
+    }
+}
+
+pub fn run<G: Game>(game: G) {
+    env_logger::init();
+
+    let event_loop = EventLoop::new().expect("failed to create EventLoop");
+
+    let mut handler = AppHandler::<G> {
+        app: None,
+        game_init: Some(game),
+    };
+
+    event_loop
+        .run_app(&mut handler)
+        .expect("EventLoop::run_app failed");
 }

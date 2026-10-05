@@ -1,22 +1,20 @@
 //! Коллизии игрока со сценой.
 //!
+//! Использует компонент `Collider` (Sphere/Aabb/Capsule) вместо AABB
+//! меша. Работает с Parent-цепочкой через `game::world_matrix`.
+//!
 //! **Dynamic-тела не блокируют игрока по XZ** — он проходит сквозь их
-//! footprint, а `character::push_dynamic_bodies` после этого толкает
-//! пересекающиеся тела. По Y динамические тела по-прежнему блокируют —
-//! игрок может стоять на ящике.
+//! footprint, а `character::push_dynamic_bodies` затем толкает
+//! пересекающиеся тела. По Y dynamic-тела блокируют — можно стоять
+//! на ящике.
 
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
-use crate::game::components::{MeshHandle, Transform, Visible};
-use crate::physics::{BodyType, RigidBody};
-use crate::render::Renderer;
+use crate::game::components::Visible;
+use crate::physics::{BodyType, Collider, RigidBody};
 
-const MAX_COLLIDABLE_EXTENT: f32 = 30.0;
 const CAPSULE_SAMPLES: usize = 8;
-/// Допуск по Y для определения «стоит на поверхности».
-/// Увеличен с 0.10 до 0.15 — быстрый лифт (5+ м/с) при 60 FPS проходит
-/// 8+ см за кадр и мог проскочить поддержку.
 const SUPPORT_TOLERANCE: f32 = 0.15;
 
 #[derive(Clone, Copy)]
@@ -57,31 +55,33 @@ fn capsule_hits_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
     false
 }
 
-/// Игрок vs мир. По XZ **игнорирует** dynamic-тела —
-/// они не блокируют движение, их толкает `character::push_dynamic_bodies`.
-fn capsule_hits(
-    world: &World,
-    renderer: &Renderer,
-    feet_pos: Vec3,
-    cap: &PlayerCapsule,
-) -> bool {
-    capsule_hits_impl(world, renderer, feet_pos, cap, false)
+fn collider_world_aabb(col: &Collider, world_pos: Vec3, world_scale: Vec3) -> (Vec3, Vec3) {
+    match col {
+        Collider::Sphere { radius } => {
+            let r = radius * world_scale.max_element();
+            (world_pos - Vec3::splat(r), world_pos + Vec3::splat(r))
+        }
+        Collider::Aabb { half_extents } => {
+            let h = *half_extents * world_scale;
+            (world_pos - h, world_pos + h)
+        }
+        Collider::Capsule { radius, height } => {
+            let r = radius * world_scale.max_element();
+            let hy = height * world_scale.y * 0.5;
+            let h = Vec3::new(r, hy + r, r);
+            (world_pos - h, world_pos + h)
+        }
+    }
 }
 
-/// То же, но с учётом dynamic-тел. Используется в Y-проверке
-/// `resolve_movement`, чтобы игрок мог стоять на ящике.
-fn capsule_hits_with_dynamic(
-    world: &World,
-    renderer: &Renderer,
-    feet_pos: Vec3,
-    cap: &PlayerCapsule,
-) -> bool {
-    capsule_hits_impl(world, renderer, feet_pos, cap, true)
+fn world_pos_scale(world: &World, e: Entity) -> Option<(Vec3, Vec3)> {
+    let model = crate::game::world_matrix(world, e);
+    let (s, _, t) = model.to_scale_rotation_translation();
+    Some((t, s.abs()))
 }
 
 fn capsule_hits_impl(
     world: &World,
-    renderer: &Renderer,
     feet_pos: Vec3,
     cap: &PlayerCapsule,
     include_dynamic: bool,
@@ -92,37 +92,19 @@ fn capsule_hits_impl(
     let b = feet_pos + Vec3::Y * (h - r);
 
     for &e in world.entities() {
-        // Skip invisible.
         if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 {
-                continue;
-            }
+            if !v.0 { continue; }
         }
-
-        // Skip dynamic bodies by XZ (or everywhere if include_dynamic=false).
         if !include_dynamic {
             if let Some(rb) = world.get::<RigidBody>(e) {
-                if rb.body_type == BodyType::Dynamic {
-                    continue;
-                }
+                if rb.body_type == BodyType::Dynamic { continue; }
             }
         }
 
-        let (Some(_t), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e))
-        else {
-            continue;
-        };
-        let Some(mesh) = renderer.meshes.get(&mh.0) else {
-            continue;
-        };
+        let Some(col) = world.get::<Collider>(e) else { continue };
+        let Some((wp, ws)) = world_pos_scale(world, e) else { continue };
 
-        let model = crate::game::world_matrix(world, e);
-        let (amin, amax) = mesh.world_aabb(&model);
-        let extent = (amax - amin).length();
-        if extent > MAX_COLLIDABLE_EXTENT {
-            continue;
-        }
-
+        let (amin, amax) = collider_world_aabb(col, wp, ws);
         if capsule_hits_aabb(a, b, r, amin, amax) {
             return true;
         }
@@ -130,11 +112,17 @@ fn capsule_hits_impl(
     false
 }
 
+fn capsule_hits(world: &World, feet_pos: Vec3, cap: &PlayerCapsule) -> bool {
+    capsule_hits_impl(world, feet_pos, cap, false)
+}
+
+fn capsule_hits_with_dynamic(world: &World, feet_pos: Vec3, cap: &PlayerCapsule) -> bool {
+    capsule_hits_impl(world, feet_pos, cap, true)
+}
+
 /// Ищет entity, на чьей верхней плоскости стоит игрок.
-/// Работает для всех тел, включая dynamic — можно стоять на ящике.
 pub fn find_support_entity(
     world: &World,
-    renderer: &Renderer,
     feet_pos: Vec3,
     cap: &PlayerCapsule,
 ) -> Option<Entity> {
@@ -143,29 +131,17 @@ pub fn find_support_entity(
 
     for &e in world.entities() {
         if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 {
-                continue;
-            }
+            if !v.0 { continue; }
         }
-        let Some(mh) = world.get::<MeshHandle>(e) else { continue };
-        let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
-        if world.get::<Transform>(e).is_none() {
-            continue;
-        }
+        let Some(col) = world.get::<Collider>(e) else { continue };
+        let Some((wp, ws)) = world_pos_scale(world, e) else { continue };
 
-        let model = crate::game::world_matrix(world, e);
-        let (amin, amax) = mesh.world_aabb(&model);
-        let extent = (amax - amin).length();
-        if extent > MAX_COLLIDABLE_EXTENT {
-            continue;
-        }
-
+        let (amin, amax) = collider_world_aabb(col, wp, ws);
         let top_y = amax.y;
         let dy = feet_pos.y - top_y;
         if !(-0.02..=SUPPORT_TOLERANCE).contains(&dy) {
             continue;
         }
-
         if feet_pos.x + r < amin.x || feet_pos.x - r > amax.x {
             continue;
         }
@@ -181,20 +157,14 @@ pub fn find_support_entity(
 }
 
 /// Разрешает движение `delta` из `start_feet` с учётом коллизий.
-///
-/// Возвращает `(new_feet, on_ground, support_entity)`.
-///
-/// XZ — с игнорированием dynamic-тел (player passes through, потом толкает).
-/// Y  — со всеми телами (можно стоять на ящике).
 pub fn resolve_movement(
     world: &World,
-    renderer: &Renderer,
     start_feet: Vec3,
     delta: Vec3,
     cap: &PlayerCapsule,
     floor_y: f32,
 ) -> (Vec3, bool, Option<Entity>) {
-    let stuck = capsule_hits_with_dynamic(world, renderer, start_feet, cap);
+    let stuck = capsule_hits_with_dynamic(world, start_feet, cap);
 
     if stuck {
         let mut pos = start_feet + delta;
@@ -203,7 +173,7 @@ pub fn resolve_movement(
         }
         let on_ground = (start_feet.y + delta.y) <= floor_y + 1e-4;
         let support = if on_ground {
-            find_support_entity(world, renderer, pos, cap)
+            find_support_entity(world, pos, cap)
         } else {
             None
         };
@@ -216,15 +186,15 @@ pub fn resolve_movement(
     let can_step_up = start_feet.y <= floor_y + 1e-3;
     let step_heights = [0.15_f32, 0.30, 0.45];
 
-    // === X — без dynamic ===
+    // X — без dynamic.
     if delta.x.abs() > 1e-6 {
         let try_pos = pos + Vec3::new(delta.x, 0.0, 0.0);
-        if !capsule_hits(world, renderer, try_pos, cap) {
+        if !capsule_hits(world, try_pos, cap) {
             pos = try_pos;
         } else if can_step_up {
             for h in step_heights {
                 let lifted = try_pos + Vec3::new(0.0, h, 0.0);
-                if !capsule_hits(world, renderer, lifted, cap) {
+                if !capsule_hits(world, lifted, cap) {
                     pos = lifted;
                     break;
                 }
@@ -232,15 +202,15 @@ pub fn resolve_movement(
         }
     }
 
-    // === Z — без dynamic ===
+    // Z — без dynamic.
     if delta.z.abs() > 1e-6 {
         let try_pos = pos + Vec3::new(0.0, 0.0, delta.z);
-        if !capsule_hits(world, renderer, try_pos, cap) {
+        if !capsule_hits(world, try_pos, cap) {
             pos = try_pos;
         } else if can_step_up {
             for h in step_heights {
                 let lifted = try_pos + Vec3::new(0.0, h, 0.0);
-                if !capsule_hits(world, renderer, lifted, cap) {
+                if !capsule_hits(world, lifted, cap) {
                     pos = lifted;
                     break;
                 }
@@ -248,7 +218,7 @@ pub fn resolve_movement(
         }
     }
 
-    // === Y — субшагами, со всеми телами ===
+    // Y — с dynamic (можно стоять на ящике).
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
         let steps = (delta.y.abs() / max_step).ceil().max(1.0) as i32;
@@ -256,7 +226,7 @@ pub fn resolve_movement(
 
         for _ in 0..steps {
             let try_pos = pos + Vec3::new(0.0, step, 0.0);
-            if !capsule_hits_with_dynamic(world, renderer, try_pos, cap) {
+            if !capsule_hits_with_dynamic(world, try_pos, cap) {
                 pos = try_pos;
             } else {
                 if step < 0.0 {
@@ -272,7 +242,7 @@ pub fn resolve_movement(
         on_ground = true;
     }
 
-    let support = find_support_entity(world, renderer, pos, cap);
+    let support = find_support_entity(world, pos, cap);
     if support.is_some() {
         on_ground = true;
     }

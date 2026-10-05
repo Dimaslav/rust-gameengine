@@ -4,7 +4,6 @@ use crate::render::ibl::IblResources;
 
 use super::gpu_types::*;
 
-/// Сколько уровней в bloom chain.
 pub const BLOOM_MIP_COUNT: usize = 5;
 
 pub struct BloomMip {
@@ -16,37 +15,38 @@ pub struct BloomMip {
 pub struct BloomChain {
     pub mips: Vec<BloomMip>,
     pub sampler: wgpu::Sampler,
-
-    /// Два варианта prefilter BG — читают TAA resolved[0] или [1].
-    /// Выбирается по `frame_index % 2`, чтобы bloom видел уже TAA-результат.
     pub prefilter_bgs: [wgpu::BindGroup; 2],
     pub downsample_bgs: Vec<wgpu::BindGroup>,
     pub upsample_bgs: Vec<wgpu::BindGroup>,
-
     pub prefilter_uniform: wgpu::Buffer,
     pub _downsample_uniforms: Vec<wgpu::Buffer>,
     pub _upsample_uniforms: Vec<wgpu::Buffer>,
 }
 
 pub struct SizeDependent {
-    /// HDR после deferred lighting / skybox / forward. Вход TAA.
     pub hdr_view: wgpu::TextureView,
-    /// Motion vectors (Rg16Float). Пишется G-buffer'ом и transparent-пассом.
     pub motion_view: wgpu::TextureView,
 
-    /// Ping-pong resolved: TAA пишет в [write_idx], читает из [read_idx].
+    /// HDR после volumetric fog. TAA читает отсюда.
+    pub hdr_fog_view: wgpu::TextureView,
+    pub _hdr_fog_tex: wgpu::Texture,
+
     pub taa_resolved_views: [wgpu::TextureView; 2],
     pub _taa_resolved_tex: [wgpu::Texture; 2],
-
-    /// Бинд-группы TAA-пасса: [i] читает taa_resolved_views[i] как history.
     pub taa_read_bgs: [wgpu::BindGroup; 2],
-
     pub taa_uniform: wgpu::Buffer,
+
+    /// Froxel-текстура volumetric fog.
+    pub volumetric_fog_view: wgpu::TextureView,
+    pub _volumetric_fog_tex: wgpu::Texture,
+    /// Bind group для compute-прохода.
+    pub volumetric_compute_bg: wgpu::BindGroup,
+    /// Bind group для composite-прохода.
+    pub volumetric_composite_bg: wgpu::BindGroup,
 
     pub bloom_chain: BloomChain,
     pub linear_sampler: wgpu::Sampler,
 
-    /// Два варианта composite BG: [i] читает taa_resolved_views[i].
     pub composite_bgs: [wgpu::BindGroup; 2],
 
     pub ldr_view: wgpu::TextureView,
@@ -84,13 +84,17 @@ pub fn build_size_dependent(
     debug_layout: &wgpu::BindGroupLayout,
     lighting_layout: &wgpu::BindGroupLayout,
     taa_layout: &wgpu::BindGroupLayout,
+    volumetric_compute_layout: &wgpu::BindGroupLayout,
+    volumetric_composite_layout: &wgpu::BindGroupLayout,
     ssao_uniform: &wgpu::Buffer,
+    volumetric_uniform: &wgpu::Buffer,
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
     csm_sampler: &wgpu::Sampler,
     cube_shadow_cube_view: &wgpu::TextureView,
     cube_shadow_sampler: &wgpu::Sampler,
     camera_buffer: &wgpu::Buffer,
+    lights_buffer: &wgpu::Buffer,
     ibl: &IblResources,
     bloom_knee: f32,
     bloom_radius: f32,
@@ -105,7 +109,62 @@ pub fn build_size_dependent(
     let linear_sampler = create_linear_sampler(device, "post_linear");
 
     // ============================================================
-    // TAA ping-pong resolved (2 HDR-текстуры)
+    // Volumetric fog (froxel) resources
+    // ============================================================
+    let volumetric_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("volumetric_fog_3d"),
+        size: wgpu::Extent3d {
+            width: VOLUMETRIC_GRID_W,
+            height: VOLUMETRIC_GRID_H,
+            depth_or_array_layers: VOLUMETRIC_GRID_D,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: VOLUMETRIC_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let volumetric_fog_view = volumetric_fog_tex.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("volumetric_fog_view"),
+        dimension: Some(wgpu::TextureViewDimension::D3),
+        ..Default::default()
+    });
+
+    let volumetric_compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("volumetric_compute_bg"),
+        layout: volumetric_compute_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: lights_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: volumetric_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(csm_array_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(csm_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&volumetric_fog_view),
+            },
+        ],
+    });
+
+    // ============================================================
+    // TAA ping-pong resolved
     // ============================================================
     let taa_resolved_tex: [wgpu::Texture; 2] = std::array::from_fn(|i| {
         device.create_texture(&wgpu::TextureDescriptor {
@@ -131,6 +190,23 @@ pub fn build_size_dependent(
         mapped_at_creation: false,
     });
 
+    // ============================================================
+    // HDR + volumetric fog composite target.
+    // TAA читает отсюда, а не из hdr_view напрямую.
+    // ============================================================
+    let hdr_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr_fog"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let hdr_fog_view = hdr_fog_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
     let taa_read_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("taa_read_bg"),
@@ -138,7 +214,8 @@ pub fn build_size_dependent(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&hdr_view),
+                    // TAA теперь читает hdr_fog (с fog), не hdr.
+                    resource: wgpu::BindingResource::TextureView(&hdr_fog_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -161,19 +238,6 @@ pub fn build_size_dependent(
     });
 
     // ============================================================
-    // Bloom chain — prefilter читает TAA resolved (2 варианта).
-    // ============================================================
-    let bloom_chain = build_bloom_chain(
-        device,
-        bloom_layout,
-        &taa_resolved_views,
-        w,
-        h,
-        bloom_knee,
-        bloom_radius,
-    );
-
-    // ============================================================
     // G-buffer: 3 MRT + depth (+ motion отдельно)
     // ============================================================
     let gbuffer_albedo_view =
@@ -184,7 +248,40 @@ pub fn build_size_dependent(
         create_color_target(device, "gbuffer_emissive", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
 
+    // ============================================================
+    // Volumetric composite bind group (после создания hdr_fog,
+    // gbuffer_depth_view).
+    // ============================================================
+    let volumetric_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("volumetric_composite_bg"),
+        layout: volumetric_composite_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&hdr_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&volumetric_fog_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&linear_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: volumetric_uniform.as_entire_binding(),
+            },
+        ],
+    });
+
+    // ============================================================
     // SSAO
+    // ============================================================
     let ssao_view = create_color_target(device, "ssao", w, h, SSAO_FORMAT, 1, true);
     let ssao_blur_view = create_color_target(device, "ssao_blur", w, h, SSAO_FORMAT, 1, true);
 
@@ -324,6 +421,19 @@ pub fn build_size_dependent(
         ],
     });
 
+    // ============================================================
+    // Bloom chain — prefilter читает TAA resolved.
+    // ============================================================
+    let bloom_chain = build_bloom_chain(
+        device,
+        bloom_layout,
+        &taa_resolved_views,
+        w,
+        h,
+        bloom_knee,
+        bloom_radius,
+    );
+
     let composite_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
@@ -411,10 +521,16 @@ pub fn build_size_dependent(
     SizeDependent {
         hdr_view,
         motion_view,
+        hdr_fog_view,
+        _hdr_fog_tex: hdr_fog_tex,
         taa_resolved_views,
         _taa_resolved_tex: taa_resolved_tex,
         taa_read_bgs,
         taa_uniform,
+        volumetric_fog_view,
+        _volumetric_fog_tex: volumetric_fog_tex,
+        volumetric_compute_bg,
+        volumetric_composite_bg,
         bloom_chain,
         linear_sampler,
         composite_bgs,
@@ -438,10 +554,6 @@ pub fn build_size_dependent(
         debug_bind_hdr,
     }
 }
-
-// ============================================================
-// Bloom chain builder
-// ============================================================
 
 fn build_bloom_chain(
     device: &wgpu::Device,

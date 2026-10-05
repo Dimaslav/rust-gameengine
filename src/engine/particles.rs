@@ -1,15 +1,9 @@
 //! CPU particle system с burst-эмиттерами.
-//!
-//! Частицы — глобальный runtime-state в `App` (не ECS-сущности).
-//! Каждый burst создаёт N частиц с начальной скоростью в конусе,
-//! гравитацией и fade-out. Рендерятся крестами через `LineBatch`.
 
 use glam::Vec3;
 
-/// Максимум частиц в системе. Старые вытесняются новыми.
 pub const MAX_PARTICLES: usize = 4096;
 
-/// Состояние одной частицы.
 #[derive(Clone, Copy)]
 pub struct Particle {
     pub position: Vec3,
@@ -27,34 +21,26 @@ impl Particle {
     pub fn t(&self) -> f32 {
         (self.age / self.lifetime.max(1e-4)).clamp(0.0, 1.0)
     }
-
     pub fn color(&self) -> [f32; 4] {
         lerp4(self.color_start, self.color_end, self.t())
     }
-
     pub fn size(&self) -> f32 {
         self.size_start + (self.size_end - self.size_start) * self.t()
     }
 }
 
-/// Параметры одного burst-а.
 #[derive(Clone, Copy)]
 pub struct BurstParams {
     pub count: u32,
     pub lifetime: f32,
-    /// Базовая скорость частицы.
     pub speed: f32,
-    /// Угол конуса разлёта (радианы), от оси `dir`.
     pub spread: f32,
-    /// Основное направление конуса. Обычно `Vec3::Y` или нормаль к поверхности.
     pub dir: Vec3,
     pub gravity: f32,
     pub size: f32,
-    /// Конечный размер = size * size_end_scale.
     pub size_end_scale: f32,
     pub color_start: [f32; 4],
     pub color_end: [f32; 4],
-    /// Разброс lifetime относительно базового: lifetime * (1 - var, 1 + var).
     pub lifetime_variation: f32,
 }
 
@@ -76,17 +62,22 @@ impl Default for BurstParams {
     }
 }
 
-/// Создать burst из `params.count` частиц в позиции `origin`.
+/// ИСПРАВЛЕНО: без `out.remove(0)` (это был O(n) сдвиг всего массива
+/// на каждой частице при переполнении). Просто не эмитим сверх лимита.
 pub fn emit_burst(out: &mut Vec<Particle>, origin: Vec3, params: &BurstParams) {
     let dir = params.dir.normalize_or_zero();
     let dir = if dir.length_squared() < 1e-6 { Vec3::Y } else { dir };
 
-    for _ in 0..params.count {
-        if out.len() >= MAX_PARTICLES {
-            // Вытесняем самую старую.
-            out.remove(0);
-        }
+    let free = MAX_PARTICLES.saturating_sub(out.len());
+    if free == 0 { return; }
+    let to_emit = (params.count as usize).min(free);
 
+    // Предварительная аллокация.
+    if out.capacity() < out.len() + to_emit {
+        out.reserve(to_emit);
+    }
+
+    for _ in 0..to_emit {
         let cos_spread = params.spread.cos();
         let cos_theta = 1.0 - rand01() * (1.0 - cos_spread);
         let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
@@ -120,11 +111,6 @@ pub fn emit_burst(out: &mut Vec<Particle>, origin: Vec3, params: &BurstParams) {
     }
 }
 
-// ============================================================
-// Готовые пресеты
-// ============================================================
-
-/// Искры от попадания пули в поверхность.
 pub fn sparks(surface_normal: Vec3) -> BurstParams {
     BurstParams {
         count: 24,
@@ -141,7 +127,6 @@ pub fn sparks(surface_normal: Vec3) -> BurstParams {
     }
 }
 
-/// Взрыв врага / большой объект.
 pub fn explosion() -> BurstParams {
     BurstParams {
         count: 64,
@@ -158,7 +143,6 @@ pub fn explosion() -> BurstParams {
     }
 }
 
-/// Маленькая вспышка при подборе предмета.
 pub fn pickup_glow() -> BurstParams {
     BurstParams {
         count: 32,
@@ -166,7 +150,7 @@ pub fn pickup_glow() -> BurstParams {
         speed: 2.5,
         spread: 2.5,
         dir: Vec3::Y,
-        gravity: -1.5,   // всплывает
+        gravity: -1.5,
         size: 0.08,
         size_end_scale: 0.1,
         color_start: [1.0, 1.0, 0.5, 1.0],
@@ -175,7 +159,6 @@ pub fn pickup_glow() -> BurstParams {
     }
 }
 
-/// Дым/пыль от попадания в землю.
 pub fn dust_cloud() -> BurstParams {
     BurstParams {
         count: 40,
@@ -192,10 +175,6 @@ pub fn dust_cloud() -> BurstParams {
     }
 }
 
-// ============================================================
-// Утилиты
-// ============================================================
-
 fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [
         a[0] + (b[0] - a[0]) * t,
@@ -205,8 +184,6 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     ]
 }
 
-/// Простой быстрый рандом через thread_local LCG.
-/// Достаточно для particles, не требует rand crate.
 fn rand01() -> f32 {
     use std::cell::Cell;
     thread_local! {

@@ -35,7 +35,6 @@ pub struct Editor {
     pub state: EditorState,
 }
 
-/// Активный box-select (ЛКМ-протяжка по viewport).
 #[derive(Debug, Clone, Copy)]
 pub struct BoxSelect {
     pub start: (f32, f32),
@@ -61,7 +60,6 @@ pub struct EditorState {
     pub renaming: Option<Entity>,
     pub rename_buffer: String,
 
-    // === Prefabs ===
     pub prefabs_dir: String,
     pub prefab_list: Vec<PathBuf>,
     pub prefab_save_name: String,
@@ -72,10 +70,8 @@ pub struct EditorState {
 
     pub clipboard_entities: Vec<EntitySnapshot>,
 
-    // === FBX ===
     pub fbx_export_path: String,
 
-    /// Настройки редактора (сохраняются при выходе в `editor.ron`).
     pub settings: EditorSettings,
 }
 
@@ -106,16 +102,12 @@ pub enum EditorAction {
     ExportFbxAll,
     ExportFbxSelected,
     ImportFbx,
-    /// Загрузить конкретный путь (из Recent Files).
     LoadPath(String),
 
-    // === Команды из Command Palette ===
     SaveCameraBookmark(usize),
     GotoCameraBookmark(usize),
-    /// 0=front, 1=back, 2=right, 3=left, 4=top, 5=bottom, 6=iso.
     CameraPreset(u8),
 
-    // === Дополнительные действия ===
     DeselectAll,
     InvertSelection,
     SelectAll,
@@ -151,7 +143,6 @@ impl EditorState {
             settings: EditorSettings::load("editor.ron"),
         };
 
-        // Синхронизируем поля из настроек.
         s.save_path = s.settings.save_path.clone();
         s.prefabs_dir = s.settings.prefabs_dir.clone();
         s.fbx_export_path = s.settings.fbx_export_path.clone();
@@ -166,7 +157,6 @@ impl EditorState {
         s
     }
 
-    /// Собрать актуальные настройки из текущего состояния.
     pub fn collect_settings(
         &self,
         ui_show_renderer: bool,
@@ -253,15 +243,20 @@ impl Editor {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(egui::Visuals::dark());
 
+        // egui-winit 0.32: State::new принимает 6 аргументов:
+        //   ctx, viewport_id, window, native_ppp, theme, max_texture_side.
         let egui_state = EguiWinitState::new(
             egui_ctx.clone(),
             viewport_id,
             window,
             Some(window.scale_factor() as f32),
-            None,
+            None,   // theme
+            None,   // max_texture_side
         );
-        // egui-wgpu 0.28.1: new(device, format, depth_format, msaa_samples).
-        let egui_renderer = EguiRenderer::new(device, surface_format, None, 1);
+
+        // egui-wgpu 0.32: Renderer::new(device, format, depth_format, msaa_samples, dithering).
+        // Пять аргументов; `RendererOptions` появится только в 0.33+.
+        let egui_renderer = EguiRenderer::new(device, surface_format, None, 1, false);
 
         Self {
             egui_ctx,
@@ -272,7 +267,11 @@ impl Editor {
         }
     }
 
-    pub fn on_window_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
+    pub fn on_window_event(
+        &mut self,
+        window: &Window,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
         if !self.enabled {
             return false;
         }

@@ -45,7 +45,6 @@ impl Texture {
     }
 
     /// Linear-текстура (normal map, metallic-roughness, маски).
-    /// Без sRGB-декодирования — данные приходят в шейдер «как есть».
     pub fn from_rgba_linear(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -91,15 +90,17 @@ impl Texture {
             view_formats: &[],
         });
 
+        // wgpu 25: `ImageCopyTexture` → `TexelCopyTextureInfo`,
+        //          `ImageDataLayout` → `TexelCopyBufferLayout`.
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * width),
                 rows_per_image: Some(height),
@@ -161,7 +162,6 @@ impl Texture {
         Self::from_rgba(device, queue, layout, &rgba, 1, 1, label)
     }
 
-    /// Linear-вариант solid-текстуры (для normal/MR fallback'ов).
     pub fn from_solid_linear(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

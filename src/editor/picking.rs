@@ -78,10 +78,15 @@ pub fn pick_ray(
     best
 }
 
-/// Box-select: вернуть все сущности, чей центр (в мировых координатах)
-/// проецируется внутрь экранного прямоугольника `rect`.
+/// Box-select: вернуть все сущности, чья проекция bounding sphere
+/// пересекается с экранным прямоугольником `rect`.
 ///
 /// `rect` = (x0, y0, x1, y1) в физических пикселях, порядок любой.
+///
+/// Раньше проверялся только центр — объект, у которого центр вне
+/// рамки (например, широкий куб, у которого выделен угол),
+/// не попадал в выборку. Теперь проверяется пересечение окружности
+/// (проекция сферы) с прямоугольником.
 pub fn entities_in_screen_rect(
     world: &World,
     renderer: &Renderer,
@@ -102,11 +107,27 @@ pub fn entities_in_screen_rect(
         let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
 
         let model = crate::game::world_matrix(world, e);
-        let (center, _radius) = mesh.world_bounds(&model);
+        let (center, radius) = mesh.world_bounds(&model);
 
         let Some((sx, sy)) = camera.project_to_screen(center, w, h) else { continue };
 
-        if sx >= xmin && sx <= xmax && sy >= ymin && sy <= ymax {
+        // Оценка экранного радиуса сферы: проецируем точку,
+        // отстоящую на `radius` вправо от центра, и берём расстояние.
+        let right = camera.right();
+        let edge_world = center + right * radius;
+        let px_radius = match camera.project_to_screen(edge_world, w, h) {
+            Some((ex, ey)) => ((ex - sx).powi(2) + (ey - sy).powi(2)).sqrt(),
+            None => 0.0,
+        };
+
+        // Пересечение окружности (sx, sy, px_radius) с прямоугольником:
+        // ближайшая точка прямоугольника к центру не должна быть
+        // дальше, чем px_radius.
+        let nearest_x = sx.clamp(xmin, xmax);
+        let nearest_y = sy.clamp(ymin, ymax);
+        let dx = sx - nearest_x;
+        let dy = sy - nearest_y;
+        if dx * dx + dy * dy <= px_radius * px_radius {
             result.push(e);
         }
     }

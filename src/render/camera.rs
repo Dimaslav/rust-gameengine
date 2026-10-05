@@ -1,36 +1,24 @@
 use glam::{Mat4, Vec3, Vec4};
 
-/// Максимальный pitch, близкий к ±90°, но не равный ему,
-/// чтобы `look_at_rh` не вырождался при взгляде строго вверх/вниз.
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
-    /// Орбитальная камера вокруг `target`.
     Orbit,
-    /// FPS-камера (Play-режим). Позиция = `first_person_pos`.
     FirstPerson,
-    /// Free-fly камера (RMB в редакторе, как в UE5). Позиция =
-    /// `first_person_pos`; вращение меняет только ориентацию.
     Fly,
 }
 
 pub struct Camera3D {
-    // orbit
     pub target: Vec3,
     pub distance: f32,
-
-    // общие
     pub yaw: f32,
     pub pitch: f32,
-
     pub fov_y: f32,
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
-
     pub mode: CameraMode,
-    /// Позиция камеры для FirstPerson и Fly.
     pub first_person_pos: Vec3,
 }
 
@@ -56,11 +44,6 @@ impl Camera3D {
         }
     }
 
-    /// Направление взгляда. Работает во всех режимах.
-    ///
-    /// Соглашение: `yaw = 0, pitch = 0` — взгляд вдоль `-X`.
-    /// Мышь вправо (`dx > 0`) → `yaw` растёт → поворот вправо.
-    /// Мышь вниз  (`dy > 0`) → `pitch` растёт → взгляд вниз.
     pub fn forward(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
@@ -116,7 +99,9 @@ impl Camera3D {
         if self.mode != CameraMode::Orbit {
             return;
         }
-        self.yaw -= dx;
+        // ИСПРАВЛЕНО: было self.yaw -= dx. Все три режима теперь
+        // используют одинаковый знак — мышь вправо → поворот вправо.
+        self.yaw += dx;
         self.pitch = (self.pitch + dy).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
@@ -168,8 +153,6 @@ impl Camera3D {
         self.mode == CameraMode::FirstPerson
     }
 
-    /// Mouse look для FPS: мышь вправо → взгляд вправо,
-    /// мышь вверх → взгляд вверх (winit отдаёт `dy > 0` при движении вниз).
     pub fn fps_look(&mut self, dx: f32, dy: f32) {
         if self.mode != CameraMode::FirstPerson {
             return;
@@ -208,8 +191,6 @@ impl Camera3D {
         self.mode == CameraMode::Fly
     }
 
-    /// Mouse look в полёте. Мышь вправо → камера поворачивается вправо,
-    /// позиция камеры не меняется (в отличие от Orbit).
     pub fn fly_look(&mut self, dx: f32, dy: f32) {
         if self.mode != CameraMode::Fly {
             return;
@@ -218,8 +199,6 @@ impl Camera3D {
         self.pitch = (self.pitch + dy).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
-    /// Сдвиг камеры. Работает и в Fly, и в FirstPerson.
-    /// В Orbit-режиме (легаси) двигает `target`.
     pub fn fly_move(&mut self, delta: Vec3) {
         match self.mode {
             CameraMode::Fly | CameraMode::FirstPerson => {
@@ -231,14 +210,6 @@ impl Camera3D {
         }
     }
 
-    /// Выйти из FPS/Fly в Orbit, сохранив точку взгляда.
-    ///
-    /// Вычисляет `target` так, чтобы орбитальная камера стояла в той же
-    /// мировой позиции и смотрела в ту же сторону (без «прыжка»).
-    ///
-    /// Вывод: `target = pos − dir * distance`, где `dir = (cp*cy, sp, cp*sy)`.
-    /// Тогда `position() = target + distance*dir = pos`, а направление
-    /// взгляда orbit = `−dir` = `forward()` (сохраняется).
     fn to_orbit(&mut self) {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
@@ -263,11 +234,7 @@ impl Camera3D {
         ]
         .map(|p| {
             let n = Vec3::new(p.x, p.y, p.z).length();
-            if n > 1e-8 {
-                p / n
-            } else {
-                p
-            }
+            if n > 1e-8 { p / n } else { p }
         })
     }
 

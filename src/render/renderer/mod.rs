@@ -53,6 +53,12 @@ pub struct Renderer {
     skybox_layout: wgpu::BindGroupLayout,
     taa_layout: wgpu::BindGroupLayout,
 
+    volumetric_compute_layout: wgpu::BindGroupLayout,
+    volumetric_composite_layout: wgpu::BindGroupLayout,
+    volumetric_uniform: wgpu::Buffer,
+    volumetric_pipeline: wgpu::ComputePipeline,
+    volumetric_composite_pipeline: wgpu::RenderPipeline,
+
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
@@ -133,29 +139,10 @@ pub struct Renderer {
 
     skybox_time: f32,
 
-    /// Счётчик кадров для Halton-джиттера и свопа TAA ping-pong.
     taa_frame_index: u32,
-    /// **Jittered** view-proj **прошлого** кадра — то, чем реально
-    /// растеризовали предыдущий кадр (включая Halton-джиттер).
-    ///
-    /// Motion в gbuffer.wgsl считается как
-    /// `project(prev_P, prev_view_proj) - pixel_center_uv`,
-    /// где `pixel_center_uv = frag_coord.xy / screen_size.xy`.
-    ///
-    /// На статике это даёт `motion = jitter_prev - jitter_curr`, и TAA
-    /// через bilinear-сэмплинг по `uv + motion` попадает точно в ту
-    /// суб-пиксельную позицию, куда P был растеризован в прошлом кадре.
-    ///
-    /// Если хранить **unjittered** vp — motion станет `-jitter_curr`,
-    /// history уедет на `jitter_prev` мимо правильной точки → тряска.
     taa_prev_view_proj: Mat4,
-    /// Первые 2 кадра после resize — сброс TAA history.
     taa_reset_frames: u32,
 }
-
-// ============================================================
-// Хелперы сортировки draws
-// ============================================================
 
 fn draw_center(d: &MeshDraw) -> Vec3 {
     if d.instances.is_empty() {
@@ -194,10 +181,6 @@ fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
     v
 }
 
-// ============================================================
-// Halton
-// ============================================================
-
 fn radical_inverse(mut n: u32, base: u32) -> f32 {
     let mut result = 0.0f32;
     let mut f = 1.0f32 / base as f32;
@@ -209,11 +192,6 @@ fn radical_inverse(mut n: u32, base: u32) -> f32 {
     result
 }
 
-/// Halton(2, 3) jitter в пикселях, диапазон `[-0.5, 0.5]`.
-///
-/// Джиттер сдвигает sample-точку растеризации в суб-пиксель. TAA
-/// накапливает историю из N кадров и через это аппроксимирует
-/// supersampling: каждый пиксель «видит» свою подвыборку 8 кадров.
 fn halton_jitter_pixels(i: u32) -> Vec2 {
     let s = i % TAA_JITTER_SEQUENCE;
     let hx = radical_inverse(s + 1, 2);
@@ -225,7 +203,7 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -238,21 +216,18 @@ impl Renderer {
             })
             .await
             .unwrap();
+
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits {
-                        // Instance data (14) + vertex data (6) = 20 attributes.
-                        // Default wgpu-limit — 16. Desktop Vulkan/DX12/Metal
-                        // стабильно дают 32.
-                        max_vertex_attributes: 32,
-                        ..wgpu::Limits::default()
-                    },
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_vertex_attributes: 32,
+                    ..wgpu::Limits::default()
                 },
-                None,
-            )
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await
             .unwrap();
 
@@ -269,7 +244,11 @@ impl Renderer {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            // AutoVsync — выбирает первый синхронизированный режим,
+            // поддерживаемый драйвером. Fifo на Vulkan пытается
+            // использовать VK_PRESENT_MODE_FIFO_LATEST_READY_EXT,
+            // который wgpu 25 ещё не знает → спамит warning'ами.
+            present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 1,
@@ -855,6 +834,122 @@ impl Renderer {
             ],
         });
 
+        let volumetric_compute_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("volumetric_compute_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: VOLUMETRIC_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let volumetric_composite_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("volumetric_composite_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // ============================================================
         // Uniforms
         // ============================================================
@@ -926,6 +1021,12 @@ impl Renderer {
         let skybox_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skybox_uniform"),
             size: std::mem::size_of::<SkyboxParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let volumetric_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volumetric_uniform"),
+            size: std::mem::size_of::<VolumetricParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1048,59 +1149,31 @@ impl Renderer {
         // Pipelines
         // ============================================================
         let gbuffer_pipeline = make_gbuffer_pipeline(
-            &device,
-            &camera_layout,
-            &material_layout,
-            Some(wgpu::Face::Back),
-        )
-        .expect("gbuffer pipeline");
+            &device, &camera_layout, &material_layout, Some(wgpu::Face::Back),
+        ).expect("gbuffer pipeline");
         let gbuffer_pipeline_double_sided = make_gbuffer_pipeline(
-            &device,
-            &camera_layout,
-            &material_layout,
-            None,
-        )
-        .expect("gbuffer pipeline (double-sided)");
+            &device, &camera_layout, &material_layout, None,
+        ).expect("gbuffer pipeline (double-sided)");
 
         let shadow_pipeline = make_shadow_pipeline(
-            &device,
-            &shadow_pass_layout,
-            &material_layout,
-            Some(wgpu::Face::Back),
-        )
-        .expect("shadow pipeline");
+            &device, &shadow_pass_layout, &material_layout, Some(wgpu::Face::Back),
+        ).expect("shadow pipeline");
         let shadow_pipeline_double_sided = make_shadow_pipeline(
-            &device,
-            &shadow_pass_layout,
-            &material_layout,
-            None,
-        )
-        .expect("shadow pipeline (double-sided)");
+            &device, &shadow_pass_layout, &material_layout, None,
+        ).expect("shadow pipeline (double-sided)");
 
         let line_pipeline =
             make_line_pipeline(&device, &camera_layout).expect("line pipeline");
-
         let particles_pipeline =
             make_particles_pipeline(&device, &camera_layout).expect("particles pipeline");
 
         let transparent_pipeline = make_transparent_pipeline(
-            &device,
-            &camera_layout,
-            &lights_layout,
-            &shadow2_layout,
-            &material_layout,
+            &device, &camera_layout, &lights_layout, &shadow2_layout, &material_layout,
             Some(wgpu::Face::Back),
-        )
-        .expect("transparent pipeline");
+        ).expect("transparent pipeline");
         let transparent_pipeline_double_sided = make_transparent_pipeline(
-            &device,
-            &camera_layout,
-            &lights_layout,
-            &shadow2_layout,
-            &material_layout,
-            None,
-        )
-        .expect("transparent pipeline (double-sided)");
+            &device, &camera_layout, &lights_layout, &shadow2_layout, &material_layout, None,
+        ).expect("transparent pipeline (double-sided)");
 
         let lighting_pipeline =
             make_lighting_pipeline(&device, &lighting_layout, &lights_layout, &shadow2_layout)
@@ -1108,8 +1181,7 @@ impl Renderer {
         let (ssao_pipeline, ssao_blur_pipeline) =
             make_ssao_pipelines(&device, &ssao_layout).expect("ssao pipelines");
         let (bloom_prefilter_pipeline, bloom_downsample_pipeline, bloom_upsample_pipeline) =
-            make_bloom_chain_pipelines(&device, &bloom_layout)
-                .expect("bloom chain pipelines");
+            make_bloom_chain_pipelines(&device, &bloom_layout).expect("bloom chain pipelines");
         let tonemap_pipeline =
             make_tonemap_pipeline(&device, &config, &tonemap_layout).expect("tonemap pipeline");
         let (debug2d_pipeline, debug_depth_pipeline) =
@@ -1122,35 +1194,79 @@ impl Renderer {
         let taa_pipeline =
             make_taa_pipeline(&device, &taa_layout).expect("taa pipeline");
 
-        // ============================================================
-        // Noise
-        // ============================================================
+        let volumetric_pipeline = {
+            let src = crate::shader_source!("src/render/shaders/volumetric_fog.wgsl")
+                .expect("volumetric_fog.wgsl not found");
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("volumetric_fog_shader"),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("volumetric_pipeline_layout"),
+                bind_group_layouts: &[&volumetric_compute_layout],
+                push_constant_ranges: &[],
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("volumetric_pipeline"),
+                layout: Some(&layout),
+                module: &shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+
+        let volumetric_composite_pipeline = {
+            let src = crate::shader_source!("src/render/shaders/volumetric_composite.wgsl")
+                .expect("volumetric_composite.wgsl not found");
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("volumetric_composite_shader"),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("volumetric_composite_pipeline_layout"),
+                bind_group_layouts: &[&volumetric_composite_layout],
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("volumetric_composite_pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
         let (ssao_noise_tex, ssao_noise_view) = create_noise_texture(&device, &queue);
 
-        // ============================================================
-        // Size-dependent
-        // ============================================================
         let sd = build_size_dependent(
-            &device,
-            &config,
-            &bloom_layout,
-            &tonemap_layout,
-            &ssao_layout,
-            &shadow2_layout,
-            &debug_layout,
-            &lighting_layout,
-            &taa_layout,
-            &ssao_uniform,
+            &device, &config,
+            &bloom_layout, &tonemap_layout, &ssao_layout,
+            &shadow2_layout, &debug_layout, &lighting_layout, &taa_layout,
+            &volumetric_compute_layout, &volumetric_composite_layout,
+            &ssao_uniform, &volumetric_uniform,
             &ssao_noise_view,
-            &csm_array_view,
-            &csm_sampler,
-            &cube_shadow_cube_view,
-            &cube_shadow_sampler,
-            &camera_buffer,
-            &ibl,
-            0.5,
-            1.0,
-            &tonemap_uniform,
+            &csm_array_view, &csm_sampler,
+            &cube_shadow_cube_view, &cube_shadow_sampler,
+            &camera_buffer, &lights_buffer, &ibl, 0.5, 1.0, &tonemap_uniform,
         );
 
         let csm_debug_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1190,15 +1306,9 @@ impl Renderer {
         let default_material = Material::default();
         let default_sampler = device.create_sampler(&SamplerDesc::default().to_wgpu());
         let default_material_bind_group = build_object_bind_group(
-            &device,
-            &material_layout,
-            &default_material,
-            &fallback_texture,
-            &fallback_mr,
-            &fallback_normal,
-            &fallback_emissive,
-            &default_sampler,
-            create_identity_skeleton_buffer(&device),
+            &device, &material_layout, &default_material,
+            &fallback_texture, &fallback_mr, &fallback_normal, &fallback_emissive,
+            &default_sampler, create_identity_skeleton_buffer(&device),
         );
 
         let line_buffer = LineBuffer::new(&device, 4096);
@@ -1217,6 +1327,8 @@ impl Renderer {
             texture_layout, material_layout, ssao_layout, lighting_layout,
             bloom_layout, tonemap_layout, debug_layout, debug_depth_layout, skybox_layout,
             taa_layout,
+            volumetric_compute_layout, volumetric_composite_layout,
+            volumetric_uniform, volumetric_pipeline, volumetric_composite_pipeline,
             camera_buffer, camera_bind_group,
             lights_buffer, lights_bind_group,
             shadow_pass_buffer, shadow_pass_bind_group, shadow_pass_stride,
@@ -1234,11 +1346,9 @@ impl Renderer {
             lighting_pipeline,
             ssao_pipeline, ssao_blur_pipeline,
             bloom_prefilter_pipeline, bloom_downsample_pipeline, bloom_upsample_pipeline,
-            tonemap_pipeline, fxaa_pipeline, skybox_pipeline,
-            taa_pipeline,
+            tonemap_pipeline, fxaa_pipeline, skybox_pipeline, taa_pipeline,
             debug2d_pipeline, debug_depth_pipeline, csm_debug_bind_group,
-            tonemap_uniform, ssao_uniform,
-            skybox_uniform, skybox_bind_group,
+            tonemap_uniform, ssao_uniform, skybox_uniform, skybox_bind_group,
             _ssao_noise_tex: ssao_noise_tex, ssao_noise_view,
             ibl: Some(ibl), sd,
             instance_buffer, instance_capacity: INITIAL_INSTANCE_CAPACITY,
@@ -1308,6 +1418,43 @@ impl Renderer {
                 )?,
                 skybox: make_skybox_pipeline(&self.device, &self.skybox_layout)?,
                 taa: make_taa_pipeline(&self.device, &self.taa_layout)?,
+                volumetric_composite: {
+                    let src = crate::shader_source!("src/render/shaders/volumetric_composite.wgsl")?;
+                    let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("volumetric_composite_shader"),
+                        source: wgpu::ShaderSource::Wgsl(src.into()),
+                    });
+                    let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volumetric_composite_pipeline_layout"),
+                        bind_group_layouts: &[&self.volumetric_composite_layout],
+                        push_constant_ranges: &[],
+                    });
+                    self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("volumetric_composite_pipeline"),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs_main"),
+                            buffers: &[],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs_main"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: HDR_FORMAT,
+                                blend: Some(wgpu::BlendState::REPLACE),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    })
+                },
             })
         };
 
@@ -1343,6 +1490,7 @@ impl Renderer {
         self.fxaa_pipeline = built.fxaa;
         self.skybox_pipeline = built.skybox;
         self.taa_pipeline = built.taa;
+        self.volumetric_composite_pipeline = built.volumetric_composite;
 
         Ok(())
     }
@@ -1351,10 +1499,6 @@ impl Renderer {
     pub fn reload_shaders(&mut self) -> Result<(), String> {
         Err("hot-reload is only supported in debug builds".into())
     }
-
-    // ============================================================
-    // Публичный API
-    // ============================================================
 
     pub fn add_mesh(&mut self, name: impl Into<String>, mesh: Mesh) {
         let name = name.into();
@@ -1572,10 +1716,13 @@ impl Renderer {
             &self.bloom_layout, &self.tonemap_layout, &self.ssao_layout,
             &self.shadow2_layout, &self.debug_layout, &self.lighting_layout,
             &self.taa_layout,
-            &self.ssao_uniform, &self.ssao_noise_view,
+            &self.volumetric_compute_layout,
+            &self.volumetric_composite_layout,
+            &self.ssao_uniform, &self.volumetric_uniform,
+            &self.ssao_noise_view,
             &self.csm_array_view, &self.csm_sampler,
             &self.cube_shadow_cube_view, &self.cube_shadow_sampler,
-            &self.camera_buffer, ibl_ref, 0.5, 1.0, &self.tonemap_uniform,
+            &self.camera_buffer, &self.lights_buffer, ibl_ref, 0.5, 1.0, &self.tonemap_uniform,
         );
 
         self.csm_debug_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1593,7 +1740,6 @@ impl Renderer {
             ],
         });
 
-        // Сброс TAA: history теперь содержит текстуры другого размера.
         self.taa_reset_frames = 2;
     }
 
@@ -1621,10 +1767,6 @@ impl Renderer {
         self.particles_instance_capacity = new_cap;
     }
 
-    // ============================================================
-    // Render
-    // ============================================================
-
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1641,9 +1783,6 @@ impl Renderer {
     ) -> Result<(), wgpu::SurfaceError> {
         self.skybox_time = time;
 
-        // ============================================================
-        // Jitter + предыдущая view-proj
-        // ============================================================
         let w_px = self.config.width.max(1) as f32;
         let h_px = self.config.height.max(1) as f32;
 
@@ -1655,39 +1794,28 @@ impl Renderer {
 
         let view = camera.view_matrix();
         let proj_unjittered = camera.proj_matrix();
-        let mut proj = proj_unjittered;
 
-        // Jitter применяется **только** для растеризации G-buffer / forward.
-        // Motion считается от jittered prev к pixel_center (см. комментарий
-        // в gbuffer.wgsl). Это даёт корректный prev_uv для TAA-history.
-        proj.z_axis.x -= jitter_ndc.x;
-        proj.z_axis.y -= jitter_ndc.y;
+        let mut proj_jittered = proj_unjittered;
+        proj_jittered.z_axis.x -= jitter_ndc.x;
+        proj_jittered.z_axis.y -= jitter_ndc.y;
 
-        let vp = proj * view;
+        let vp_jittered = proj_jittered * view;
+        let vp_unjittered = proj_unjittered * view;
 
         let camera_uniform = CameraUniform {
-            view_proj: vp.to_cols_array_2d(),
-            inv_view_proj: vp.inverse().to_cols_array_2d(),
+            view_proj: vp_jittered.to_cols_array_2d(),
+            inv_view_proj: vp_jittered.inverse().to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             inv_view: view.inverse().to_cols_array_2d(),
             camera_pos: camera.position().extend(1.0).to_array(),
             near_far: [camera.near, camera.far, 0.0, 0.0],
-            // prev_view_proj — **jittered** vp прошлого кадра.
             prev_view_proj: self.taa_prev_view_proj.to_cols_array_2d(),
             screen_size: [w_px, h_px, 1.0 / w_px, 1.0 / h_px],
         };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
-        // Сохраняем **jittered** vp — то, чем реально растеризовали этот
-        // кадр. В следующем кадре оно станет prev_view_proj для motion.
-        //
-        // Motion = `project(prev_P, prev_vp_jit) - pixel_center_uv`.
-        // На статике это `jitter_prev - jitter_curr` — TAA через bilinear
-        // сэмплит history точно там, где P был растеризован в прошлом кадре.
-        // Если хранить unjittered — motion теряет sub-pixel сдвиг, history
-        // промахивается на jitter_prev, и картинка трясётся.
-        self.taa_prev_view_proj = vp;
+        self.taa_prev_view_proj = vp_unjittered;
 
         let write_idx = (self.taa_frame_index as usize) & 1;
 
@@ -1710,9 +1838,6 @@ impl Renderer {
 
         self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
 
-        // ============================================================
-        // Lights / shadows
-        // ============================================================
         let dir_light_dir = dir_lights
             .first()
             .map(|l| Vec3::new(l.direction[0], l.direction[1], l.direction[2]))
@@ -1738,8 +1863,14 @@ impl Renderer {
         }
 
         let splits = csm::split_distances(camera.near, camera.far.min(200.0), 0.5);
-        let cascade_vp =
-            csm::build_cascades(view, proj, camera.near, camera.far, dir_light_dir, &splits);
+        let cascade_vp = csm::build_cascades(
+            view,
+            proj_unjittered,
+            camera.near,
+            camera.far,
+            dir_light_dir,
+            &splits,
+        );
 
         let mut csm_packed = [[[0.0f32; 4]; 4]; CASCADE_COUNT];
         for i in 0..CASCADE_COUNT {
@@ -1827,9 +1958,6 @@ impl Renderer {
             self.queue.write_buffer(&self.shadow_pass_buffer, 0, &bytes);
         }
 
-        // ============================================================
-        // Post uniforms
-        // ============================================================
         let knee = postfx.bloom_knee.max(1e-4);
         let radius = postfx.bloom_radius.max(0.5);
         let prefilter_uniform_data = BloomParams {
@@ -1856,7 +1984,7 @@ impl Renderer {
 
         let skybox_params = SkyboxParams {
             values: [
-                postfx.ibl_strength.max(0.01),
+                1.0,
                 postfx.fog_density,
                 postfx.fog_height_base,
                 postfx.fog_height_falloff,
@@ -1873,13 +2001,10 @@ impl Renderer {
 
         let noise_tile_x = self.config.width as f32 / 4.0;
         let noise_tile_y = self.config.height as f32 / 4.0;
-        // SSAO `time` не использует `skybox_time` — иначе шум SSAO
-        // вращается каждый кадр, TAA его не гасит, и картинка «кипит».
-        // С temporal rotation 0 паттерн шума статичен per-pixel.
         let ssao_data = SsaoUniform {
             proj_scale: [
-                proj.x_axis.x,
-                proj.y_axis.y,
+                proj_unjittered.x_axis.x,
+                proj_unjittered.y_axis.y,
                 camera.far,
                 postfx.ssao_radius,
             ],
@@ -1889,6 +2014,35 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
+
+        let vol_data = VolumetricParams {
+            grid: [
+                VOLUMETRIC_GRID_W as f32,
+                VOLUMETRIC_GRID_H as f32,
+                1.0 / VOLUMETRIC_GRID_W as f32,
+                1.0 / VOLUMETRIC_GRID_H as f32,
+            ],
+            cam: [
+                camera.near,
+                camera.far,
+                (camera.fov_y * 0.5).tan(),
+                camera.aspect,
+            ],
+            params: [
+                postfx.volumetric_density,
+                postfx.volumetric_scattering,
+                postfx.volumetric_phase_g,
+                0.0,
+            ],
+            fog_color: [
+                postfx.fog_color[0],
+                postfx.fog_color[1],
+                postfx.fog_color[2],
+                0.0,
+            ],
+        };
+        self.queue
+            .write_buffer(&self.volumetric_uniform, 0, bytemuck::bytes_of(&vol_data));
 
         let debug_params = DebugParams {
             mode: [postfx.debug_view as u32, 0, 0, 0],
@@ -1907,9 +2061,6 @@ impl Renderer {
         self.queue
             .write_buffer(&self.sd.fxaa_uniform, 0, bytemuck::bytes_of(&fxaa_params));
 
-        // ============================================================
-        // Instances / lines / particles
-        // ============================================================
         let sorted_draws = sort_draws_for_render(draws, camera.position());
 
         let total_instances: u64 = sorted_draws.iter().map(|d| d.instances.len() as u64).sum();
@@ -1940,9 +2091,6 @@ impl Renderer {
             );
         }
 
-        // ============================================================
-        // Frame
-        // ============================================================
         let frame = self.surface.get_current_texture()?;
         let swap_view = frame
             .texture
@@ -1966,6 +2114,9 @@ impl Renderer {
         passes::encode_particles_pass(self, &mut encoder, particle_instances.len() as u32);
         passes::encode_transparent_pass(self, &mut encoder, &sorted_draws);
 
+        passes::encode_volumetric_compute(self, &mut encoder);
+        passes::encode_volumetric_composite(self, &mut encoder);
+
         passes::encode_taa_pass(self, &mut encoder, write_idx);
 
         if postfx.debug_view.is_debug() {
@@ -1980,29 +2131,32 @@ impl Renderer {
                 pixels_per_point: egui_data.pixels_per_point,
             };
 
-            egui_data.renderer.update_buffers(
+            let user_cmd_bufs = egui_data.renderer.update_buffers(
                 &self.device,
                 &self.queue,
                 &mut encoder,
                 &egui_data.clipped_primitives,
                 &screen_descriptor,
             );
+            self.queue.submit(user_cmd_bufs);
 
             {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("egui_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &swap_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("egui_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &swap_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .forget_lifetime();
                 egui_data.renderer.render(
                     &mut pass,
                     &egui_data.clipped_primitives,
@@ -2034,6 +2188,7 @@ struct BuiltPipelines {
     fxaa: wgpu::RenderPipeline,
     skybox: wgpu::RenderPipeline,
     taa: wgpu::RenderPipeline,
+    volumetric_composite: wgpu::RenderPipeline,
 }
 
 // ============================================================
@@ -2061,13 +2216,13 @@ fn make_gbuffer_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[Vertex3D::layout(), InstanceData::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: GBUFFER_FORMAT,
@@ -2100,6 +2255,8 @@ fn make_gbuffer_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
+            // Опак-геометрия пишет depth. Skybox потом рисуется поверх
+            // с depth_compare: LessEqual (там, где depth == 1.0 — фон).
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -2107,6 +2264,7 @@ fn make_gbuffer_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2131,7 +2289,7 @@ fn make_shadow_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[Vertex3D::layout(), InstanceData::layout()],
             compilation_options: Default::default(),
         },
@@ -2155,6 +2313,7 @@ fn make_shadow_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2177,13 +2336,13 @@ fn make_line_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[LineVertex::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -2205,6 +2364,7 @@ fn make_line_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2227,13 +2387,13 @@ fn make_particles_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[ParticleInstance::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -2256,6 +2416,7 @@ fn make_particles_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2282,13 +2443,13 @@ fn make_transparent_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[Vertex3D::layout(), InstanceData::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: HDR_FORMAT,
@@ -2318,6 +2479,7 @@ fn make_transparent_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2342,13 +2504,13 @@ fn make_lighting_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend: None,
@@ -2360,6 +2522,7 @@ fn make_lighting_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2382,13 +2545,13 @@ fn make_ssao_pipelines(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_ssao",
+            entry_point: Some("fs_ssao"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: SSAO_FORMAT,
                 blend: None,
@@ -2400,19 +2563,20 @@ fn make_ssao_pipelines(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     });
     let blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("ssao_blur_pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_blur",
+            entry_point: Some("fs_blur"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: SSAO_FORMAT,
                 blend: None,
@@ -2424,6 +2588,7 @@ fn make_ssao_pipelines(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     });
     Ok((main, blur))
 }
@@ -2449,13 +2614,13 @@ fn make_bloom_chain_pipelines(
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: entry,
+                entry_point: Some(entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: HDR_FORMAT,
                     blend,
@@ -2467,6 +2632,7 @@ fn make_bloom_chain_pipelines(
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         })
     };
 
@@ -2505,13 +2671,13 @@ fn make_tonemap_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: LDR_FORMAT,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -2523,6 +2689,7 @@ fn make_tonemap_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2546,13 +2713,13 @@ fn make_fxaa_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: config.format,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -2564,6 +2731,7 @@ fn make_fxaa_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2586,13 +2754,13 @@ fn make_skybox_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend: None,
@@ -2604,12 +2772,18 @@ fn make_skybox_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::Equal,
+            // LessEqual вместо Equal: для background-пикселей depth=1.0,
+            // skybox z=1.0 → 1.0 <= 1.0 = true. Для геометрии depth < 1.0
+            // → 1.0 <= depth = false, skybox не перезаписывает объекты.
+            // Equal математически то же самое, но на части Vulkan-драйверов
+            // округление z в разных пайплайнах даёт false → чёрное небо.
+            depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2632,13 +2806,13 @@ fn make_taa_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend: None,
@@ -2650,6 +2824,7 @@ fn make_taa_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     }))
 }
 
@@ -2686,13 +2861,13 @@ fn make_debug_pipelines(
         layout: Some(&layout2d),
         vertex: wgpu::VertexState {
             module: &shader2d,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader2d,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: config.format,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -2704,6 +2879,7 @@ fn make_debug_pipelines(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     });
 
     let pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2711,13 +2887,13 @@ fn make_debug_pipelines(
         layout: Some(&layout_depth),
         vertex: wgpu::VertexState {
             module: &shader_depth,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader_depth,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: config.format,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -2729,6 +2905,7 @@ fn make_debug_pipelines(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     });
 
     Ok((pipeline2d, pipeline_depth))

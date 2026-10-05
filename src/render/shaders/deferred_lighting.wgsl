@@ -1,12 +1,14 @@
 const PI: f32 = 3.14159265359;
 
 struct Camera {
-    view_proj:     mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    view:          mat4x4<f32>,
-    inv_view:      mat4x4<f32>,
-    camera_pos:    vec4<f32>,
-    near_far:      vec4<f32>,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    view:           mat4x4<f32>,
+    inv_view:       mat4x4<f32>,
+    camera_pos:     vec4<f32>,
+    near_far:       vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+    screen_size:    vec4<f32>,
 };
 
 struct Lights {
@@ -74,6 +76,10 @@ fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return world_h.xyz / max(world_h.w, 1e-6);
 }
 
+fn view_depth_of(world_pos: vec3<f32>) -> f32 {
+    return -(camera.view * vec4<f32>(world_pos, 1.0)).z;
+}
+
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
@@ -129,29 +135,16 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
     return prefiltered * (f0 * brdf.x + brdf.y);
 }
 
-// ============================================================
-// Shadow sampling
-// ============================================================
-
-// 12-tap Poisson disk. Развёрнуто вручную, потому что naga
-// не разрешает индексировать array переменной.
-fn sample_csm_poisson(
-    world_pos: vec3<f32>,
-    cascade: i32,
-    bias: f32,
-) -> f32 {
+fn sample_csm_poisson(world_pos: vec3<f32>, cascade: i32, bias: f32) -> f32 {
     let light_clip = lights.cascade_vp[cascade] * vec4<f32>(world_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
     if (ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
-
     let depth = ndc.z - bias;
     let texel = 1.0 / 2048.0;
     let r = 1.5;
     let s = texel * r;
-
     var shadow = 0.0;
     shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.326, -0.406) * s, cascade, depth);
     shadow += textureSampleCompare(t_csm, s_csm, uv + vec2<f32>(-0.840, -0.074) * s, cascade, depth);
@@ -172,7 +165,6 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
     let s = lights.shadow_params;
     let base_bias = s.x;
     let normal_bias = s.y;
-
     let ndl = clamp(dot(n, l), 0.0, 1.0);
     let slope = 1.0 - ndl;
     let bias = base_bias * (1.0 + normal_bias * slope);
@@ -193,7 +185,6 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
         let range = split_end - split_prev;
         let blend_zone = range * 0.15;
         let dist_to_edge = split_end - view_depth;
-
         if (dist_to_edge < blend_zone && dist_to_edge > 0.0) {
             let t = dist_to_edge / blend_zone;
             let shadow_next = sample_csm_poisson(world_pos, cascade + 1, bias);
@@ -207,7 +198,6 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
         let fade = clamp((view_depth - fade_start) / max(fade_end - fade_start, 1e-4), 0.0, 1.0);
         shadow = mix(shadow, 1.0, fade);
     }
-
     return shadow;
 }
 
@@ -217,16 +207,13 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
     let to_frag = world_pos - pos;
     let dist = length(to_frag);
     if (dist > far) { return 1.0; }
-
     let dir = to_frag / max(dist, 0.0001);
     let bias = lights.shadow_params.x * 3.0;
     let depth = dist / far - bias;
-
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.99);
     let t1 = normalize(cross(up, dir));
     let t2 = cross(dir, t1);
     let s = far * 2.0 / 1024.0 * 1.5;
-
     var shadow = 0.0;
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 *  0.707 + t2 *  0.707) * s), depth);
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 * -0.707 + t2 *  0.707) * s), depth);
@@ -242,77 +229,73 @@ fn compute_point_shadow(world_pos: vec3<f32>, light_idx: u32) -> f32 {
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth = textureSample(t_depth, s_lin, in.uv);
+
+    // Фон. Skybox рисуется отдельным проходом поверх. Здесь — чёрный.
     if (depth >= 0.9999) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
-    let g_albedo = textureSample(t_albedo, s_lin, in.uv);
-    let g_normal = textureSample(t_normal, s_lin, in.uv);
+    let g_albedo   = textureSample(t_albedo,   s_lin, in.uv);
+    let g_normal_d = textureSample(t_normal,   s_lin, in.uv);
     let g_emissive = textureSample(t_emissive, s_lin, in.uv);
 
-    let albedo = g_albedo.rgb;
-    let metallic = g_albedo.a;
-    let n = normalize(g_normal.rgb);
-    let roughness = g_emissive.a;
-    let emissive = g_emissive.rgb;
+    let albedo    = g_albedo.rgb;
+    let metallic  = clamp(g_albedo.a, 0.0, 1.0);
+    let roughness = clamp(g_emissive.a, 0.04, 1.0);
+    let emissive  = g_emissive.rgb;
+    let n         = normalize(g_normal_d.xyz);
 
     let world_pos = reconstruct_world_pos(in.uv, depth);
-    let view_depth = length(camera.camera_pos.xyz - world_pos);
     let v = normalize(camera.camera_pos.xyz - world_pos);
+    let view_depth = view_depth_of(world_pos);
 
     let ao = textureSample(t_ssao, s_ssao, in.uv).r;
-    let ibl_strength = lights.misc.x;
 
-    var color = emissive;
-    color += ibl_diffuse(n, albedo, metallic) * ao * ibl_strength;
-    color += ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
+    // ibl_strength (0..1) масштабирует И diffuse, И specular от неба.
+    let ibl_strength = lights.misc.x;
+    let ibl_diff = ibl_diffuse(n, albedo, metallic) * ao * ibl_strength;
+    let ibl_spec = ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
+
+    var direct = vec3<f32>(0.0);
 
     let dir_count = lights.counts.x;
     for (var i: u32 = 0u; i < dir_count; i = i + 1u) {
-        let idx = i * 2u;
-        let dir_w = lights.dir_lights[idx];
-        let col_w = lights.dir_lights[idx + 1u];
-        let l = normalize(dir_w.xyz);
-        let radiance = col_w.rgb * dir_w.w;
-
-        var s = 1.0;
-        if (i == 0u) {
-            s = compute_csm_shadow(world_pos, view_depth, n, l);
-        }
-        color += pbr_light(n, v, l, albedo, metallic, roughness, radiance * s);
+        let dir_p = lights.dir_lights[i * 2u];
+        let col_p = lights.dir_lights[i * 2u + 1u];
+        let l = normalize(dir_p.xyz);
+        let radiance = col_p.rgb * dir_p.w;
+        let shadow = compute_csm_shadow(world_pos, view_depth, n, l);
+        direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }
 
     let pt_count = lights.counts.y;
-    let cube_count = lights.counts.z;
     for (var i: u32 = 0u; i < pt_count; i = i + 1u) {
-        let idx = i * 2u;
-        let pos_r = lights.point_lights[idx];
-        let col_i = lights.point_lights[idx + 1u];
-        let to_light = pos_r.xyz - world_pos;
-        let dist = length(to_light);
-        if (dist < pos_r.w) {
-            let l = to_light / max(dist, 0.0001);
-            var atten = clamp(1.0 - dist / pos_r.w, 0.0, 1.0);
-            atten = atten * atten;
-            var s = 1.0;
-            if (i == 0u && cube_count > 0u) {
-                s = compute_point_shadow(world_pos, 0u);
-            }
-            color += pbr_light(n, v, l, albedo, metallic, roughness, col_i.rgb * col_i.a * atten * s);
+        let pos_p = lights.point_lights[i * 2u];
+        let col_p = lights.point_lights[i * 2u + 1u];
+        let to_l = pos_p.xyz - world_pos;
+        let dist = length(to_l);
+        let range = pos_p.w;
+        if (dist > range) { continue; }
+        let l = to_l / max(dist, 1e-4);
+        let atten = clamp(1.0 - dist / range, 0.0, 1.0);
+        let atten2 = atten * atten;
+        let radiance = col_p.rgb * col_p.a * atten2;
+        var shadow = 1.0;
+        if (i == 0u) {
+            shadow = compute_point_shadow(world_pos, 0u);
         }
+        direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }
+
+    var color = ibl_diff + ibl_spec + direct + emissive;
 
     let fog_density = lights.fog_params.x;
     if (fog_density > 0.0) {
-        let fog_h_base  = lights.fog_params.y;
-        let fog_h_fall  = lights.fog_params.z;
-        let cam_pos     = camera.camera_pos.xyz;
-        let to_frag     = world_pos - cam_pos;
-        let dist        = length(to_frag);
-        let h           = max(0.0, world_pos.y - fog_h_base);
-        let h_factor    = exp(-h * fog_h_fall);
-        let fog_amount  = clamp(1.0 - exp(-dist * fog_density * h_factor), 0.0, 1.0);
-        color           = mix(color, lights.fog_color.rgb, fog_amount);
+        let dist = length(world_pos - camera.camera_pos.xyz);
+        let h = max(0.0, world_pos.y - lights.fog_params.y);
+        let h_factor = exp(-h * lights.fog_params.z);
+        let fog_amount = clamp(1.0 - exp(-dist * fog_density * h_factor), 0.0, 1.0);
+        color = mix(color, lights.fog_color.rgb, fog_amount);
     }
 
     return vec4<f32>(color, 1.0);

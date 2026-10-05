@@ -157,7 +157,12 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
 fn dir_contrib(n: vec3<f32>, idx: u32) -> vec3<f32> {
     let l_dir_raw = lights.dir_lights[idx * 2u].xyz;
     let l_col     = lights.dir_lights[idx * 2u + 1u].rgb;
-    let l = normalize(-l_dir_raw);
+    // В Lights.dir_lights[i*2].xyz лежит направление К источнику —
+    // то же соглашение, что и в deferred_lighting.wgsl:
+    //     let l = normalize(dir_w.xyz);
+    // Раньше здесь был лишний минус, из-за которого прозрачные
+    // объекты освещались «с обратной стороны».
+    let l = normalize(l_dir_raw);
     let ndl = max(dot(n, l), 0.0);
     return l_col * ndl;
 }

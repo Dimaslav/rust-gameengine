@@ -19,6 +19,11 @@ pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+pub const VOLUMETRIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub const VOLUMETRIC_GRID_W: u32 = 160;
+pub const VOLUMETRIC_GRID_H: u32 = 90;
+pub const VOLUMETRIC_GRID_D: u32 = 64;
+
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
 pub const SHADOW_SLOT_COUNT: u64 = 9;
@@ -67,6 +72,15 @@ pub struct LightsUniform {
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
     pub cube_shadow_pos: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct VolumetricParams {
+    pub grid: [f32; 4],
+    pub cam: [f32; 4],
+    pub params: [f32; 4],
+    pub fog_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -185,10 +199,10 @@ pub struct MeshDraw {
     pub double_sided: bool,
 }
 
-/// Настройки постобработки и графики.
-///
-/// Сохраняются в `editor.ron` (см. `EditorSettings::postfx`) и применяются
-/// при старте игры. Редактируются в панели Renderer в редакторе.
+fn default_volumetric_density() -> f32 { 0.025 }
+fn default_volumetric_scattering() -> f32 { 0.4 }
+fn default_volumetric_phase_g() -> f32 { 0.6 }
+
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostFx {
     pub bloom_threshold: f32,
@@ -216,6 +230,13 @@ pub struct PostFx {
     pub lod_distances: [f32; 4],
     pub taa_strength: f32,
     pub taa_sharpening: f32,
+
+    #[serde(default = "default_volumetric_density")]
+    pub volumetric_density: f32,
+    #[serde(default = "default_volumetric_scattering")]
+    pub volumetric_scattering: f32,
+    #[serde(default = "default_volumetric_phase_g")]
+    pub volumetric_phase_g: f32,
 }
 
 impl Default for PostFx {
@@ -246,6 +267,9 @@ impl Default for PostFx {
             lod_distances: [30.0, 80.0, 200.0, 500.0],
             taa_strength: 1.0,
             taa_sharpening: 0.1,
+            volumetric_density: 0.025,
+            volumetric_scattering: 0.4,
+            volumetric_phase_g: 0.6,
         }
     }
 }
@@ -358,15 +382,17 @@ pub fn create_noise_texture(
         view_formats: &[],
     });
 
+    // wgpu 25: `ImageCopyTexture` → `TexelCopyTextureInfo`,
+    //          `ImageDataLayout` → `TexelCopyBufferLayout`.
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &data,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(size * 8),
             rows_per_image: Some(size),
