@@ -154,17 +154,25 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(T * invmax, B * invmax, N);
 }
 
+// ИСПРАВЛЕНО: раньше терялась интенсивность источника.
+// Соглашение по layout (см. gpu_types::LightsUniform):
+//   dir_lights[i*2]   = (dir.xyz, intensity)
+//   dir_lights[i*2+1] = (color.rgb, _)
+//   point_lights[i*2]   = (pos.xyz, range)
+//   point_lights[i*2+1] = (color.rgb, intensity)
+//
+// Теперь формула совпадает с deferred_lighting.wgsl:
+//   dir   : radiance = color * intensity * NdotL
+//   point : radiance = color * intensity * NdotL * atten²
 fn dir_contrib(n: vec3<f32>, idx: u32) -> vec3<f32> {
-    let l_dir_raw = lights.dir_lights[idx * 2u].xyz;
-    let l_col     = lights.dir_lights[idx * 2u + 1u].rgb;
+    let dir_p = lights.dir_lights[idx * 2u];
+    let col_p = lights.dir_lights[idx * 2u + 1u];
     // В Lights.dir_lights[i*2].xyz лежит направление К источнику —
     // то же соглашение, что и в deferred_lighting.wgsl:
     //     let l = normalize(dir_w.xyz);
-    // Раньше здесь был лишний минус, из-за которого прозрачные
-    // объекты освещались «с обратной стороны».
-    let l = normalize(l_dir_raw);
+    let l = normalize(dir_p.xyz);
     let ndl = max(dot(n, l), 0.0);
-    return l_col * ndl;
+    return col_p.rgb * dir_p.w * ndl;
 }
 
 fn point_contrib(n: vec3<f32>, world_pos: vec3<f32>, idx: u32) -> vec3<f32> {
@@ -176,7 +184,7 @@ fn point_contrib(n: vec3<f32>, world_pos: vec3<f32>, idx: u32) -> vec3<f32> {
     let l = to_l / max(dist, 0.0001);
     let ndl = max(dot(n, l), 0.0);
     let atten = clamp(1.0 - dist / pos_range.w, 0.0, 1.0);
-    return col_int.rgb * ndl * atten * atten;
+    return col_int.rgb * col_int.a * ndl * atten * atten;
 }
 
 fn project_to_uv(vp: mat4x4<f32>, world_pos: vec3<f32>) -> vec2<f32> {

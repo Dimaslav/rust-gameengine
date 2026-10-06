@@ -154,6 +154,14 @@ pub struct Renderer {
     /// Режим камеры в прошлом кадре — нужен для сброса TAA-истории
     /// при переходах Orbit ↔ FPS ↔ Fly.
     taa_prev_camera_mode: Option<CameraMode>,
+
+    /// Статистика последнего **успешно отрисованного** кадра.
+    /// Обновляется в `render()` после сортировки draws. `App::redraw`
+    /// читает эти поля для панели Stats — они отражают предыдущий
+    /// кадр (в текущем кадре render() ещё не вызван на момент
+    /// построения Stats). Разница в 1 кадр визуально незаметна.
+    pub last_draw_count: usize,
+    pub last_instance_count: usize,
 }
 
 fn draw_center(d: &MeshDraw) -> Vec3 {
@@ -982,6 +990,8 @@ impl Renderer {
             taa_prev_view_proj: Mat4::IDENTITY,
             taa_reset_frames: 2,
             taa_prev_camera_mode: None,
+            last_draw_count: 0,
+            last_instance_count: 0,
         }
     }
 
@@ -1542,6 +1552,14 @@ impl Renderer {
         self.queue.write_buffer(&self.sd.fxaa_uniform, 0, bytemuck::bytes_of(&fxaa_params));
 
         let sorted_draws = sort_draws_for_render(draws, camera.position());
+
+        // ИСПРАВЛЕНО: сохраняем статистику последнего кадра. Раньше
+        // App::redraw захардкодивал draws=0, instances=0 в Stats,
+        // потому что эти значения становятся известны только здесь.
+        self.last_draw_count = sorted_draws.len();
+        self.last_instance_count = sorted_draws.iter()
+            .map(|d| d.instances.len())
+            .sum();
 
         let total_instances: u64 = sorted_draws.iter().map(|d| d.instances.len() as u64).sum();
         if total_instances > 0 {
@@ -2285,7 +2303,29 @@ fn make_decal_pipeline(
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: GBUFFER_FORMAT,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // ИСПРАВЛЕНО: `ALPHA_BLENDING` — это `src*src.a + dst*(1-src.a)`
+                    // **для всех четырёх каналов**. Но target 0 хранит
+                    // `(albedo.rgb, metallic)` — блендинг канала alpha
+                    // портит metallic: под decal'ом он становится
+                    // `decal.a² + metallic*(1-decal.a)`.
+                    //
+                    // Decal не имеет своего metallic — он должен
+                    // сохранять underlying-значение. Поэтому:
+                    //   RGB — обычный alpha-блендинг (SrcAlpha/OneMinusSrcAlpha),
+                    //   A   — passthrough dst (Zero/One), т.е. металлик
+                    //         от нижележащего G-buffer остаётся нетронутым.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
                 Some(wgpu::ColorTargetState {

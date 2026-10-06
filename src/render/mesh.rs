@@ -1,5 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3};
+use std::sync::OnceLock;
 use wgpu::util::DeviceExt;
 
 use crate::render::bvh::Bvh;
@@ -99,8 +100,6 @@ impl InstanceData {
         }
     }
 
-    // 14 attributes: 4 (model) + 4 (normal) + 1 (color) + 1 (uv_scale)
-    //               + 4 (prev_model).
     const ATTRS: [wgpu::VertexAttribute; 14] = wgpu::vertex_attr_array![
         6  => Float32x4, 7  => Float32x4, 8  => Float32x4, 9  => Float32x4,
         10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
@@ -128,8 +127,11 @@ pub struct Mesh {
     pub aabb_max: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
 
-    /// BVH для быстрого raycast. Строится из `triangles` при `Mesh::new`.
-    pub bvh: Bvh,
+    /// BVH для raycast — строится **лениво** при первом обращении
+    /// через `bvh()`. Раньше строился eager в `Mesh::new`, что
+    /// заметно замедляло загрузку больших FBX/glTF моделей, хотя
+    /// BVH нужен только для picking / projectile-хиттеста.
+    bvh: OnceLock<Bvh>,
 
     // CPU-копии для экспорта (FBX и т.п.).
     pub cpu_vertices: Vec<Vertex3D>,
@@ -141,6 +143,15 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// Ленивое построение BVH. При первом вызове строит из
+    /// `self.triangles`, дальше возвращает закэшированное значение.
+    ///
+    /// `OnceLock` потокобезопасен и не требует `&mut self`, поэтому
+    /// можно звать из `&Mesh` в picking'е и в projectile-цикле.
+    pub fn bvh(&self) -> &Bvh {
+        self.bvh.get_or_init(|| Bvh::build(&self.triangles))
+    }
+
     /// Публичный конструктор: строит меш + генерирует LOD.
     pub fn new(
         device: &wgpu::Device,
@@ -195,8 +206,6 @@ impl Mesh {
             triangles.push([a, b, c]);
         }
 
-        let bvh = Bvh::build(&triangles);
-
         let lods = if generate_lods_too && triangles.len() >= 200 {
             generate_lods(vertices, indices, 3)
         } else {
@@ -212,7 +221,7 @@ impl Mesh {
             aabb_min,
             aabb_max,
             triangles,
-            bvh,
+            bvh: OnceLock::new(),
             cpu_vertices: vertices.to_vec(),
             cpu_indices: indices.to_vec(),
             lods,
@@ -327,7 +336,6 @@ impl Mesh {
         Self::new(device, &vertices, &indices, "sphere")
     }
 
-    /// Плоскость в **XZ** (Y = 0, нормаль +Y). Классический «ground».
     pub fn plane(device: &wgpu::Device, size: f32, subdivisions: u32) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -359,11 +367,6 @@ impl Mesh {
         Self::new(device, &vertices, &indices, "plane")
     }
 
-    /// Плоскость в **XY** (Z = 0, нормаль +Z). Для билбордов / листвы /
-    /// вертикальных спрайтов.
-    ///
-    /// Отличие от `plane`: ось Y используется как «высота» плоскости,
-    /// поэтому `Transform.scale.y` реально растягивает объект вертикально.
     pub fn plane_xy(device: &wgpu::Device, size: f32, subdivisions: u32) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();

@@ -828,6 +828,29 @@ impl Game for DemoGame {
 
     fn rpg_hud(&self) -> Vec<(String, String)> { self.rpg.hud_lines() }
     fn on_kill(&mut self, world: &mut World, target: Entity) { rpg::on_kill(world, &mut self.rpg, target); }
+
+    fn save_game_state(&self) -> Option<String> {
+        match ron::ser::to_string(&self.rpg) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("Failed to serialize RpgState: {}", e);
+                None
+            }
+        }
+    }
+
+    fn load_game_state(&mut self, ron_str: &str) {
+        match ron::from_str::<RpgState>(ron_str) {
+            Ok(s) => {
+                self.rpg = s;
+                log::info!(
+                    "RpgState restored: gold={}, keys={}, quests={}",
+                    self.rpg.gold, self.rpg.keys.len(), self.rpg.quests.len()
+                );
+            }
+            Err(e) => log::error!("Failed to parse RpgState: {}", e),
+        }
+    }
 }
 
 fn main() {

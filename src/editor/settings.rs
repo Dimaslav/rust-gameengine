@@ -75,8 +75,7 @@ impl Default for EditorSettings {
 }
 
 impl EditorSettings {
-    /// Загрузить из файла. Если файла нет или парсинг не удался —
-    /// возвращает `Default`.
+
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -88,17 +87,28 @@ impl EditorSettings {
                 s
             }
             Err(e) => {
-                log::warn!(
+                log::error!(
                     "Failed to parse editor settings '{}': {}. Using defaults.",
                     path.display(),
                     e
                 );
+                let backup = path.with_extension("ron.bak");
+                match std::fs::rename(path, &backup) {
+                    Ok(()) => log::warn!(
+                        "Corrupt editor settings backed up to {}",
+                        backup.display()
+                    ),
+                    Err(io_err) => log::warn!(
+                        "Could not back up corrupt settings to {}: {}",
+                        backup.display(),
+                        io_err
+                    ),
+                }
                 Self::default()
             }
         }
     }
 
-    /// Сохранить в файл.
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
@@ -113,7 +123,6 @@ impl EditorSettings {
         })
     }
 
-    /// Добавить путь к сцене в начало списка recent.
     pub fn push_recent_scene(&mut self, path: &str) {
         self.recent_scenes.retain(|p| p != path);
         self.recent_scenes.insert(0, path.to_string());

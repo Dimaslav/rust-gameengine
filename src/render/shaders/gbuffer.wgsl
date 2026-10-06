@@ -4,9 +4,10 @@
 // prev_vp_unjit — **unjittered** view-proj прошлого кадра.
 // pixel_center_uv = frag_coord.xy / screen_size.xy (без jitter'а).
 //
-// @invariant на @builtin(position) обязателен: pipeline использует
-// depth_compare: Equal (см. make_gbuffer_pipeline), и без явной пометки
-// драйвер может округлить z по-разному в разных проходах.
+// @invariant на @builtin(position) сохранён для совместимости с
+// потенциальным `depth_compare: Equal`. Текущий `make_gbuffer_pipeline`
+// использует `Less`, поэтому @invariant — no-op и на производительность
+// не влияет.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -70,9 +71,8 @@ struct VsIn {
 };
 
 struct VsOut {
-    // @invariant ОБЯЗАТЕЛЕН: pipeline использует depth_compare: Equal.
-    // Без него драйвер может округлить z по-разному в разных проходах,
-    // и Equal будет случайно фейлиться на части пикселей → мерцание.
+    // @invariant — см. doc-comment выше. Оставлен на случай будущего
+    // перехода на depth_compare: Equal; сейчас безвреден.
     @builtin(position) @invariant frag_coord: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,

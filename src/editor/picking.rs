@@ -38,7 +38,9 @@ pub fn pick_ray(
     for &e in world.entities() {
         let Some(mh) = world.get::<MeshHandle>(e) else { continue };
         let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
-        if mesh.bvh.is_empty() {
+        // Ленивое построение BVH: первый raycast по этому мешу
+        // запустит Bvh::build, дальше результат закэширован.
+        if mesh.bvh().is_empty() {
             continue;
         }
 
@@ -62,11 +64,9 @@ pub fn pick_ray(
 
         // BVH raycast.
         // `t_local` — расстояние вдоль `local_d` в локальных единицах.
-        // Пропорция: t_world = t_local / |M⁻¹ · dir|. Раньше формула
-        // была `t / |M·local_d|`, что давало неверные дистанции при
-        // неединичном масштабе.
+        // Пропорция: t_world = t_local / |M⁻¹ · dir|.
         if let Some((_tri_idx, t_local)) =
-            mesh.bvh.raycast(local_o, local_d, f32::INFINITY, &mesh.triangles)
+            mesh.bvh().raycast(local_o, local_d, f32::INFINITY, &mesh.triangles)
         {
             let t_world = t_local / local_d_len;
             if best.map_or(true, |(_, bt)| t_world < bt) {
@@ -82,11 +82,6 @@ pub fn pick_ray(
 /// пересекается с экранным прямоугольником `rect`.
 ///
 /// `rect` = (x0, y0, x1, y1) в физических пикселях, порядок любой.
-///
-/// Раньше проверялся только центр — объект, у которого центр вне
-/// рамки (например, широкий куб, у которого выделен угол),
-/// не попадал в выборку. Теперь проверяется пересечение окружности
-/// (проекция сферы) с прямоугольником.
 pub fn entities_in_screen_rect(
     world: &World,
     renderer: &Renderer,

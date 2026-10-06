@@ -248,9 +248,17 @@ fn global_aabb(s: &BodyState) -> (Vec3, Vec3) {
             (s.position - h, s.position + h)
         }
         Collider::Capsule { radius, height } => {
+            // ИСПРАВЛЕНО: `height` теперь полная высота капсулы
+            // (включая обе полусферы-крышки), а не высота цилиндра.
+            // См. doc-комментарий на `Collider::Capsule`.
+            //
+            // Полная высота H ⇒ половина AABB по Y = H/2. Раньше
+            // формула была `hy + r`, что давало `H/2 + r` — это была
+            // «высота цилиндра + радиус», т.е. соглашение старой
+            // семантики.
             let r = radius * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
-            let h = Vec3::new(r, hy + r, r);
+            let h = Vec3::new(r, hy, r);
             (s.position - h, s.position + h)
         }
     }

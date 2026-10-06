@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::ecs::{Entity, World};
 use crate::game::components::*;
@@ -19,25 +20,25 @@ use crate::render::{AlphaMode, Material, Renderer};
 // Компоненты
 // ============================================================
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct GoldValue(pub u32);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KeyItem(pub u32);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chest {
     pub gold: u32,
     pub opened: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Door {
     pub needs_key: u32,
     pub open: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Npc {
     pub name: String,
     pub lines: Vec<String>,
@@ -45,7 +46,7 @@ pub struct Npc {
     pub spoken_to: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct QuestTarget {
     pub quest_id: u32,
 }
@@ -54,7 +55,7 @@ pub struct QuestTarget {
 // Состояние
 // ============================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quest {
     pub title: String,
     pub total: u32,
@@ -62,7 +63,7 @@ pub struct Quest {
     pub done: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RpgState {
     pub gold: u32,
     pub keys: Vec<u32>,
@@ -336,13 +337,6 @@ fn spawn_npc(
 // ---------- Forest ----------
 
 fn spawn_forest(world: &mut World) {
-    // 40 деревьев.
-    //
-    // Раньше здесь использовался `quad` (горизонтальная плоскость в XZ):
-    // все точки имели y = 0, и scale.y был бесполезен — деревья
-    // выглядели как плоские пятна на земле. Теперь используем `quad_xy`
-    // (вертикальная плоскость в XY): scale.x = ширина, scale.y = высота.
-    // Позиция y = 3.0 — центр 6-метрового билборда (0..6 м).
     for i in 0..40 {
         let angle = i as f32 / 40.0 * std::f32::consts::TAU;
         let r = 20.0 + ((i as f32 * 0.7).sin() + 1.0) * 7.0;
@@ -359,7 +353,6 @@ fn spawn_forest(world: &mut World) {
         world.insert(e, Collider::capsule(0.5, 6.0));
     }
 
-    // 10 волков
     for i in 0..10 {
         let angle = i as f32 / 10.0 * std::f32::consts::TAU + 0.15;
         let r = 22.0 + (i as f32 * 1.3).sin() * 3.0;
@@ -375,7 +368,6 @@ fn spawn_forest(world: &mut World) {
         world.insert(e, QuestTarget { quest_id: 1 });
     }
 
-    // 20 монет
     for i in 0..20 {
         let angle = i as f32 / 20.0 * std::f32::consts::TAU + 0.3;
         let r = 22.0 + (i as f32 * 0.9).cos() * 6.0;
@@ -388,7 +380,6 @@ fn spawn_forest(world: &mut World) {
 fn spawn_dungeon(world: &mut World) {
     let d = Vec3::new(-50.0, 0.0, 0.0);
 
-    // Пол
     let floor = world.spawn();
     world.insert(floor, Name("DungeonFloor".into()));
     world.insert(floor, Transform::at(d + Vec3::Y * 0.05)
@@ -398,7 +389,6 @@ fn spawn_dungeon(world: &mut World) {
     world.insert(floor, RigidBody::static_body());
     world.insert(floor, Collider::aabb(Vec3::splat(0.5)));
 
-    // Стены (4)
     let wall_specs = [
         (d + Vec3::new(0.0, 3.0, 15.0), Vec3::new(30.0, 6.0, 0.5)),
         (d + Vec3::new(0.0, 3.0, -15.0), Vec3::new(30.0, 6.0, 0.5)),
@@ -415,7 +405,6 @@ fn spawn_dungeon(world: &mut World) {
         world.insert(e, Collider::aabb(Vec3::splat(0.5)));
     }
 
-    // Дверь в южной стене
     let door = world.spawn();
     world.insert(door, Name("DungeonDoor".into()));
     world.insert(door, Transform::new(d.x, 1.5, d.z + 15.0)
@@ -426,11 +415,9 @@ fn spawn_dungeon(world: &mut World) {
     world.insert(door, Collider::aabb(Vec3::splat(0.5)));
     world.insert(door, Door { needs_key: 1, open: false });
 
-    // Ключ (у босса) и большой сундук
     spawn_key(world, d + Vec3::new(0.0, 0.3, -10.0), 1);
     spawn_chest(world, d + Vec3::new(5.0, 0.4, -10.0), 500);
 
-    // Босс
     let boss = world.spawn();
     world.insert(boss, Name("Boss".into()));
     world.insert(boss, Transform::at(d + Vec3::new(0.0, 1.5, -5.0)).with_scale(2.0));
@@ -440,7 +427,6 @@ fn spawn_dungeon(world: &mut World) {
     world.insert(boss, Chase::new(2.0, 2.0));
     world.insert(boss, QuestTarget { quest_id: 2 });
 
-    // 4 волка-охранника
     for i in 0..4 {
         let angle = i as f32 / 4.0 * std::f32::consts::TAU;
         let pos = d + Vec3::new(angle.cos() * 8.0, 0.5, angle.sin() * 8.0 - 5.0);
@@ -454,13 +440,11 @@ fn spawn_dungeon(world: &mut World) {
         world.insert(e, QuestTarget { quest_id: 1 });
     }
 
-    // Портал из деревни → в подземелье
     spawn_portal(
         world,
         Vec3::new(0.0, 1.0, 18.0),
         d + Vec3::new(0.0, 1.0, 8.0),
     );
-    // Обратный портал
     spawn_portal(
         world,
         d + Vec3::new(0.0, 1.0, 13.5),
@@ -513,11 +497,9 @@ fn spawn_center_marker(world: &mut World) {
 // Системы
 // ============================================================
 
-/// Тик RPG-логики (диалог, двери).
 pub fn tick(state: &mut RpgState, world: &mut World, player_pos: Vec3, dt: f32) {
     state.tick_dialogue(dt);
 
-    // Двери: если игрок рядом и есть ключ — открыть
     let doors: Vec<Entity> = world
         .entities()
         .iter()
@@ -547,11 +529,8 @@ pub fn tick(state: &mut RpgState, world: &mut World, player_pos: Vec3, dt: f32) 
     }
 }
 
-/// Игрок нажал E по цели. Возвращает `true`, если обработано.
 pub fn try_interact(world: &mut World, state: &mut RpgState, target: Entity) -> bool {
-    // NPC
     if let Some(npc) = world.get::<Npc>(target).cloned() {
-        // Если у NPC есть квест и он ещё не выдан — выдаём.
         if let Some(qid) = npc.quest_id {
             if npc.spoken_to == 0 {
                 state.start_quest(qid, "Убить 5 волков", 5);
@@ -576,7 +555,6 @@ pub fn try_interact(world: &mut World, state: &mut RpgState, target: Entity) -> 
         return true;
     }
 
-    // Золото
     if let Some(g) = world.get::<GoldValue>(target).copied() {
         state.add_gold(g.0);
         state.push_dialogue("💰", &format!("+{} монет", g.0));
@@ -584,7 +562,6 @@ pub fn try_interact(world: &mut World, state: &mut RpgState, target: Entity) -> 
         return true;
     }
 
-    // Ключ
     if let Some(k) = world.get::<KeyItem>(target).copied() {
         state.give_key(k.0);
         state.push_dialogue("🔑", "Ты подобрал ключ.");
@@ -592,7 +569,6 @@ pub fn try_interact(world: &mut World, state: &mut RpgState, target: Entity) -> 
         return true;
     }
 
-    // Сундук
     if let Some(c) = world.get::<Chest>(target).cloned() {
         if c.opened {
             state.push_dialogue("📦", "Уже пусто.");
@@ -610,7 +586,6 @@ pub fn try_interact(world: &mut World, state: &mut RpgState, target: Entity) -> 
     false
 }
 
-/// Игрок убил цель. Обновляет прогресс квестов + дропает монету.
 pub fn on_kill(world: &mut World, state: &mut RpgState, target: Entity) {
     let qid = match world.get::<QuestTarget>(target) {
         Some(q) => q.quest_id,
@@ -630,7 +605,6 @@ pub fn on_kill(world: &mut World, state: &mut RpgState, target: Entity) {
         state.push_dialogue("Враг убит", &format!("Прогресс: {}/5", cur));
     }
 
-    // Дроп монеты
     let drop = world.spawn();
     world.insert(drop, Name("CoinDrop".into()));
     world.insert(drop, Transform::at(pos).with_scale(0.3));

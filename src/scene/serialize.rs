@@ -9,6 +9,9 @@
 //! * `save_scene_with_assets_to_*` / `load_scene_with_assets_from_*` —
 //!   World + материалы + пути к текстурам. Используются для Save/Load
 //!   файла сцены пользователем.
+//!
+//! * `save_scene_with_game_state_*` / `load_scene_with_assets_from_str_full`
+//!   — то же + game-specific состояние (RON-строка, формируется игрой).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,9 @@ use crate::game::components::{
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
 };
+use crate::game::decals::Decal;
 use crate::game::lights::{DirectionalLight, PointLight};
+use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
 use glam::Vec3;
@@ -42,6 +47,18 @@ pub struct SceneFile {
     /// здесь отсутствуют — они создаются при старте движка.
     #[serde(default)]
     pub texture_paths: HashMap<String, String>,
+
+    /// Произвольное game-specific состояние (RON-строка).
+    ///
+    /// Движок его не парсит — это «непрозрачный blob» для игры.
+    /// Нужен, чтобы, например, `RpgState` (золото, ключи, квесты)
+    /// переживал Save/Load.
+    ///
+    /// Раньше такого поля не было, и вся RPG-прогрессия терялась
+    /// при сохранении сцены, хотя сами RPG-сущности (`Npc`, `Chest`,
+    /// `GoldValue`) уже сериализовались.
+    #[serde(default)]
+    pub game_state_ron: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -72,6 +89,15 @@ pub struct EntitySnapshot {
 
     #[serde(default)] pub dir_light: Option<DirectionalLightSnapshot>,
     #[serde(default)] pub point_light: Option<PointLightSnapshot>,
+
+    // === Ранее не сохранялись — критический фикс ===
+    #[serde(default)] pub decal: Option<DecalSnapshot>,
+    #[serde(default)] pub gold_value: Option<u32>,
+    #[serde(default)] pub key_item: Option<u32>,
+    #[serde(default)] pub chest: Option<ChestSnapshot>,
+    #[serde(default)] pub door: Option<DoorSnapshot>,
+    #[serde(default)] pub npc: Option<NpcSnapshot>,
+    #[serde(default)] pub quest_target: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -237,6 +263,32 @@ impl PointLightSnapshot {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DecalSnapshot {
+    pub texture: String,
+    pub tint: [f32; 4],
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct ChestSnapshot {
+    pub gold: u32,
+    pub opened: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct DoorSnapshot {
+    pub needs_key: u32,
+    pub open: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct NpcSnapshot {
+    pub name: String,
+    pub lines: Vec<String>,
+    pub quest_id: Option<u32>,
+    pub spoken_to: u32,
+}
+
 // ============================================================
 // Save (World only, без материалов)
 // ============================================================
@@ -253,6 +305,7 @@ pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result
         player_spawn: player_spawn.map(|p| p.to_array()),
         materials: HashMap::new(),
         texture_paths: HashMap::new(),
+        game_state_ron: None,
     };
     let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
         .context("serialize scene")?;
@@ -274,7 +327,6 @@ pub fn save_scene_to_file(
 // Save (World + материалы + текстуры из Renderer)
 // ============================================================
 
-/// Собрать материалы, на которые ссылаются entity сцены.
 fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Material> {
     let mut used: HashSet<String> = HashSet::new();
     for &e in world.entities() {
@@ -292,10 +344,6 @@ fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Mate
     out
 }
 
-/// Собрать пути ко всем текстурам, на которые ссылаются материалы.
-///
-/// Процедурные текстуры (без `source_path`) пропускаются — они
-/// создаются при старте движка и не нуждаются в перезагрузке.
 fn collect_texture_paths(
     renderer: &Renderer,
     materials: &HashMap<String, Material>,
@@ -319,6 +367,29 @@ pub fn save_scene_with_assets_to_string(
     renderer: &Renderer,
     player_spawn: Option<Vec3>,
 ) -> Result<String> {
+    save_scene_with_game_state_to_string(world, renderer, player_spawn, None)
+}
+
+pub fn save_scene_with_assets_to_file(
+    world: &World,
+    renderer: &Renderer,
+    path: impl AsRef<Path>,
+    player_spawn: Option<Vec3>,
+) -> Result<()> {
+    save_scene_with_game_state_to_file(world, renderer, path, player_spawn, None)
+}
+
+/// Как `save_scene_with_assets_to_string`, но с game-specific состоянием.
+///
+/// `game_state_ron` — готовая RON-строка от игры (например,
+/// `ron::ser::to_string(&rpg_state)`). Если `None` — эквивалентно
+/// базовой версии.
+pub fn save_scene_with_game_state_to_string(
+    world: &World,
+    renderer: &Renderer,
+    player_spawn: Option<Vec3>,
+    game_state_ron: Option<String>,
+) -> Result<String> {
     let mut entities = Vec::new();
     for &e in world.entities() {
         if let Some(snap) = snapshot_entity(world, e) {
@@ -333,19 +404,23 @@ pub fn save_scene_with_assets_to_string(
         player_spawn: player_spawn.map(|p| p.to_array()),
         materials,
         texture_paths,
+        game_state_ron,
     };
     let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
         .context("serialize scene")?;
     Ok(text)
 }
 
-pub fn save_scene_with_assets_to_file(
+pub fn save_scene_with_game_state_to_file(
     world: &World,
     renderer: &Renderer,
     path: impl AsRef<Path>,
     player_spawn: Option<Vec3>,
+    game_state_ron: Option<String>,
 ) -> Result<()> {
-    let text = save_scene_with_assets_to_string(world, renderer, player_spawn)?;
+    let text = save_scene_with_game_state_to_string(
+        world, renderer, player_spawn, game_state_ron,
+    )?;
     std::fs::write(path.as_ref(), text)
         .with_context(|| format!("write scene to {}", path.as_ref().display()))?;
     Ok(())
@@ -456,6 +531,43 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
 
+    if let Some(d) = world.get::<Decal>(e) {
+        s.decal = Some(DecalSnapshot {
+            texture: d.texture.clone(),
+            tint: d.tint,
+        });
+        any = true;
+    }
+    if let Some(g) = world.get::<GoldValue>(e) {
+        s.gold_value = Some(g.0);
+        any = true;
+    }
+    if let Some(k) = world.get::<KeyItem>(e) {
+        s.key_item = Some(k.0);
+        any = true;
+    }
+    if let Some(c) = world.get::<Chest>(e) {
+        s.chest = Some(ChestSnapshot { gold: c.gold, opened: c.opened });
+        any = true;
+    }
+    if let Some(d) = world.get::<Door>(e) {
+        s.door = Some(DoorSnapshot { needs_key: d.needs_key, open: d.open });
+        any = true;
+    }
+    if let Some(n) = world.get::<Npc>(e) {
+        s.npc = Some(NpcSnapshot {
+            name: n.name.clone(),
+            lines: n.lines.clone(),
+            quest_id: n.quest_id,
+            spoken_to: n.spoken_to,
+        });
+        any = true;
+    }
+    if let Some(q) = world.get::<QuestTarget>(e) {
+        s.quest_target = Some(q.quest_id);
+        any = true;
+    }
+
     if any { Some(s) } else { None }
 }
 
@@ -491,23 +603,16 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
 // Load (World + материалы + текстуры в Renderer)
 // ============================================================
 
-/// Загрузить сцену вместе с материалами и текстурами.
+/// Загружает сцену и возвращает `(world, player_spawn, game_state_ron)`.
 ///
-/// Порядок:
-///   1. Парсим SceneFile.
-///   2. Регистрируем текстуры в Renderer — только те, у которых
-///      сохранён `path` (процедурные уже есть в памяти).
-///   3. Регистрируем материалы (с уже подгруженными текстурами).
-///   4. Спавним entity.
-pub fn load_scene_with_assets_from_str(
+/// Третий элемент — то, что было сохранено в `SceneFile::game_state_ron`
+/// (для игры; движок его не парсит).
+pub fn load_scene_with_assets_from_str_full(
     text: &str,
     renderer: &mut Renderer,
-) -> Result<(World, Option<Vec3>)> {
+) -> Result<(World, Option<Vec3>, Option<String>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
 
-    // ШАГ 1. Текстуры. Загружаем с диска те, что сохранили путь.
-    // Если текстура уже есть в Renderer (например, встроенная
-    // `checker`) — не перезагружаем.
     let mut restored_tex = 0usize;
     let mut failed_tex = 0usize;
     for (name, path) in &file.texture_paths {
@@ -532,7 +637,6 @@ pub fn load_scene_with_assets_from_str(
         );
     }
 
-    // ШАГ 2. Материалы. Ссылаются на уже подгруженные текстуры.
     for (name, material) in &file.materials {
         if renderer.has_material(name) {
             renderer.update_material(name, material.clone());
@@ -547,12 +651,19 @@ pub fn load_scene_with_assets_from_str(
         );
     }
 
-    // ШАГ 3. Entity.
     let mut world = World::new();
     let id_map = spawn_all_entities(&mut world, file.entities);
     fix_call_elevator_refs(&mut world, &id_map);
 
     let spawn = file.player_spawn.map(Vec3::from_array);
+    Ok((world, spawn, file.game_state_ron))
+}
+
+pub fn load_scene_with_assets_from_str(
+    text: &str,
+    renderer: &mut Renderer,
+) -> Result<(World, Option<Vec3>)> {
+    let (world, spawn, _) = load_scene_with_assets_from_str_full(text, renderer)?;
     Ok((world, spawn))
 }
 
@@ -694,6 +805,33 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
 
     if let Some(l) = snap.dir_light { world.insert(e, l.to_light()); }
     if let Some(l) = snap.point_light { world.insert(e, l.to_light()); }
+
+    if let Some(d) = snap.decal {
+        world.insert(e, Decal { texture: d.texture, tint: d.tint });
+    }
+    if let Some(g) = snap.gold_value {
+        world.insert(e, GoldValue(g));
+    }
+    if let Some(k) = snap.key_item {
+        world.insert(e, KeyItem(k));
+    }
+    if let Some(c) = snap.chest {
+        world.insert(e, Chest { gold: c.gold, opened: c.opened });
+    }
+    if let Some(d) = snap.door {
+        world.insert(e, Door { needs_key: d.needs_key, open: d.open });
+    }
+    if let Some(n) = snap.npc {
+        world.insert(e, Npc {
+            name: n.name,
+            lines: n.lines,
+            quest_id: n.quest_id,
+            spoken_to: n.spoken_to,
+        });
+    }
+    if let Some(q) = snap.quest_target {
+        world.insert(e, QuestTarget { quest_id: q });
+    }
 
     e
 }

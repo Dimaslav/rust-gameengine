@@ -1734,6 +1734,18 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
         ui.add(egui::Slider::new(&mut postfx.lod_distances[0], 5.0..=200.0).text("Distance LOD0→1"));
         ui.add(egui::Slider::new(&mut postfx.lod_distances[1], 20.0..=500.0).text("Distance LOD1→2"));
         ui.add(egui::Slider::new(&mut postfx.lod_distances[2], 50.0..=1000.0).text("Distance LOD2→3"));
+
+        // ИСПРАВЛЕНО: гарантируем строгую монотонность порогов.
+        // Раньше диапазоны слайдеров позволяли выставить, например,
+        // lod_distances = [200, 20, 500]. Тогда LOD0-уровень
+        // становился недостижим (код брал min(dist0, dist1) = 20), а
+        // весь смысл LOD0 (наиболее детальный меш) пропадал.
+        //
+        // Правило: каждое следующее расстояние должно быть хотя бы
+        // на 1 м больше предыдущего.
+        let d = &mut postfx.lod_distances;
+        if d[1] <= d[0] { d[1] = d[0] + 1.0; }
+        if d[2] <= d[1] { d[2] = d[1] + 1.0; }
     });
     ui.separator();
     ui.label("Debug view");

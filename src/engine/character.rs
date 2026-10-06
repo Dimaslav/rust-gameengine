@@ -175,9 +175,11 @@ fn collider_aabb(col: Collider, pos: Vec3, scale: Vec3) -> (Vec3, Vec3) {
             (pos - h, pos + h)
         }
         Collider::Capsule { radius, height } => {
+            // ИСПРАВЛЕНО: `height` — полная высота капсулы (включая
+            // обе полусферы-крышки). См. `Collider::Capsule`.
             let r = radius * scale.max_element();
             let hy = height * scale.y * 0.5;
-            let h = Vec3::new(r, hy + r, r);
+            let h = Vec3::new(r, hy, r);
             (pos - h, pos + h)
         }
     }

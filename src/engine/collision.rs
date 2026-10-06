@@ -69,9 +69,12 @@ fn collider_world_aabb(col: &Collider, world_pos: Vec3, world_scale: Vec3) -> (V
             (world_pos - h, world_pos + h)
         }
         Collider::Capsule { radius, height } => {
+            // ИСПРАВЛЕНО: `height` — полная высота капсулы (включая
+            // обе полусферы-крышки), а не высота цилиндра.
+            // См. doc-комментарий на `Collider::Capsule`.
             let r = radius * world_scale.max_element();
             let hy = height * world_scale.y * 0.5;
-            let h = Vec3::new(r, hy + r, r);
+            let h = Vec3::new(r, hy, r);
             (world_pos - h, world_pos + h)
         }
     }

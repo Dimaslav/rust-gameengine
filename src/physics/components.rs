@@ -141,6 +141,21 @@ impl Default for RigidBody {
     fn default() -> Self { Self::dynamic(1.0) }
 }
 
+/// Коллайдер. Центр совпадает с `Transform.position`.
+///
+/// Семантика `Capsule::height` — **полная высота, включая обе
+/// полусферы-крышки**. То есть `capsule(0.4, 1.8)` — капсула,
+/// у которой полная вертикальная протяжённость от нижней точки
+/// до верхней равна 1.8 м, а радиус полусфер 0.4 м. Цилиндрическая
+/// секция между полусферами получается `height - 2 * radius` (для
+/// приведённого примера — 1.0 м).
+///
+/// Это соглашение согласовано с `engine::PlayerCapsule` (там
+/// `height` тоже означает полную высоту). Раньше `Collider::Capsule`
+/// интерпретировал `height` как **высоту цилиндра**, из-за чего
+/// `capsule(0.4, 1.8)` давал коллайдер высотой 2.6 м при визуальной
+/// высоте меша 1.6 м — персонаж «отталкивался» от NPC за 0.5 м до
+/// касания.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Collider {
     /// Сфера, центр — в `Transform.position`.
@@ -149,7 +164,8 @@ pub enum Collider {
     /// `half_extents` — в локальных единицах, масштабируются `Transform.scale`.
     /// При ненулевом повороте — используется внешний AABB вокруг повёрнутого бокса.
     Aabb { half_extents: Vec3 },
-    /// Капсула вдоль локальной оси Y. Пока аппроксимируется AABB.
+    /// Капсула вдоль локальной оси Y. `height` — полная высота,
+    /// включая обе полусферы (см. doc-комментарий выше).
     Capsule { radius: f32, height: f32 },
 }
 
@@ -162,10 +178,14 @@ impl Collider {
         Self::Aabb { half_extents: half_extents.max(Vec3::splat(1e-4)) }
     }
 
+    /// `height` — полная высота капсулы (включая обе полусферы).
+    /// Значение автоматически поднимается до `2 * radius`, чтобы
+    /// цилиндрическая секция не была отрицательной.
     pub fn capsule(radius: f32, height: f32) -> Self {
+        let r = radius.max(1e-4);
         Self::Capsule {
-            radius: radius.max(1e-4),
-            height: height.max(2.0 * radius + 1e-4),
+            radius: r,
+            height: height.max(2.0 * r + 1e-4),
         }
     }
 }

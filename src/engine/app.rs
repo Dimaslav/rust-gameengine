@@ -21,6 +21,8 @@ use crate::game::components::{
     Velocity, Visible,
 };
 use crate::game::decals::Decal;
+use crate::game::lights::{DirectionalLight, PointLight};
+use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
 use crate::physics::{BodyType, PhysicsWorld};
 use crate::render::decal::{DecalDraw, DecalInstance};
 use crate::render::{
@@ -52,6 +54,17 @@ pub trait Game: 'static {
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
+
+    /// Сериализует game-specific состояние (например, `RpgState`) в
+    /// RON-строку. Возвращается при Save сцены; восстанавливается при
+    /// Load и при Undo/Redo через `load_game_state`.
+    ///
+    /// Default: `None` — сцена сохраняется без game-state.
+    fn save_game_state(&self) -> Option<String> { None }
+
+    /// Восстанавливает game-specific состояние из строки, ранее
+    /// полученной из `save_game_state`.
+    fn load_game_state(&mut self, _ron: &str) {}
 }
 
 #[derive(Clone, Copy)]
@@ -627,10 +640,6 @@ impl<G: Game> App<G> {
             } else { self.editor.state.palette.preview_pos = None; }
         } else { self.editor.state.palette.preview_pos = None; }
 
-        // ИСПРАВЛЕНО: было `dt` (raw), из-за чего на гичках
-        // (перетаскивание окна, breakpoints) снаряды телепортировались
-        // мимо коллайдеров, а частицы пролетали сквозь стены. Теперь
-        // используем тот же сглаженный dt, что и игрок/физика.
         self.update_particles(dt_smooth);
         self.update_projectiles(dt_smooth);
 
@@ -711,6 +720,10 @@ impl<G: Game> App<G> {
             texture_list: &texture_list, selected_material,
         };
 
+        // ИСПРАВЛЕНО: pre-UI snapshot сцены теперь снимается без
+        // game_state — game-state будет приложен в момент `push`,
+        // отдельным аргументом. Это позволяет сохранить
+        // «до»-состояние мира без лишней сериализации game_state.
         let pre_ui_undo_snapshot: Option<String> = if self.editor.state.undo.can_push_now() {
             crate::scene::save_scene_with_assets_to_string(&self.world, &self.renderer, None).ok()
         } else { None };
@@ -738,7 +751,12 @@ impl<G: Game> App<G> {
             frame_time_max_ms: self.time.frame_time_max_ms(),
             hitches: self.time.hitches,
             entities: self.world.len(),
-            draws: 0, instances: 0,
+            // ИСПРАВЛЕНО: значения из предыдущего кадра — реальные
+            // draws/instances текущего кадра известны только после
+            // `renderer.render()` ниже. Отставание на 1 кадр
+            // визуально не заметно.
+            draws: self.renderer.last_draw_count,
+            instances: self.renderer.last_instance_count,
             dir_lights: dir_lights_pre.len(),
             point_lights: point_lights_pre.len(),
             lod_counts, lod_triangles: [0; 4],
@@ -773,11 +791,19 @@ impl<G: Game> App<G> {
             self.editor.egui_renderer.update_texture(&self.renderer.device, &self.renderer.queue, *id, image_delta);
         }
 
+        // ИСПРАВЛЕНО: undo push теперь с game_state. Раньше game-state
+        // (золото, ключи, квесты) не сохранялся, и после Ctrl+Z мир
+        // откатывался, а HUD оставался «после»-состоянием.
         if self.editor.state.undo_requested {
             self.editor.state.undo_requested = false;
+            let gs = self.game.save_game_state();
             match pre_ui_undo_snapshot {
-                Some(snap) => { self.editor.state.undo.push_snapshot(snap); }
-                None => { if self.editor.state.undo.can_push_now() { self.editor.state.undo.push(&self.world, &self.renderer); } }
+                Some(snap) => { self.editor.state.undo.push_snapshot(snap, gs); }
+                None => {
+                    if self.editor.state.undo.can_push_now() {
+                        self.editor.state.undo.push(&self.world, &self.renderer, gs);
+                    }
+                }
             }
         }
 
@@ -935,17 +961,30 @@ impl<G: Game> App<G> {
         }
     }
 
+    /// Дублирует выделенные entity, копируя **все** компоненты.
+    ///
+    /// ИСПРАВЛЕНО (в этой ревизии): смещение `+1.0 X` применяется только
+    /// к «корневым» сущностям копируемого подмножества. Раньше offset
+    /// применялся ко всем — и ребёнок получал его дважды: один раз
+    /// через свой Transform, второй — через нового Parent.
     fn duplicate_selected(&mut self) {
         use crate::game::components::{
             AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name,
             Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform,
-            Velocity, Visible,
+            Trigger, TriggerAction, Velocity, Visible,
         };
+        use crate::game::lights::{DirectionalLight, PointLight};
+        use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
         use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 
         let originals: Vec<Entity> = self.editor.state.selected.iter().copied()
             .filter(|&e| self.world.entities().contains(&e)).collect();
         if originals.is_empty() { return; }
+
+        // Множество выделенных entity — для определения «является ли
+        // Parent данной сущности частью копируемого подмножества».
+        let originals_set: std::collections::HashSet<Entity> =
+            originals.iter().copied().collect();
 
         let mut old_to_new: HashMap<Entity, Entity> = HashMap::new();
         for &e in &originals {
@@ -958,7 +997,13 @@ impl<G: Game> App<G> {
 
             if let Some(t) = self.world.get::<Transform>(e).copied() {
                 let mut nt = t;
-                nt.position += Vec3::new(1.0, 0.0, 0.0);
+                let parent_in_selection = self.world
+                    .get::<Parent>(e)
+                    .map(|p| originals_set.contains(&p.0))
+                    .unwrap_or(false);
+                if !parent_in_selection {
+                    nt.position += Vec3::new(1.0, 0.0, 0.0);
+                }
                 self.world.insert(new_e, nt);
             }
             if let Some(n) = self.world.get::<Name>(e).cloned() {
@@ -983,6 +1028,23 @@ impl<G: Game> App<G> {
             if let Some(mat) = self.world.get::<PhysicsMaterial>(e).copied() { self.world.insert(new_e, mat); }
             if let Some(dec) = self.world.get::<Decal>(e).cloned() { self.world.insert(new_e, dec); }
 
+            if let Some(mut t) = self.world.get::<Trigger>(e).cloned() {
+                if let TriggerAction::CallElevator { elevator, floor_idx } = t.action {
+                    let new_el = old_to_new.get(&elevator).copied().unwrap_or(elevator);
+                    t.action = TriggerAction::CallElevator { elevator: new_el, floor_idx };
+                }
+                self.world.insert(new_e, t);
+            }
+            if let Some(l) = self.world.get::<DirectionalLight>(e).copied() { self.world.insert(new_e, l); }
+            if let Some(l) = self.world.get::<PointLight>(e).copied() { self.world.insert(new_e, l); }
+
+            if let Some(g) = self.world.get::<GoldValue>(e).copied() { self.world.insert(new_e, g); }
+            if let Some(k) = self.world.get::<KeyItem>(e).copied() { self.world.insert(new_e, k); }
+            if let Some(c) = self.world.get::<Chest>(e).cloned() { self.world.insert(new_e, c); }
+            if let Some(d) = self.world.get::<Door>(e).cloned() { self.world.insert(new_e, d); }
+            if let Some(n) = self.world.get::<Npc>(e).cloned() { self.world.insert(new_e, n); }
+            if let Some(q) = self.world.get::<QuestTarget>(e).copied() { self.world.insert(new_e, q); }
+
             if let Some(&Parent(p)) = self.world.get::<Parent>(e) {
                 let new_parent = old_to_new.get(&p).copied().unwrap_or(p);
                 self.world.insert(new_e, Parent(new_parent));
@@ -1000,7 +1062,8 @@ impl<G: Game> App<G> {
         use crate::game::components::*;
         use crate::game::lights::{DirectionalLight, PointLight};
 
-        self.editor.state.undo.push_forced(&self.world, &self.renderer);
+        let gs = self.game.save_game_state();
+        self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
 
         let mut pos = hit;
         if item.snaps_to_ground() { pos.y += item.half_height(); }
@@ -1143,19 +1206,60 @@ impl<G: Game> App<G> {
                 use std::collections::HashMap;
                 let snaps = self.editor.state.clipboard_entities.clone();
                 if snaps.is_empty() { return; }
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let offset = Vec3::new(1.0, 0.0, 1.0);
                 let mut old_to_new: HashMap<u32, Entity> = HashMap::new();
                 let mut new_selected: Vec<Entity> = Vec::with_capacity(snaps.len());
+
+                // ИСПРАВЛЕНО: раньше offset применялся только к
+                // сущностям с `parent == None`. Но если `Parent`
+                // ссылался на entity, которой в буфере нет — после
+                // вставки родителя тоже не будет, и копия окажется
+                // «сиротой» с локальными координатами без сдвига.
+                // Теперь для сирот вычисляем world-матрицу родителя
+                // (он мог остаться в мире), «запекаем» её в локальный
+                // Transform и добавляем offset.
+                let snap_ids: std::collections::HashSet<u32> = snaps.iter()
+                    .enumerate()
+                    .map(|(idx, s)| s.entity_id.unwrap_or(idx as u32))
+                    .collect();
+
                 for (idx, mut snap) in snaps.iter().cloned().enumerate() {
                     let old_id = snap.entity_id.unwrap_or(idx as u32);
-                    if snap.parent.is_none() {
-                        if let Some(ref mut t) = snap.transform {
-                            t.position[0] += offset.x;
-                            t.position[1] += offset.y;
-                            t.position[2] += offset.z;
+                    let parent_in_buffer = snap.parent
+                        .map(|p| snap_ids.contains(&p))
+                        .unwrap_or(false);
+
+                    if !parent_in_buffer {
+                        // Мировая матрица старого родителя, если он ещё в мире.
+                        let mut parent_world = glam::Mat4::IDENTITY;
+                        if let Some(old_parent) = snap.parent {
+                            let pe = old_parent as Entity;
+                            if self.world.entities().contains(&pe) {
+                                parent_world = crate::game::world_matrix(&self.world, pe);
+                            }
                         }
+
+                        if let Some(ref mut t) = snap.transform {
+                            let local = glam::Mat4::from_scale_rotation_translation(
+                                Vec3::from_array(t.scale),
+                                glam::Quat::from_array(t.rotation),
+                                Vec3::from_array(t.position),
+                            );
+                            let world = parent_world * local;
+                            let (s, r, p) = world.to_scale_rotation_translation();
+                            t.position = [p.x + offset.x, p.y + offset.y, p.z + offset.z];
+                            t.rotation = r.to_array();
+                            t.scale = s.to_array();
+                        }
+
+                        // Родителя в буфере нет — после вставки его не
+                        // будет, копия становится корнем. Сбрасываем
+                        // `parent` в снапшоте.
+                        snap.parent = None;
                     }
+
                     snap.entity_id = None;
                     if let Some(ref mut n) = snap.name { n.push_str("_paste"); }
                     let e = crate::scene::serialize::spawn_snapshot(&mut self.world, snap);
@@ -1163,6 +1267,9 @@ impl<G: Game> App<G> {
                     new_selected.push(e);
                 }
                 for (idx, &new_e) in new_selected.iter().enumerate() {
+                    // Восстанавливаем Parent только для тех, чей
+                    // родитель есть в буфере — `old_to_new` содержит
+                    // исключительно вставленные entity.
                     let old_parent = snaps[idx].parent;
                     if let Some(op) = old_parent {
                         if let Some(&new_parent) = old_to_new.get(&op) {
@@ -1184,51 +1291,80 @@ impl<G: Game> App<G> {
                 log::info!("Material made unique: {}", new_name);
             }
             EditorAction::Undo => {
-                if let Some(new_world) = self.editor.state.undo.undo(&self.world, &mut self.renderer) {
+                let gs = self.game.save_game_state();
+                if let Some((new_world, game_state_ron)) =
+                    self.editor.state.undo.undo(&self.world, &mut self.renderer, gs)
+                {
                     self.world = new_world;
                     self.editor.state.prune_selection(&self.world);
+                    if let Some(ron) = game_state_ron {
+                        self.game.load_game_state(&ron);
+                    }
                 }
             }
             EditorAction::Redo => {
-                if let Some(new_world) = self.editor.state.undo.redo(&self.world, &mut self.renderer) {
+                let gs = self.game.save_game_state();
+                if let Some((new_world, game_state_ron)) =
+                    self.editor.state.undo.redo(&self.world, &mut self.renderer, gs)
+                {
                     self.world = new_world;
                     self.editor.state.prune_selection(&self.world);
+                    if let Some(ron) = game_state_ron {
+                        self.game.load_game_state(&ron);
+                    }
                 }
             }
             EditorAction::Save => {
                 let path = self.editor.state.save_path.clone();
                 let spawn = Some(self.editor.state.play.saved_position);
-                if let Err(e) = crate::scene::save_scene_with_assets_to_file(
-                    &self.world, &self.renderer, &path, spawn,
+                let game_state = self.game.save_game_state();
+                if let Err(e) = crate::scene::save_scene_with_game_state_to_file(
+                    &self.world, &self.renderer, &path, spawn, game_state,
                 ) {
                     log::error!("Save failed: {}", e);
-                } else { log::info!("Scene saved to {} (with materials)", path); }
+                } else { log::info!("Scene saved to {} (with materials + game state)", path); }
             }
             EditorAction::Load => {
                 let path = self.editor.state.save_path.clone();
-                match crate::scene::load_scene_with_assets_from_file(&path, &mut self.renderer) {
-                    Ok((mut new_world, spawn)) => {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(e) => { log::error!("Load failed: cannot read '{}': {}", path, e); return; }
+                };
+                match crate::scene::load_scene_with_assets_from_str_full(&text, &mut self.renderer) {
+                    Ok((mut new_world, spawn, game_state_ron)) => {
                         new_world.sync_next_id();
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
+                        if let Some(ron) = game_state_ron {
+                            self.game.load_game_state(&ron);
+                            log::info!("Game state restored");
+                        }
                         self.editor.state.settings.push_recent_scene(&path);
                     }
                     Err(e) => log::error!("Load failed: {}", e),
                 }
             }
             EditorAction::LoadPath(path) => {
-                match crate::scene::load_scene_with_assets_from_file(&path, &mut self.renderer) {
-                    Ok((mut new_world, spawn)) => {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(e) => { log::error!("Load '{}' failed: cannot read: {}", path, e); return; }
+                };
+                match crate::scene::load_scene_with_assets_from_str_full(&text, &mut self.renderer) {
+                    Ok((mut new_world, spawn, game_state_ron)) => {
                         new_world.sync_next_id();
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
+                        if let Some(ron) = game_state_ron {
+                            self.game.load_game_state(&ron);
+                            log::info!("Game state restored");
+                        }
                         self.editor.state.save_path = path.clone();
                         self.editor.state.settings.push_recent_scene(&path);
-                        log::info!("Loaded scene from {} (with materials)", path);
+                        log::info!("Loaded scene from {} (with materials + game state)", path);
                     }
                     Err(e) => log::error!("Load '{}' failed: {}", path, e),
                 }
@@ -1244,7 +1380,8 @@ impl<G: Game> App<G> {
                 log::info!("Created new empty scene");
             }
             EditorAction::AddCube | EditorAction::AddSphere => {
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let (mesh, mat, base_name) = match action {
                     EditorAction::AddCube => ("cube", "flat_blue", "Cube"),
                     EditorAction::AddSphere => ("sphere", "gold", "Sphere"),
@@ -1264,7 +1401,8 @@ impl<G: Game> App<G> {
             EditorAction::DeleteSelected => {
                 use std::collections::HashSet;
                 if self.editor.state.selected.is_empty() { return; }
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let mut to_delete: HashSet<Entity> = self.editor.state.selected.iter().copied().collect();
                 let mut stack: Vec<Entity> = self.editor.state.selected.clone();
                 while let Some(parent) = stack.pop() {
@@ -1279,7 +1417,8 @@ impl<G: Game> App<G> {
                 self.editor.state.selected.clear();
             }
             EditorAction::Duplicate => {
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 self.duplicate_selected();
             }
             EditorAction::FocusSelected => {
@@ -1318,7 +1457,8 @@ impl<G: Game> App<G> {
                     Ok(p) => p,
                     Err(e) => { log::error!("Failed to load prefab: {}", e); return; }
                 };
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let spawn_pos = self.game.camera().target + Vec3::new(0.0, 1.0, 0.0);
                 let new_entities = crate::scene::prefab::instantiate_prefab(&mut self.world, &prefab, spawn_pos);
                 let n = new_entities.len();
@@ -1461,7 +1601,8 @@ impl<G: Game> App<G> {
                 self.editor.state.selected = inverted;
             }
             EditorAction::CleanupEmptyEntities => {
-                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let mut removed = 0usize;
                 let victims: Vec<Entity> = self.world.entities().iter().copied()
                     .filter(|&e| {
@@ -1538,7 +1679,8 @@ impl<G: Game> App<G> {
                                             let alt = self.input.key_down(KeyCode::AltLeft)
                                                 || self.input.key_down(KeyCode::AltRight);
                                             if alt {
-                                                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                                                let gs = self.game.save_game_state();
+                                                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                                                 self.duplicate_selected();
                                             }
                                             if let Some(drag) = gizmo::begin_drag(
@@ -1546,7 +1688,8 @@ impl<G: Game> App<G> {
                                                 self.editor.state.gizmo.mode, self.game.camera(),
                                                 &self.renderer, mx, my,
                                             ) {
-                                                self.editor.state.undo.push_forced(&self.world, &self.renderer);
+                                                let gs = self.game.save_game_state();
+                                                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                                                 self.editor.state.gizmo.drag = Some(drag);
                                                 self.editor.state.gizmo.hovered = Some(axis);
                                                 true

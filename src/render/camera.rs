@@ -218,10 +218,6 @@ impl Camera3D {
         self.mode = CameraMode::Orbit;
     }
 
-    // ============================================================
-    // Frustum / picking
-    // ============================================================
-
     pub fn frustum_planes(&self) -> [Vec4; 6] {
         let m = self.view_projection();
         [

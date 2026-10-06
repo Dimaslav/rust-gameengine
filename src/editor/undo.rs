@@ -1,3 +1,15 @@
+//! Undo/redo стек.
+//!
+//! Каждый снапшот — пара `(scene_ron, game_state_ron)`. `scene_ron`
+//! собирается движком (`save_scene_with_assets_to_string`), а
+//! `game_state_ron` — это непрозрачная для движка RON-строка
+//! (`Game::save_game_state`). Раньше game-state не сохранялся, и
+//! `Ctrl+Z` откатывал мир, но не RPG-прогрессию (золото, ключи,
+//! выполненные квесты) — что давало рассинхрон между миром и HUD.
+//!
+//! Если `Game::save_game_state` возвращает `None` — снапшот содержит
+//! `None`, и при откате `App` ничего не передаёт в `load_game_state`.
+
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -9,9 +21,15 @@ const MAX_UNDO: usize = 50;
 /// явно вызвал операцию (AddCube, Delete) — она идёт через push_forced.
 const PUSH_COOLDOWN_MS: u128 = 300;
 
+/// Один снапшот: сериализованный мир + game-specific состояние.
+struct Snapshot {
+    scene_ron: String,
+    game_state_ron: Option<String>,
+}
+
 pub struct UndoStack {
-    undo: VecDeque<String>,
-    redo: Vec<String>,
+    undo: VecDeque<Snapshot>,
+    redo: Vec<Snapshot>,
     last_push: Instant,
 }
 
@@ -36,19 +54,31 @@ impl UndoStack {
     /// Cooldown'ится (для drag/inspector). Возвращает false, если
     /// снапшот **не** был положен.
     ///
-    /// Сохраняет и `World`, и материалы/текстуры из `Renderer` —
-    /// чтобы Ctrl+Z откатывал всё сразу.
-    pub fn push(&mut self, world: &World, renderer: &Renderer) -> bool {
+    /// Сохраняет и `World`, и материалы/текстуры из `Renderer`,
+    /// и game-state (непрозрачную строку от игры).
+    pub fn push(
+        &mut self,
+        world: &World,
+        renderer: &Renderer,
+        game_state_ron: Option<String>,
+    ) -> bool {
         if !self.can_push_now() {
             return false;
         }
-        self.push_forced(world, renderer)
+        self.push_forced(world, renderer, game_state_ron)
     }
 
     /// Принудительный снапшот без cooldown. Для явных операций:
     /// AddCube, Delete, Duplicate, Paste, MakeUnique, …
-    pub fn push_forced(&mut self, world: &World, renderer: &Renderer) -> bool {
-        match crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
+    pub fn push_forced(
+        &mut self,
+        world: &World,
+        renderer: &Renderer,
+        game_state_ron: Option<String>,
+    ) -> bool {
+        match crate::scene::save_scene_with_game_state_to_string(
+            world, renderer, None, game_state_ron,
+        ) {
             Ok(s) => {
                 self.push_snapshot_internal(s);
                 true
@@ -60,12 +90,27 @@ impl UndoStack {
         }
     }
 
-    /// Готовый снапшот (например, снятый до UI в `App::redraw`).
-    pub fn push_snapshot(&mut self, snapshot: String) -> bool {
+    /// Готовый снапшот сцены (например, снятый до UI в `App::redraw`),
+    /// плюс game_state.
+    ///
+    /// NB: `scene_ron` уже содержит внутри `game_state_ron` — если он
+    /// пришёл из `save_scene_with_game_state_to_string`. Но чтобы не
+    /// усложнять контракт, второй аргумент здесь — отдельная
+    /// копия, которую `undo()` вернёт вызывающему. Если они
+    /// разойдутся — берётся та, что в аргументе.
+    pub fn push_snapshot(
+        &mut self,
+        snapshot: String,
+        game_state_ron: Option<String>,
+    ) -> bool {
         if !self.can_push_now() {
             return false;
         }
         self.push_snapshot_internal(snapshot);
+        // Обновляем game_state у только что добавленного снапшота.
+        if let Some(last) = self.undo.back_mut() {
+            last.game_state_ron = game_state_ron;
+        }
         true
     }
 
@@ -73,25 +118,41 @@ impl UndoStack {
         if self.undo.len() >= MAX_UNDO {
             self.undo.pop_front();
         }
-        self.undo.push_back(snapshot);
+        self.undo.push_back(Snapshot {
+            scene_ron: snapshot,
+            game_state_ron: None,
+        });
         self.redo.clear();
         self.last_push = Instant::now();
     }
 
-    /// Восстановить предыдущее состояние. Возвращает загруженный World
+    /// Восстановить предыдущее состояние. Возвращает `(World, game_state)`
     /// и синхронно восстанавливает материалы в `Renderer`.
-    pub fn undo(&mut self, world: &World, renderer: &mut Renderer) -> Option<World> {
+    ///
+    /// `current_game_state` — game-state **текущего** мира, нужен для
+    /// помещения в redo.
+    pub fn undo(
+        &mut self,
+        world: &World,
+        renderer: &mut Renderer,
+        current_game_state: Option<String>,
+    ) -> Option<(World, Option<String>)> {
         let prev = self.undo.pop_back()?;
 
-        // Текущее (с материалами) — в redo.
-        if let Ok(current) = crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
-            self.redo.push(current);
+        // Текущее (с материалами и game-state) — в redo.
+        if let Ok(current) = crate::scene::save_scene_with_game_state_to_string(
+            world, renderer, None, current_game_state.clone(),
+        ) {
+            self.redo.push(Snapshot {
+                scene_ron: current,
+                game_state_ron: current_game_state,
+            });
         }
 
-        match crate::scene::load_scene_with_assets_from_str(&prev, renderer) {
+        match crate::scene::load_scene_with_assets_from_str(&prev.scene_ron, renderer) {
             Ok((mut w, _spawn)) => {
                 w.sync_next_id();
-                Some(w)
+                Some((w, prev.game_state_ron))
             }
             Err(e) => {
                 log::warn!("undo load failed: {}", e);
@@ -100,20 +161,30 @@ impl UndoStack {
         }
     }
 
-    pub fn redo(&mut self, world: &World, renderer: &mut Renderer) -> Option<World> {
+    pub fn redo(
+        &mut self,
+        world: &World,
+        renderer: &mut Renderer,
+        current_game_state: Option<String>,
+    ) -> Option<(World, Option<String>)> {
         let next = self.redo.pop()?;
 
-        if let Ok(current) = crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
+        if let Ok(current) = crate::scene::save_scene_with_game_state_to_string(
+            world, renderer, None, current_game_state.clone(),
+        ) {
             if self.undo.len() >= MAX_UNDO {
                 self.undo.pop_front();
             }
-            self.undo.push_back(current);
+            self.undo.push_back(Snapshot {
+                scene_ron: current,
+                game_state_ron: current_game_state,
+            });
         }
 
-        match crate::scene::load_scene_with_assets_from_str(&next, renderer) {
+        match crate::scene::load_scene_with_assets_from_str(&next.scene_ron, renderer) {
             Ok((mut w, _spawn)) => {
                 w.sync_next_id();
-                Some(w)
+                Some((w, next.game_state_ron))
             }
             Err(e) => {
                 log::warn!("redo load failed: {}", e);
