@@ -14,8 +14,9 @@ use crate::editor::gizmo::{self, GizmoMode};
 use crate::editor::picking::PickableSet;
 use crate::editor::palette::PaletteItem;
 use crate::editor::placement;
-use crate::editor::ui::{self as editor_ui, Stats, UiAssets, UiState};
+use crate::editor::ui::{self as editor_ui, AudioSnapshot, Stats, UiAssets, UiState};
 use crate::editor::{BoxSelect, Editor, EditorAction};
+use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::{
     Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle, MeshHandle, Parent,
     SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform, Trigger, TriggerAction,
@@ -40,6 +41,7 @@ use super::time::Time;
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
+    fn configure_input(&mut self, _map: &mut crate::engine::InputMap) {}
     fn update(&mut self, _world: &mut World, _input: &Input, _renderer: &mut Renderer, _dt: f32) -> bool { true }
     fn collect_draws(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<MeshDraw> { Vec::new() }
     fn collect_lines(&mut self, _world: &mut World, _renderer: &Renderer, _selected: &[Entity]) -> Vec<LineVertex> { Vec::new() }
@@ -64,19 +66,6 @@ pub trait Game: 'static {
 struct Projectile { position: Vec3, velocity: Vec3, age: f32, max_age: f32, damage: f32 }
 
 struct PlaySnapshot {
-    /// ИЗМЕНЕНО (#14): `scene_ron` теперь содержит не только мир, но и
-    /// материалы + пути к текстурам (через `save_scene_with_assets_to_string`).
-    ///
-    /// Раньше здесь был `save_scene_to_string` — world-only. При restore
-    /// (`load_scene_from_str_full`) материалы и текстуры не откатывались:
-    /// если во время Play что-то их меняло (например, косвенно через
-    /// `dirty_materials` при неосторожном UI-клике или игровую логику),
-    /// после Stop редактор показывал бы «после»-состояние материалов.
-    ///
-    /// Теперь `restore_play_snapshot` идёт через
-    /// `load_scene_with_assets_from_str_full_with_ids` — материалы,
-    /// текстуры и `id_map` для remap выделения восстанавливаются вместе
-    /// с миром.
     scene_ron: String,
     saved_position: Vec3,
     selection: Vec<Entity>,
@@ -110,7 +99,6 @@ pub struct App<G: Game> {
     play_snapshot: Option<PlaySnapshot>,
     elevator_prev_state: HashMap<Entity, ElevatorState>,
 
-    /// ИЗМЕНЕНО (#3): кэш пикабельных entity на текущий кадр.
     pickable: Option<PickableSet>,
 }
 
@@ -121,14 +109,29 @@ impl<G: Game> Drop for App<G> {
             self.ui_state.show_stats_panel,
             self.ui_state.show_hierarchy_panel,
             self.ui_state.show_inspector_panel,
+            self.ui_state.show_audio_panel,
             self.ui_state.left_panel_width,
             self.ui_state.right_panel_width,
         );
         s.postfx = self.game.postfx();
+
+        if let Some(audio) = self.audio.as_ref() {
+            s.audio_bus_volumes.clear();
+            for (bus, vol) in audio.all_bus_volumes() {
+                s.audio_bus_volumes.insert(bus.name().to_string(), vol);
+            }
+        }
+
         if let Err(e) = s.save("editor.ron") {
             log::warn!("Failed to save editor settings: {}", e);
         } else {
             log::info!("Editor settings saved to editor.ron");
+        }
+
+        if let Err(e) = self.input.map.save("input.ron") {
+            log::warn!("Failed to save input.ron: {}", e);
+        } else {
+            log::info!("InputMap saved to input.ron");
         }
     }
 }
@@ -146,10 +149,18 @@ impl<G: Game> App<G> {
         let mut world = World::new();
         game.camera_mut().set_viewport(renderer.size.width, renderer.size.height);
         game.init(&mut world, &mut renderer);
+
+        let input = {
+            let mut input = Input::new();
+            game.configure_input(&mut input.map);
+            let restored = crate::engine::InputMap::load_or_default("input.ron", input.map.clone());
+            input.map = restored;
+            input
+        };
+
         let editor = Editor::new(&window, &renderer.device, renderer.config.format, egui::ViewportId::ROOT);
         let mut app = Self {
-            game, world,
-            input: Input::new(), time: Time::new(),
+            game, world, input, time: Time::new(),
             window: window.clone(), renderer, editor,
             ui_state: UiState::new(),
             mouse_press_pos: None, viewport_rect: None,
@@ -163,6 +174,21 @@ impl<G: Game> App<G> {
         };
         let initial_postfx = app.editor.state.settings.postfx;
         app.game.apply_postfx(initial_postfx);
+
+        if let Some(audio) = app.audio.as_mut() {
+            let saved = app.editor.state.settings.audio_bus_volumes.clone();
+            for (name, vol) in &saved {
+                for b in AudioBus::ALL {
+                    if b.name() == name {
+                        audio.set_bus_volume(b, *vol);
+                    }
+                }
+            }
+            if !saved.is_empty() {
+                log::info!("audio: applied {} bus volume(s) from editor.ron", saved.len());
+            }
+        }
+
         app
     }
 
@@ -196,12 +222,6 @@ impl<G: Game> App<G> {
         log::info!("Camera preset {} applied", preset);
     }
 
-    /// ИЗМЕНЕНО (#14): используем `save_scene_with_assets_to_string`,
-    /// чтобы при restore материалы и текстуры откатились вместе с миром.
-    ///
-    /// Раньше здесь был `save_scene_to_string` — world-only. При
-    /// stop-play мир откатывался, а изменения `renderer.materials`,
-    /// сделанные во время Play (если были), оставались висеть.
     fn capture_play_snapshot(&mut self) -> PlaySnapshot {
         let scene_ron = crate::scene::save_scene_with_assets_to_string(
             &self.world, &self.renderer, None,
@@ -226,17 +246,6 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// ИЗМЕНЕНО (#14): используем
-    /// `load_scene_with_assets_from_str_full_with_ids`.
-    ///
-    /// `_with_ids` возвращает `id_map` (old_entity_id → new_entity),
-    /// который **обязателен** для remap выделения: `snap.selection`
-    /// хранит старые id — при `World::load` из RON они получают
-    /// новые id, и selection нужно пересобрать через map.
-    ///
-    /// Материалы и текстуры восстанавливаются из RON (см.
-    /// `capture_play_snapshot`), поэтому после Stop редактор видит
-    /// материалы в том виде, в каком они были на момент Play.
     fn restore_play_snapshot(&mut self, snap: PlaySnapshot) {
         if snap.scene_ron.is_empty() {
             log::error!("Play-in-Editor: empty snapshot, skipping restore");
@@ -277,7 +286,7 @@ impl<G: Game> App<G> {
         for (e, state) in states {
             let prev = self.elevator_prev_state.get(&e).copied();
             if matches!((prev, state), (Some(ElevatorState::Moving), ElevatorState::DoorsOpening)) {
-                if let Some(audio) = &self.audio { audio.play("ding"); }
+                if let Some(audio) = &mut self.audio { audio.play("ding"); }
             }
             self.elevator_prev_state.insert(e, state);
         }
@@ -285,13 +294,27 @@ impl<G: Game> App<G> {
         self.elevator_prev_state.retain(|k, _| live.contains(k));
     }
 
+    /// ИЗМЕНЕНО (Фаза 5): платформерный контроллер.
+    ///
+    /// * Velocity-сглаживание вместо instant → air control.
+    /// * Coyote time + jump buffer.
+    /// * Slope slide (крутые склоны).
+    /// * Step-down при спуске с уступов.
     fn update_player(&mut self, dt: f32) {
+        // ------------------------------------------------------------------
+        // 1. Look
+        // ------------------------------------------------------------------
         {
             let sens = self.editor.state.play.look_sensitivity;
             let (mdx, mdy) = self.input.mouse_motion;
             self.game.camera_mut().fps_look(mdx * sens, mdy * sens);
         }
-        let crouching = self.input.key_down(KeyCode::ControlLeft) || self.input.key_down(KeyCode::ControlRight);
+
+        // ------------------------------------------------------------------
+        // 2. Crouch target
+        // ------------------------------------------------------------------
+        let crouching = self.input.key_down(KeyCode::ControlLeft)
+            || self.input.key_down(KeyCode::ControlRight);
         self.editor.state.play.crouching = crouching;
         {
             let play = &mut self.editor.state.play;
@@ -299,13 +322,19 @@ impl<G: Game> App<G> {
             let lerp = (dt * 10.0).clamp(0.0, 1.0);
             play.current_eye_height += (target - play.current_eye_height) * lerp;
         }
+
         let eye_height = self.editor.state.play.current_eye_height;
         let player_radius = self.editor.state.play.player_radius;
         let player_height = if crouching {
-            (self.editor.state.play.crouch_height + 0.15).max(2.0 * player_radius + 0.05)
+            (self.editor.state.play.crouch_height + 0.15)
+                .max(2.0 * player_radius + 0.05)
         } else {
             self.editor.state.play.player_height
         };
+
+        // ------------------------------------------------------------------
+        // 3. Input → target horizontal direction
+        // ------------------------------------------------------------------
         let walk_speed = self.editor.state.play.walk_speed;
         let run_speed = self.editor.state.play.run_speed;
         let jump_speed = self.editor.state.play.jump_speed;
@@ -317,30 +346,94 @@ impl<G: Game> App<G> {
         let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
         let push_strength = self.editor.state.play.push_strength;
+        let step_down_max = self.editor.state.play.step_down_max;
+        let slope_walk_limit_cos = self.editor.state.play.slope_walk_limit_cos;
+        let slope_slide_speed = self.editor.state.play.slope_slide_speed;
+        let ground_accel_tau = self.editor.state.play.ground_accel_tau;
+        let air_accel_tau = self.editor.state.play.air_accel_tau;
 
-        let f = self.game.camera().forward();
-        let fwd_xz = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+        let cam_f = self.game.camera().forward();
+        let fwd_xz = Vec3::new(cam_f.x, 0.0, cam_f.z).normalize_or_zero();
         let right_xz = Vec3::new(-fwd_xz.z, 0.0, fwd_xz.x);
+
         let running = self.input.key_down(KeyCode::ShiftLeft) && !crouching;
         let base_speed = if running { run_speed } else { walk_speed };
-        let speed = if crouching { base_speed * crouch_mult } else { base_speed };
+        let target_speed = if crouching { base_speed * crouch_mult } else { base_speed };
 
-        let mut motion = Vec3::ZERO;
-        if self.input.key_down(KeyCode::KeyW) { motion += fwd_xz; }
-        if self.input.key_down(KeyCode::KeyS) { motion -= fwd_xz; }
-        if self.input.key_down(KeyCode::KeyD) { motion += right_xz; }
-        if self.input.key_down(KeyCode::KeyA) { motion -= right_xz; }
-        if motion.length_squared() > 1e-8 { motion = motion.normalize() * speed * dt; }
+        let mut input_dir = Vec3::ZERO;
+        if self.input.key_down(KeyCode::KeyW) { input_dir += fwd_xz; }
+        if self.input.key_down(KeyCode::KeyS) { input_dir -= fwd_xz; }
+        if self.input.key_down(KeyCode::KeyD) { input_dir += right_xz; }
+        if self.input.key_down(KeyCode::KeyA) { input_dir -= right_xz; }
+        if input_dir.length_squared() > 1e-8 { input_dir = input_dir.normalize(); }
 
+        let target_velocity = input_dir * target_speed;
+
+        // ------------------------------------------------------------------
+        // 4. Coyote + jump buffer timers
+        // ------------------------------------------------------------------
+        let was_on_ground = self.editor.state.play.on_ground;
+
+        {
+            let play = &mut self.editor.state.play;
+            play.coyote_timer = if was_on_ground {
+                play.coyote_time
+            } else {
+                (play.coyote_timer - dt).max(0.0)
+            };
+        }
+
+        let jump_pressed = self.input.key_pressed(KeyCode::Space);
+        {
+            let play = &mut self.editor.state.play;
+            if jump_pressed {
+                play.jump_buffer_timer = play.jump_buffer_time;
+            } else {
+                play.jump_buffer_timer = (play.jump_buffer_timer - dt).max(0.0);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 5. Horizontal velocity — exponential smoothing к target
+        // ------------------------------------------------------------------
+        {
+            let play = &mut self.editor.state.play;
+            let tau = if was_on_ground { ground_accel_tau } else { air_accel_tau };
+            let alpha = if tau > 1e-4 {
+                1.0 - (-dt / tau).exp()
+            } else {
+                1.0
+            };
+            play.horizontal_velocity +=
+                (target_velocity - play.horizontal_velocity) * alpha;
+        }
+
+        // ------------------------------------------------------------------
+        // 6. Jump (coyote + buffer)
+        // ------------------------------------------------------------------
         let mut vvel = self.editor.state.play.vertical_velocity;
         let mut on_ground = self.editor.state.play.on_ground;
-        if self.input.key_pressed(KeyCode::Space) && on_ground && !crouching {
+
+        let can_jump = {
+            let play = &self.editor.state.play;
+            play.jump_buffer_timer > 0.0
+                && play.coyote_timer > 0.0
+                && !crouching
+        };
+        if can_jump {
             vvel = jump_speed;
             on_ground = false;
+            let play = &mut self.editor.state.play;
+            play.jump_buffer_timer = 0.0;
+            play.coyote_timer = 0.0;
         }
+
         vvel -= gravity * dt;
         let dy = vvel * dt;
 
+        // ------------------------------------------------------------------
+        // 7. Character controller step
+        // ------------------------------------------------------------------
         let eye_pos = self.game.camera().first_person_pos;
         let feet = eye_pos - Vec3::Y * eye_height;
         let pcap = PlayerCapsule { radius: player_radius, height: player_height };
@@ -349,28 +442,70 @@ impl<G: Game> App<G> {
             let mut dy_extra = 0.0_f32;
             if let Some(support) = collision::find_support_entity(&self.world, feet, &pcap) {
                 if let Some(rb) = self.world.get::<crate::physics::RigidBody>(support) {
-                    if rb.body_type == BodyType::Kinematic { dy_extra = rb.velocity.y * dt; }
+                    if rb.body_type == BodyType::Kinematic {
+                        dy_extra = rb.velocity.y * dt;
+                    }
                 }
             }
             dy_extra
         };
 
-        let delta = motion + Vec3::new(0.0, dy + support_delta_y, 0.0);
-        let (new_feet, landed, _support) = collision::resolve_movement(
-            &self.world, feet, delta, &pcap, floor_y,
+        let horizontal = self.editor.state.play.horizontal_velocity;
+
+        let delta = horizontal * dt + Vec3::new(0.0, dy + support_delta_y, 0.0);
+
+        let result = collision::resolve_movement_ex(
+            &self.world, feet, delta, &pcap, floor_y, step_down_max,
         );
 
-        if push_strength > 0.0 {
-            crate::engine::character::push_dynamic_bodies(
-                &mut self.world, new_feet, new_feet - feet, &pcap, dt, push_strength,
-            );
+        let new_feet = result.new_feet;
+        let landed = result.landed;
+
+        // ------------------------------------------------------------------
+        // 8. Slope slide
+        // ------------------------------------------------------------------
+        let mut slide_velocity = Vec3::ZERO;
+        if let Some(support) = result.support {
+            if support.normal.y < slope_walk_limit_cos {
+                let n = support.normal;
+                let g = Vec3::new(0.0, -gravity, 0.0);
+                let tangent = g - n * g.dot(n);
+                let steepness = ((slope_walk_limit_cos - n.y)
+                    / slope_walk_limit_cos.max(1e-4))
+                    .clamp(0.0, 1.0);
+                slide_velocity = tangent.normalize_or_zero()
+                    * slope_slide_speed
+                    * steepness;
+            }
         }
 
-        if landed { vvel = 0.0; on_ground = true; }
-        else if dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4 { vvel = 0.0; on_ground = true; }
-        else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 { vvel = 0.0; }
+        if slide_velocity.length_squared() > 1e-8 {
+            let play = &mut self.editor.state.play;
+            play.horizontal_velocity += slide_velocity * dt;
+        }
 
-        let horizontal_moved = ((new_feet.x - feet.x).powi(2) + (new_feet.z - feet.z).powi(2)).sqrt();
+        // ------------------------------------------------------------------
+        // 9. Landed / air state
+        // ------------------------------------------------------------------
+        if landed {
+            vvel = 0.0;
+            on_ground = true;
+        } else {
+            if dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+                vvel = 0.0;
+                on_ground = true;
+            } else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+                vvel = 0.0;
+            } else {
+                on_ground = false;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 10. Head bob
+        // ------------------------------------------------------------------
+        let horizontal_moved =
+            ((new_feet.x - feet.x).powi(2) + (new_feet.z - feet.z).powi(2)).sqrt();
         let mut bob_dist = self.editor.state.play.bob_distance;
         let mut bob_cur = self.editor.state.play.bob_current;
         if bob_enabled && on_ground && horizontal_moved > 1e-6 {
@@ -381,6 +516,9 @@ impl<G: Game> App<G> {
         let new_eye = new_feet + Vec3::Y * (eye_height + bob_cur);
         self.game.camera_mut().first_person_pos = new_eye;
 
+        // ------------------------------------------------------------------
+        // 11. Save state
+        // ------------------------------------------------------------------
         {
             let play = &mut self.editor.state.play;
             play.vertical_velocity = vvel;
@@ -390,8 +528,12 @@ impl<G: Game> App<G> {
             play.saved_position = new_eye;
             play.fire_cooldown = (play.fire_cooldown - dt).max(0.0);
             play.interact_cooldown = (play.interact_cooldown - dt).max(0.0);
+            play.ground_normal = result.support.map(|s| s.normal).unwrap_or(Vec3::Y);
         }
 
+        // ------------------------------------------------------------------
+        // 12. Firing
+        // ------------------------------------------------------------------
         let origin = self.game.camera().position();
         let dir = self.game.camera().forward();
 
@@ -406,9 +548,11 @@ impl<G: Game> App<G> {
         });
 
         let lmb = self.input.mouse_down(MouseButton::Left);
-        let can_fire = lmb && self.editor.state.play.fire_cooldown <= 0.0 && self.editor.state.play.ammo > 0;
+        let can_fire = lmb
+            && self.editor.state.play.fire_cooldown <= 0.0
+            && self.editor.state.play.ammo > 0;
         if can_fire {
-            if let Some(audio) = &self.audio { audio.play("shot"); }
+            if let Some(audio) = &mut self.audio { audio.play("shot"); }
             let muzzle = origin + dir * 0.5;
             self.spawn_burst(muzzle, &particles::sparks(dir));
             let damage = self.editor.state.play.damage_per_shot;
@@ -427,9 +571,10 @@ impl<G: Game> App<G> {
                             if h.current <= 0.0 { killed = true; }
                         }
                         if killed {
-                            let pos = self.world.get::<Transform>(target).map(|t| t.position).unwrap_or(Vec3::ZERO);
+                            let pos = self.world.get::<Transform>(target)
+                                .map(|t| t.position).unwrap_or(Vec3::ZERO);
                             self.spawn_burst(pos, &particles::explosion());
-                            if let Some(audio) = &self.audio { audio.play("explosion"); }
+                            if let Some(audio) = &mut self.audio { audio.play("explosion"); }
                             self.game.on_kill(&mut self.world, target);
                             self.world.despawn(target);
                         }
@@ -441,6 +586,9 @@ impl<G: Game> App<G> {
             if play.ammo > 0 { play.ammo -= 1; }
         }
 
+        // ------------------------------------------------------------------
+        // 13. Triggers
+        // ------------------------------------------------------------------
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
         for e in triggers {
@@ -461,10 +609,12 @@ impl<G: Game> App<G> {
                     TriggerAction::Tint(c) => { self.world.insert(e, Tint(*c)); }
                     TriggerAction::Despawn => { self.world.despawn(e); continue; }
                     TriggerAction::CallElevator { elevator, floor_idx } => {
-                        if let Some(el) = self.world.get_mut::<Elevator>(*elevator) { el.call(*floor_idx as usize); }
+                        if let Some(el) = self.world.get_mut::<Elevator>(*elevator) {
+                            el.call(*floor_idx as usize);
+                        }
                     }
                     TriggerAction::PlaySound(name) => {
-                        if let Some(audio) = &self.audio {
+                        if let Some(audio) = &mut self.audio {
                             let n: &'static str = match name.as_str() {
                                 "shot" => "shot", "explosion" => "explosion",
                                 "pickup" => "pickup", "ding" => "ding", _ => "pickup",
@@ -478,6 +628,9 @@ impl<G: Game> App<G> {
             }
         }
 
+        // ------------------------------------------------------------------
+        // 14. Chase NPCs
+        // ------------------------------------------------------------------
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
@@ -676,11 +829,69 @@ impl<G: Game> App<G> {
                 if died {
                     let pos = self.world.get::<Transform>(e).map(|t| t.position).unwrap_or(Vec3::ZERO);
                     self.spawn_burst(pos, &particles::explosion());
-                    if let Some(audio) = &self.audio { audio.play("explosion"); }
+                    if let Some(audio) = &mut self.audio { audio.play("explosion"); }
                     self.game.on_kill(&mut self.world, e);
                     self.world.despawn(e);
                 }
             }
+        }
+    }
+
+    fn process_state_input(&mut self, elwt: &ActiveEventLoop) {
+        self.input.map.clear_contexts();
+        if self.editor.state.play.active {
+            if self.editor.state.play.paused {
+                self.input.map.push_context("pause_menu");
+            } else {
+                self.input.map.push_context("gameplay");
+            }
+        } else {
+            self.input.map.push_context("editor");
+            if self.editor.state.flying {
+                self.input.map.push_context("fly");
+            }
+        }
+
+        let egui_wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
+        let esc_pressed = self.input.key_pressed(KeyCode::Escape);
+        let esc_free = esc_pressed && !egui_wants_keyboard && !self.ui_state.command_palette_open;
+
+        if esc_free {
+            if self.editor.state.play.active {
+                if self.editor.state.play.paused {
+                    self.editor.state.play.paused = false;
+                    self.time.paused = false;
+                    log::info!("Resumed play");
+                    // ИЗМЕНЕНО (Фаза 5): сброс coyote/buffer при resume.
+                    self.editor.state.play.coyote_timer = self.editor.state.play.coyote_time;
+                    self.editor.state.play.jump_buffer_timer = 0.0;
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
+                    self.window.set_cursor_visible(false);
+                    self.input.on_cursor_enter();
+                    self.input.mouse_motion = (0.0, 0.0);
+                    self.input.skip_motion_frames = 4;
+                } else {
+                    self.editor.state.play.paused = true;
+                    self.time.paused = true;
+                    log::info!("Paused play");
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                    self.window.set_cursor_visible(true);
+                }
+            } else if !self.editor.state.flying {
+                let mut consumed = false;
+                if self.editor.state.palette.active.is_some() {
+                    self.editor.state.palette.active = None;
+                    consumed = true;
+                } else if self.editor.state.context_menu_pos.is_some() {
+                    self.editor.state.context_menu_pos = None;
+                    consumed = true;
+                }
+                if !consumed { elwt.exit(); }
+            }
+        }
+
+        if self.input.key_pressed(KeyCode::F9) {
+            self.editor.state.pending_action = Some(EditorAction::TogglePlay);
         }
     }
 
@@ -690,39 +901,13 @@ impl<G: Game> App<G> {
 
         self.pickable = None;
 
-        // ИЗМЕНЕНО (#11): сырой (клампленный) `delta` для физики и
-        // геймплея. `delta_smooth` — только для UI (Stats).
         let dt = self.time.delta;
 
         self.world.update_events();
 
-        if self.input.key_pressed(KeyCode::F9) {
-            self.editor.state.pending_action = Some(EditorAction::TogglePlay);
-        }
-        let egui_wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
-        if self.input.key_pressed(KeyCode::Escape)
-            && self.editor.state.play.active
-            && !self.ui_state.command_palette_open
-            && !egui_wants_keyboard
-        {
-            self.editor.state.pending_action = Some(EditorAction::TogglePlay);
-        }
-        if !self.editor.state.play.active
-            && !self.editor.state.flying
-            && self.input.key_pressed(KeyCode::Escape)
-            && !self.ui_state.command_palette_open
-            && !egui_wants_keyboard
-        {
-            let mut consumed = false;
-            if self.editor.state.palette.active.is_some() {
-                self.editor.state.palette.active = None;
-                consumed = true;
-            } else if self.editor.state.context_menu_pos.is_some() {
-                self.editor.state.context_menu_pos = None;
-                consumed = true;
-            }
-            if !consumed { elwt.exit(); return; }
-        }
+        self.process_state_input(elwt);
+
+        let paused = self.editor.state.play.active && self.editor.state.play.paused;
 
         let rmb = self.input.mouse_down(MouseButton::Right);
         let want_fly = rmb && self.rmb_dragged && !self.editor.state.play.active;
@@ -745,21 +930,39 @@ impl<G: Game> App<G> {
             self.input.editor_flying = want_fly;
         }
 
-        let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt);
-        if !continue_running { elwt.exit(); return; }
+        if !paused {
+            let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt);
+            if !continue_running { elwt.exit(); return; }
 
-        self.update_elevator_ding();
-        self.physics.step(&mut self.world, dt);
+            if let Some(audio) = self.audio.as_mut() {
+                let listener_pos = self.game.camera().position();
+                audio.update(&mut self.world, listener_pos, dt);
+            }
 
-        if self.editor.state.play.active {
-            self.input.editor_captured = false;
-            self.update_player(dt);
-        } else if self.editor.state.flying {
-            self.input.editor_captured = true;
-            self.update_fly(dt);
+            self.update_elevator_ding();
+            self.physics.step(&mut self.world, dt);
+
+            if self.editor.state.play.active {
+                self.input.editor_captured = false;
+                self.update_player(dt);
+            } else if self.editor.state.flying {
+                self.input.editor_captured = true;
+                self.update_fly(dt);
+            } else {
+                let (mx, my) = self.input.mouse_pos;
+                self.input.editor_captured = self.editor.state.gizmo.drag.is_some() || !self.in_viewport(mx, my);
+            }
+
+            self.update_particles(dt);
+            self.update_projectiles(dt);
         } else {
-            let (mx, my) = self.input.mouse_pos;
-            self.input.editor_captured = self.editor.state.gizmo.drag.is_some() || !self.in_viewport(mx, my);
+            self.input.editor_captured = false;
+            self.editor.state.flying = false;
+            self.input.editor_flying = false;
+            if let Some(audio) = self.audio.as_mut() {
+                let listener_pos = self.game.camera().position();
+                audio.update(&mut self.world, listener_pos, 0.0);
+            }
         }
 
         if !self.editor.state.play.active && !self.editor.state.flying {
@@ -774,9 +977,6 @@ impl<G: Game> App<G> {
                 } else { self.editor.state.palette.preview_pos = None; }
             } else { self.editor.state.palette.preview_pos = None; }
         } else { self.editor.state.palette.preview_pos = None; }
-
-        self.update_particles(dt);
-        self.update_projectiles(dt);
 
         if matches!(self.editor.state.pending_action, Some(EditorAction::TogglePlay)) {
             self.editor.state.pending_action = None;
@@ -856,6 +1056,25 @@ impl<G: Game> App<G> {
             texture_list: &texture_list, selected_material,
         };
 
+        let selected_source_entity = self.editor.state.selected.iter().copied()
+            .find(|&e| self.world.has::<AudioSource>(e));
+
+        let audio_snapshot = if let Some(audio) = self.audio.as_ref() {
+            AudioSnapshot {
+                bus_volumes: audio.all_bus_volumes(),
+                sound_names: audio.sound_names().into_iter().map(String::from).collect(),
+                active_count: audio.active_count(),
+                available: true,
+                selected_source_entity,
+            }
+        } else {
+            AudioSnapshot {
+                available: false,
+                selected_source_entity,
+                ..AudioSnapshot::default()
+            }
+        };
+
         let pre_ui_undo_snapshot: Option<String> = if self.editor.state.undo.can_push_now() {
             crate::scene::save_scene_with_assets_to_string(&self.world, &self.renderer, None).ok()
         } else { None };
@@ -863,19 +1082,6 @@ impl<G: Game> App<G> {
         let raw_input = self.editor.egui_state.take_egui_input(&*self.window);
         let lod_counts = self.game.lod_stats();
 
-        // ИЗМЕНЕНО (#19): `sel_triangles` / `sel_vertices` считаются по
-        // **исходному** мешу (`MeshHandle` без `__lod*`-суффикса). Это
-        // LOD0, а не то, что реально рисуется в текущем кадре.
-        //
-        // Почему: реальный LOD выбирается в `Game::collect_draws` per-frame
-        // (distance-based), и на момент построения `Stats` мы ещё не
-        // знаем результата (draws собираются позже). Показывать «сырые»
-        // размеры исходного меша — осмысленная метрика («сколько
-        // полигонов в оригинале»), но подпись должна явно говорить
-        // про LOD0, чтобы не путать с реальной нагрузкой.
-        //
-        // В `ui.rs::draw_stats_section` лейблы изменены на
-        // "Triangles (LOD0)" / "Vertices (LOD0)" с пояснением в hover.
         let mut sel_triangles = 0usize;
         let mut sel_vertices = 0usize;
         for &e in &self.editor.state.selected {
@@ -911,7 +1117,10 @@ impl<G: Game> App<G> {
         let world = &mut self.world;
 
         let full_output = egui_ctx.run(raw_input, |ctx| {
-            let action = editor_ui::draw(ctx, ui_state, editor_state, world, &mut postfx, &stats, &assets);
+            let action = editor_ui::draw(
+                ctx, ui_state, editor_state, world,
+                &mut postfx, &stats, &assets, &audio_snapshot,
+            );
             if let Some(a) = action { editor_state.pending_action = Some(a); }
         });
 
@@ -1064,18 +1273,21 @@ impl<G: Game> App<G> {
         }
 
         if self.time.frame_count % 30 == 0 {
-            let mode_str = if self.editor.state.play.active { "PLAY" }
-                else if self.editor.state.flying { "FLY" } else { "EDIT" };
+            let mode_str = if self.editor.state.play.active {
+                if self.editor.state.play.paused { "PAUSED" } else { "PLAY" }
+            }
+            else if self.editor.state.flying { "FLY" } else { "EDIT" };
             self.window.set_title(&format!(
                 "Rust Engine 3D [{}] | FPS {:>5.1} | Frame {:.2}/{:.2} ms | \
                  Hitches {} | Entities {} | Sel {} | Particles {} | Proj {} | \
-                 Physics {} pairs",
+                 Physics {} pairs | Audio {}",
                 mode_str, self.time.fps(),
                 self.time.frame_time_avg_ms(), self.time.frame_time_max_ms(),
                 self.time.hitches, self.world.len(),
                 self.editor.state.selected.len(),
                 self.particles.len(), self.projectiles.len(),
                 self.physics.last_broad_pairs,
+                self.audio.as_ref().map(|a| a.active_count()).unwrap_or(0),
             ));
         }
         self.input.end_frame();
@@ -1156,6 +1368,11 @@ impl<G: Game> App<G> {
             if let Some(col) = self.world.get::<Collider>(e).copied() { self.world.insert(new_e, col); }
             if let Some(mat) = self.world.get::<PhysicsMaterial>(e).copied() { self.world.insert(new_e, mat); }
             if let Some(dec) = self.world.get::<Decal>(e).cloned() { self.world.insert(new_e, dec); }
+            if let Some(src) = self.world.get::<AudioSource>(e).cloned() {
+                let mut s = src;
+                s.playing = true;
+                self.world.insert(new_e, s);
+            }
 
             if let Some(mut t) = self.world.get::<Trigger>(e).cloned() {
                 if let TriggerAction::CallElevator { elevator, floor_idx } = t.action {
@@ -1259,6 +1476,8 @@ impl<G: Game> App<G> {
                     self.play_snapshot = Some(self.capture_play_snapshot());
                     let play = &mut self.editor.state.play;
                     play.active = true;
+                    play.paused = false;
+                    self.time.paused = false;
                     self.input.play_mode = true;
                     play.vertical_velocity = 0.0;
                     play.on_ground = true;
@@ -1271,6 +1490,11 @@ impl<G: Game> App<G> {
                     play.highlight = None;
                     play.crouching = false;
                     play.current_eye_height = play.eye_height;
+                    // ИЗМЕНЕНО (Фаза 5): сброс платформерных таймеров.
+                    play.horizontal_velocity = Vec3::ZERO;
+                    play.coyote_timer = play.coyote_time;
+                    play.jump_buffer_timer = 0.0;
+                    play.ground_normal = Vec3::Y;
 
                     let mut spawn = play.saved_position;
                     if spawn.y < play.floor_y + play.eye_height {
@@ -1298,6 +1522,8 @@ impl<G: Game> App<G> {
                     }
                     let play = &mut self.editor.state.play;
                     play.active = false;
+                    play.paused = false;
+                    self.time.paused = false;
                     self.input.play_mode = false;
                     play.vertical_velocity = 0.0;
                     play.on_ground = true;
@@ -1310,6 +1536,10 @@ impl<G: Game> App<G> {
                     play.highlight = None;
                     play.crouching = false;
                     play.current_eye_height = play.eye_height;
+                    // ИЗМЕНЕНО (Фаза 5).
+                    play.horizontal_velocity = Vec3::ZERO;
+                    play.coyote_timer = 0.0;
+                    play.jump_buffer_timer = 0.0;
                     self.particles.clear();
                     self.projectiles.clear();
                     log::info!("Exited play mode (world restored from snapshot)");
@@ -1687,6 +1917,40 @@ impl<G: Game> App<G> {
                 log::info!("Cleaned up {} empty entities", removed);
             }
             EditorAction::PlacePalette | EditorAction::ClearPalette => {}
+
+            EditorAction::SetBusVolume(bus, vol) => {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.set_bus_volume(bus, vol);
+                }
+            }
+            EditorAction::LoadSound => {
+                let path = rfd::FileDialog::new()
+                    .add_filter("Audio", &["wav", "ogg", "flac", "mp3"])
+                    .add_filter("All files", &["*"])
+                    .pick_file();
+                let Some(path) = path else { return; };
+                let name = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "sound".to_string());
+                if let Some(audio) = self.audio.as_mut() {
+                    match audio.load_sound_from_file(&name, &path) {
+                        Ok(()) => log::info!(
+                            "Sound '{}' loaded from {}",
+                            name, path.display()
+                        ),
+                        Err(e) => log::error!(
+                            "Failed to load sound from {}: {:#}",
+                            path.display(), e
+                        ),
+                    }
+                }
+            }
+            EditorAction::PreviewSound(name) => {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.play(&name);
+                }
+            }
         }
     }
 

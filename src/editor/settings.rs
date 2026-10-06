@@ -1,6 +1,7 @@
 //! Настройки редактора. Сохраняются в `editor.ron` при выходе
 //! и загружаются при старте.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,9 @@ pub struct EditorSettings {
     pub show_stats_panel: bool,
     pub show_hierarchy_panel: bool,
     pub show_inspector_panel: bool,
+    /// ИЗМЕНЕНО (Фаза 4.4): видимость окна аудио.
+    #[serde(default)]
+    pub show_audio_panel: bool,
     pub left_panel_width: f32,
     pub right_panel_width: f32,
 
@@ -43,10 +47,20 @@ pub struct EditorSettings {
     #[serde(default)]
     pub camera_bookmarks: CameraBookmarks,
 
-    /// Графические настройки (PostFx). Сохраняются между запусками.
-    /// При отсутствии в старом `editor.ron` — берётся `PostFx::default()`.
+    /// Графические настройки (PostFx).
     #[serde(default)]
     pub postfx: PostFx,
+
+    /// ИЗМЕНЕНО (Фаза 4.4): громкость аудио-шин по имени.
+    ///
+    /// Ключ — строковое имя шины (`"Master"`, `"Sfx"`, `"Music"`,
+    /// `"Voice"`, `"Ui"`). Значение — громкость в `[0, 2]`.
+    ///
+    /// Строки, а не `AudioBus` — чтобы `editor.ron` оставался читаемым
+    /// и не ломался при переименовании enum-вариантов. При загрузке
+    /// `App` маппит имена обратно в `AudioBus`.
+    #[serde(default)]
+    pub audio_bus_volumes: HashMap<String, f32>,
 }
 
 impl Default for EditorSettings {
@@ -56,6 +70,7 @@ impl Default for EditorSettings {
             show_stats_panel: true,
             show_hierarchy_panel: true,
             show_inspector_panel: true,
+            show_audio_panel: false,
             left_panel_width: 260.0,
             right_panel_width: 340.0,
             save_path: "scene.ron".to_string(),
@@ -70,6 +85,7 @@ impl Default for EditorSettings {
             recent_scenes: Vec::new(),
             camera_bookmarks: CameraBookmarks::new(),
             postfx: PostFx::default(),
+            audio_bus_volumes: HashMap::new(),
         }
     }
 }

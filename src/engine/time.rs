@@ -8,18 +8,11 @@ pub struct Time {
     /// `physics.step`, `game.update`, `update_player`,
     /// `update_particles`, `update_projectiles`.
     ///
-    /// Раньше движок везде использовал `delta_smooth`, и при рывке
-    /// (загрузка ресурса, GC, breakpoint) физика получала среднее
-    /// за 8 кадров вместо реального dt — движение «плыло».
-    ///
-    /// Клампится по `MAX_DELTA`. Значение синхронизировано с
-    /// `physics::world::MAX_DT` через прямой re-export (см. ниже).
+    /// ИЗМЕНЕНО (Фаза GameState): при `paused == true` сюда пишется 0.0,
+    /// но `delta_smooth` продолжает считаться от реального времени.
+    /// Это даёт «заморозку» игровой логики при сохранении FPS-метрик.
     pub delta: f32,
     /// Сглаженный delta (скользящее среднее по 8 кадрам).
-    ///
-    /// ИЗМЕНЕНО (#11): используется **только** для UI (панель Stats,
-    /// "Frame: X ms", FPS-индикатор). В интеграцию физики/геймплея
-    /// не идёт — см. `delta` выше.
     pub delta_smooth: f32,
     pub elapsed: f32,
     pub frame_count: u64,
@@ -27,36 +20,25 @@ pub struct Time {
     frame_time_max: f32,
     pub hitches: u64,
 
+    /// ИЗМЕНЕНО (GameState): пауза. При `true` `tick()` возвращает
+    /// `delta = 0.0`, но статистика FPS/сглаживание продолжают
+    /// работать — чтобы UI паузы показывал актуальные показатели.
+    ///
+    /// Не путать с «остановкой времени»: `elapsed` не растёт, поэтому
+    /// шейдеры, использующие `time` (skybox_time), «замерзают».
+    /// Это правильное поведение для паузы.
+    pub paused: bool,
+
     samples: [f32; SMOOTH_N],
     sample_idx: usize,
     sample_count: usize,
 
-    /// Сколько первых кадров игнорировать: их delta недостоверна
-    /// (инициализация, компиляция шейдеров, загрузка сцены).
     warmup_frames: u32,
 }
 
 const SMOOTH_N: usize = 8;
 const WARMUP_FRAMES: u32 = 3;
 
-/// ИЗМЕНЕНО (#20): единственная константа вместо двух.
-///
-/// Раньше здесь было `const MAX_DELTA: f32 = 0.05;` и параллельно
-/// `physics::world::MAX_DT = 0.05`. Синхронизация поддерживалась
-/// комментарием — если кто-то менял одну, вторая оставалась старой,
-/// и `time` мог выдать dt, который физика клампнёт к другому
-/// значению. Теперь — прямой re-export.
-///
-/// `time` клампит `delta` здесь, чтобы движок никогда не получал
-/// `dt > MAX_DT`. Это важно для:
-///   * `physics.step` (внутри тоже клампит, но мы не хотим два
-///     разных значения в одном кадре),
-///   * интеграции игрока (`update_player`),
-///   * снарядов (`update_projectiles`),
-///   * частиц (`update_particles`).
-///
-/// Всё, что медленнее 20 FPS, «замедляет» игровое время. Лучше
-/// пауза, чем взрыв физики.
 const MAX_DELTA: f32 = crate::physics::world::MAX_DT;
 const DEFAULT_DT: f32 = 1.0 / 60.0;
 
@@ -68,11 +50,10 @@ impl Time {
             delta_smooth: DEFAULT_DT,
             elapsed: 0.0,
             frame_count: 0,
-            // Инициализируем правдоподобным значением, а не 0 —
-            // иначе первый `tick()` даёт всплеск FPS.
             fps_avg: 60.0,
             frame_time_max: 0.0,
             hitches: 0,
+            paused: false,
             samples: [DEFAULT_DT; SMOOTH_N],
             sample_idx: 0,
             sample_count: 0,
@@ -85,22 +66,29 @@ impl Time {
         let raw_delta = (now - self.last).as_secs_f32();
         self.last = now;
 
-        // Пропускаем warmup-кадры — не портим статистику мусором.
         if self.warmup_frames > 0 {
             self.warmup_frames -= 1;
-            self.delta = DEFAULT_DT;
-            self.elapsed += self.delta;
+            self.delta = if self.paused { 0.0 } else { DEFAULT_DT };
+            if !self.paused { self.elapsed += self.delta; }
             self.frame_count += 1;
             return;
         }
 
-        // Клампим «зависшие» кадры — иначе следующий сглаженный delta
-        // будет искажён, и физика получит dt=5 секунд.
-        self.delta = raw_delta.min(MAX_DELTA);
-        self.elapsed += self.delta;
+        // Реальный dt используется для сглаживания FPS даже при паузе —
+        // иначе Stats показывает замороженное число, и непонятно,
+        // действительно ли игра «жива».
+        let real_delta = raw_delta.min(MAX_DELTA);
+
+        // Игровой dt обнуляется при паузе.
+        self.delta = if self.paused { 0.0 } else { real_delta };
+        if !self.paused {
+            self.elapsed += self.delta;
+        }
         self.frame_count += 1;
 
-        self.samples[self.sample_idx] = self.delta;
+        // Сглаживание работает по real_delta, чтобы Stats оставался
+        // информативным.
+        self.samples[self.sample_idx] = real_delta;
         self.sample_idx = (self.sample_idx + 1) % SMOOTH_N;
         if self.sample_count < SMOOTH_N {
             self.sample_count += 1;
@@ -114,9 +102,12 @@ impl Time {
             .copied()
             .fold(0.0_f32, f32::max);
 
-        if self.sample_count >= SMOOTH_N
-            && self.delta > self.delta_smooth * 2.0
-            && self.delta > 0.003
+        // Hitches считаем только когда не пауза — при паузе
+        // «пропущенные кадры» не имеют смысла.
+        if !self.paused
+            && self.sample_count >= SMOOTH_N
+            && real_delta > self.delta_smooth * 2.0
+            && real_delta > 0.003
         {
             self.hitches += 1;
         }

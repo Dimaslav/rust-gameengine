@@ -2,6 +2,7 @@
 
 pub mod camera_bookmarks;
 pub mod gizmo;
+pub mod inspector_audio;
 pub mod palette;
 pub mod picking;
 pub mod placement;
@@ -17,6 +18,7 @@ use egui_winit::State as EguiWinitState;
 use winit::window::Window;
 
 use crate::ecs::{Entity, World};
+use crate::game::audio::AudioBus;
 use crate::game::components::Transform;
 use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
@@ -98,17 +100,7 @@ pub enum EditorAction {
     RefreshPrefabs,
     InstantiatePrefab(u32),
 
-    /// Загрузка sRGB-текстур (albedo / base color / emissive).
-    /// GPU декодирует sRGB-байты в linear при сэмплировании.
     LoadTextures,
-
-    /// ИЗМЕНЕНО (#8): загрузка linear-текстур (normal map, MR-маска,
-    /// AO, height/displacement, маски). Отличие от `LoadTextures` —
-    /// формат GPU-текстуры: `Rgba8Unorm` вместо `Rgba8UnormSrgb`.
-    ///
-    /// Раньше был только `LoadTextures`; любая текстура, загруженная
-    /// через UI, получала sRGB-формат, что для normal/MR давало
-    /// двойную гамма-коррекцию.
     LoadTexturesLinear,
 
     RemoveTexture(String),
@@ -125,6 +117,11 @@ pub enum EditorAction {
     InvertSelection,
     SelectAll,
     CleanupEmptyEntities,
+
+    // === Фаза 4.4: аудио ===
+    SetBusVolume(AudioBus, f32),
+    LoadSound,
+    PreviewSound(String),
 }
 
 impl EditorState {
@@ -176,6 +173,7 @@ impl EditorState {
         ui_show_stats: bool,
         ui_show_hierarchy: bool,
         ui_show_inspector: bool,
+        ui_show_audio: bool,
         left_panel_width: f32,
         right_panel_width: f32,
     ) -> EditorSettings {
@@ -194,6 +192,7 @@ impl EditorState {
         s.show_stats_panel = ui_show_stats;
         s.show_hierarchy_panel = ui_show_hierarchy;
         s.show_inspector_panel = ui_show_inspector;
+        s.show_audio_panel = ui_show_audio;
         s.left_panel_width = left_panel_width;
         s.right_panel_width = right_panel_width;
         s
@@ -241,9 +240,7 @@ impl EditorState {
 }
 
 impl Default for EditorState {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Editor {
@@ -261,8 +258,8 @@ impl Editor {
             viewport_id,
             window,
             Some(window.scale_factor() as f32),
-            None,   // theme
-            None,   // max_texture_side
+            None,
+            None,
         );
 
         let egui_renderer = EguiRenderer::new(device, surface_format, None, 1, false);
@@ -281,9 +278,7 @@ impl Editor {
         window: &Window,
         event: &winit::event::WindowEvent,
     ) -> bool {
-        if !self.enabled {
-            return false;
-        }
+        if !self.enabled { return false; }
         self.egui_state.on_window_event(window, event).consumed
     }
 }

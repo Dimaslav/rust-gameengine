@@ -5,6 +5,8 @@ use glam::Vec3;
 
 pub struct PlayState {
     pub active: bool,
+    pub paused: bool,
+
     pub saved_position: Vec3,
     pub vertical_velocity: f32,
     pub on_ground: bool,
@@ -20,15 +22,50 @@ pub struct PlayState {
     pub floor_y: f32,
     pub look_sensitivity: f32,
 
+    // === ИЗМЕНЕНО (Фаза 5): платформерный контроллер ===
+    //
+    // `horizontal_velocity` — XZ-скорость, накопленная между кадрами.
+    // Раньше движение было instant (`motion = dir * speed * dt`), что
+    // не давало air control. Теперь velocity интерполируется к
+    // target с time constant, зависящим от on_ground.
+    pub horizontal_velocity: Vec3,
+
+    /// Время после схода с платформы, когда прыжок ещё срабатывает.
+    pub coyote_time: f32,
+    /// Текущий таймер coyote. Сброс в coyote_time при on_ground.
+    pub coyote_timer: f32,
+
+    /// Окно, в течение которого нажатие прыжка «запоминается» и
+    /// сработает при следующем касании земли.
+    pub jump_buffer_time: f32,
+    pub jump_buffer_timer: f32,
+
+    /// Time constant (сек) интерполяции velocity на земле.
+    /// Меньше = резче разгон/торможение.
+    pub ground_accel_tau: f32,
+    /// То же для воздуха. Больше = меньше контроля в воздухе.
+    pub air_accel_tau: f32,
+
+    /// Максимальная высота, на которую персонаж «прилипает» к
+    /// поверхности при спуске с уступа (step-down).
+    pub step_down_max: f32,
+
+    /// Порог «walkable slope»: cos(угла). cos(45°) ≈ 0.707.
+    /// Если ground_normal.y ниже этого порога — начинается slide.
+    pub slope_walk_limit_cos: f32,
+
+    /// Скорость скольжения по вертикальному склону (m/s).
+    pub slope_slide_speed: f32,
+
+    /// Для отладки / HUD.
+    pub ground_normal: Vec3,
+
     // === Crouch (приседание) ===
     pub crouch_height: f32,
     pub crouch_speed_mult: f32,
     pub current_eye_height: f32,
     pub crouching: bool,
 
-    // === Character controller (Step 2) ===
-    /// Множитель скорости, передаваемой dynamic-телам при контакте.
-    /// 0.0 = push отключён, 1.0 = тела едут со скоростью игрока.
     pub push_strength: f32,
 
     // === Бой / HUD ===
@@ -64,6 +101,7 @@ impl Default for PlayState {
     fn default() -> Self {
         Self {
             active: false,
+            paused: false,
             saved_position: Vec3::new(0.0, 1.7, 45.0),
             vertical_velocity: 0.0,
             on_ground: true,
@@ -77,6 +115,19 @@ impl Default for PlayState {
             gravity: 20.0,
             floor_y: 0.0,
             look_sensitivity: 0.0025,
+
+            horizontal_velocity: Vec3::ZERO,
+            coyote_time: 0.15,
+            coyote_timer: 0.0,
+            jump_buffer_time: 0.15,
+            jump_buffer_timer: 0.0,
+            ground_accel_tau: 0.06,
+            air_accel_tau: 0.30,
+            step_down_max: 0.5,
+            // cos(45°) = 0.7071
+            slope_walk_limit_cos: 0.7071,
+            slope_slide_speed: 6.0,
+            ground_normal: Vec3::Y,
 
             crouch_height: 1.0,
             crouch_speed_mult: 0.5,

@@ -6,6 +6,7 @@ use crate::editor::gizmo::GizmoMode;
 use crate::editor::palette::{PaletteItem, PaletteState};
 use crate::editor::play::PlayState;
 use crate::editor::{EditorAction, EditorState};
+use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
@@ -26,6 +27,7 @@ pub struct UiState {
     pub show_stats_panel: bool,
     pub show_hierarchy_panel: bool,
     pub show_inspector_panel: bool,
+    pub show_audio_panel: bool,
     pub left_panel_width: f32,
     pub right_panel_width: f32,
     pub component_filter: String,
@@ -41,6 +43,7 @@ impl UiState {
         Self {
             show_renderer_panel: true, show_stats_panel: true,
             show_hierarchy_panel: true, show_inspector_panel: true,
+            show_audio_panel: false,
             left_panel_width: 260.0, right_panel_width: 340.0,
             component_filter: String::new(), initialized: false,
             command_palette_open: false, command_palette_query: String::new(),
@@ -61,12 +64,18 @@ pub struct Stats {
 pub struct UiAssets<'a> {
     pub mesh_names: &'a [String],
     pub material_names: &'a [String],
-    /// ИЗМЕНЕНО (#8): четвёртый элемент — `is_srgb`.
-    /// UI показывает бейдж `[sRGB]` / `[Linear]` и меняет подсказку
-    /// в hover-тексте, чтобы пользователь сразу видел, как текстура
-    /// была загружена.
     pub texture_list: &'a [(String, u32, u32, bool)],
     pub selected_material: Option<(String, Material)>,
+}
+
+/// ИЗМЕНЕНО (Фаза 4.5): добавлено `selected_source_entity`.
+#[derive(Default)]
+pub struct AudioSnapshot {
+    pub bus_volumes: Vec<(AudioBus, f32)>,
+    pub sound_names: Vec<String>,
+    pub active_count: usize,
+    pub available: bool,
+    pub selected_source_entity: Option<Entity>,
 }
 
 // ============================================================
@@ -76,6 +85,7 @@ pub struct UiAssets<'a> {
 pub fn draw(
     ctx: &egui::Context, state: &mut UiState, editor: &mut EditorState,
     world: &mut World, postfx: &mut PostFx, stats: &Stats, assets: &UiAssets<'_>,
+    audio: &AudioSnapshot,
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
     initialize_from_settings(state, editor);
@@ -88,8 +98,16 @@ pub fn draw(
         draw_left_panel(ctx, state, editor, world, assets, stats, &mut action);
         draw_right_panel(ctx, state, editor, world, assets, postfx, &mut action);
         draw_bookmarks_panel(ctx, state, editor, &mut action);
+        draw_audio_panel(ctx, state, audio, &mut action);
     }
-    if editor.play.active { draw_play_hud(ctx, &editor.play, stats); }
+    crate::editor::inspector_audio::draw_window(ctx, editor, world, audio, &mut action);
+    if editor.play.active {
+        if editor.play.paused {
+            draw_pause_overlay(ctx, editor, &mut action);
+        } else {
+            draw_play_hud(ctx, &editor.play, stats);
+        }
+    }
     action
 }
 
@@ -100,6 +118,7 @@ fn initialize_from_settings(state: &mut UiState, editor: &EditorState) {
     state.show_stats_panel = s.show_stats_panel;
     state.show_hierarchy_panel = s.show_hierarchy_panel;
     state.show_inspector_panel = s.show_inspector_panel;
+    state.show_audio_panel = s.show_audio_panel;
     state.left_panel_width = s.left_panel_width;
     state.right_panel_width = s.right_panel_width;
     state.initialized = true;
@@ -124,6 +143,50 @@ fn draw_box_select_overlay(ctx: &egui::Context, editor: &EditorState) {
     painter.rect_stroke(rect, egui::CornerRadius::ZERO,
         egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(120, 200, 255, 230)),
         egui::StrokeKind::Inside);
+}
+
+fn draw_pause_overlay(
+    ctx: &egui::Context,
+    _editor: &mut EditorState,
+    action: &mut Option<EditorAction>,
+) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground, egui::Id::new("pause_dim_layer"),
+    ));
+    painter.rect_filled(screen, egui::CornerRadius::ZERO,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160));
+
+    egui::Area::new(egui::Id::new("pause_overlay"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(32, 24))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("PAUSED")
+                                .heading()
+                                .strong()
+                                .color(egui::Color32::from_rgb(230, 200, 130)),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Esc — resume · F9 — stop")
+                                .small()
+                                .weak(),
+                        );
+                        ui.add_space(16.0);
+                        if ui.button("▶ Resume (Esc)").clicked() {
+                            *action = Some(EditorAction::TogglePlay);
+                        }
+                        ui.add_space(6.0);
+                        if ui.button("■ Stop (F9)").clicked() {
+                            *action = Some(EditorAction::TogglePlay);
+                        }
+                    });
+                });
+        });
 }
 
 fn draw_context_menu(ctx: &egui::Context, editor: &mut EditorState,
@@ -199,8 +262,18 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
             }
             ui.separator();
             if editor.play.active {
-                if ui.button("■ Stop").on_hover_text("Exit play mode (Esc)").clicked() {
-                    *action = Some(EditorAction::TogglePlay);
+                if editor.play.paused {
+                    if ui.button("▶ Resume").on_hover_text("Esc").clicked() {
+                        *action = Some(EditorAction::TogglePlay);
+                    }
+                    if ui.button("■ Stop").on_hover_text("F9").clicked() {
+                        *action = Some(EditorAction::TogglePlay);
+                    }
+                } else {
+                    let _ = ui.button("⏸ Pause (Esc)");
+                    if ui.button("■ Stop").on_hover_text("F9").clicked() {
+                        *action = Some(EditorAction::TogglePlay);
+                    }
                 }
             } else if ui.button("▶ Play").on_hover_text("Run game (F9)").clicked() {
                 *action = Some(EditorAction::TogglePlay);
@@ -211,7 +284,7 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
                 if ui.selectable_label(*m == GizmoMode::Translate, "T").on_hover_text("Translate (1)").clicked() { *m = GizmoMode::Translate; }
                 if ui.selectable_label(*m == GizmoMode::Rotate, "R").on_hover_text("Rotate (2)").clicked() { *m = GizmoMode::Rotate; }
                 if ui.selectable_label(*m == GizmoMode::Scale, "S").on_hover_text("Scale (3)").clicked() { *m = GizmoMode::Scale; }
-                ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap").on_hover_text("Snap без Ctrl (0.5 м / 15°)"); 
+                ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap").on_hover_text("Snap без Ctrl (0.5 м / 15°)");
                 ui.separator();
             }
             if ui.add_enabled(!editor.selected.is_empty(), egui::Button::new("Copy (Ctrl+C)")).clicked() {
@@ -259,7 +332,11 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
             ui.label(format!("Entities: {}", stats.entities));
             if editor.play.active {
                 ui.separator();
-                ui.label(egui::RichText::new("● PLAY").strong().color(egui::Color32::from_rgb(230, 90, 90)));
+                if editor.play.paused {
+                    ui.label(egui::RichText::new("⏸ PAUSED").strong().color(egui::Color32::from_rgb(230, 200, 130)));
+                } else {
+                    ui.label(egui::RichText::new("● PLAY").strong().color(egui::Color32::from_rgb(230, 90, 90)));
+                }
             } else if editor.flying {
                 ui.separator();
                 ui.label(egui::RichText::new("✦ FLY").strong().color(egui::Color32::from_rgb(90, 180, 230)));
@@ -270,10 +347,148 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
                 ui.toggle_value(&mut state.show_hierarchy_panel, "Hierarchy");
                 ui.toggle_value(&mut state.show_stats_panel, "Stats");
                 ui.toggle_value(&mut state.show_bookmarks_panel, "📷");
+                ui.toggle_value(&mut state.show_audio_panel, "🔊");
             });
         });
     });
 }
+
+// ============================================================
+// Аудио-панель
+// ============================================================
+
+fn draw_audio_panel(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    audio: &AudioSnapshot,
+    action: &mut Option<EditorAction>,
+) {
+    if !state.show_audio_panel { return; }
+    let mut open = state.show_audio_panel;
+
+    egui::Window::new("🔊 Audio")
+        .open(&mut open)
+        .default_pos(egui::pos2(320.0, 380.0))
+        .default_width(320.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            if !audio.available {
+                ui.label(
+                    egui::RichText::new("audio unavailable")
+                        .italics()
+                        .color(egui::Color32::from_rgb(230, 130, 130)),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Could not open the default output device. \
+                         Check your system audio settings.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                return;
+            }
+
+            ui.label(egui::RichText::new("Buses").strong());
+            ui.label(
+                egui::RichText::new("Master applies on top of the others.")
+                    .small()
+                    .weak()
+                    .italics(),
+            );
+            ui.add_space(2.0);
+
+            for (bus, vol) in &audio.bus_volumes {
+                let mut v = *vol;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:<6}", bus.name()))
+                            .monospace(),
+                    );
+                    let r = ui.add(
+                        egui::Slider::new(&mut v, 0.0..=1.0)
+                            .show_value(true)
+                            .fixed_decimals(2),
+                    );
+                    if r.changed() {
+                        *action = Some(EditorAction::SetBusVolume(*bus, v));
+                    }
+                    if ui
+                        .small_button("↺")
+                        .on_hover_text(format!("Reset to {:.2}", bus.default_volume()))
+                        .clicked()
+                    {
+                        *action = Some(EditorAction::SetBusVolume(*bus, bus.default_volume()));
+                    }
+                });
+            }
+
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                if ui
+                    .button("➕ Load sound…")
+                    .on_hover_text("wav / ogg / flac / mp3")
+                    .clicked()
+                {
+                    *action = Some(EditorAction::LoadSound);
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("active: {}", audio.active_count))
+                        .small()
+                        .weak(),
+                );
+            });
+
+            ui.separator();
+            ui.label(format!("{} sounds loaded", audio.sound_names.len()));
+
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    if audio.sound_names.is_empty() {
+                        ui.label(
+                            egui::RichText::new("(no sounds)")
+                                .weak()
+                                .italics(),
+                        );
+                        return;
+                    }
+                    for name in &audio.sound_names {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("▶")
+                                .on_hover_text("Preview on SFX bus")
+                                .clicked()
+                            {
+                                *action = Some(EditorAction::PreviewSound(name.clone()));
+                            }
+                            ui.label(
+                                egui::RichText::new(name).monospace(),
+                            );
+                        });
+                    }
+                });
+
+            ui.separator();
+            ui.label(
+                egui::RichText::new(
+                    "Hint: select an entity with AudioSource to edit it."
+                )
+                .small()
+                .weak()
+                .italics(),
+            );
+        });
+
+    state.show_audio_panel = open;
+}
+
+// ============================================================
+// Палитра
+// ============================================================
 
 fn draw_palette_bar(ctx: &egui::Context, editor: &mut EditorState) {
     egui::TopBottomPanel::top("palette_bar").show(ctx, |ui| {
@@ -352,16 +567,6 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
     ui.label(format!("Point lights: {}", stats.point_lights));
     ui.separator();
 
-    // ИЗМЕНЕНО (#19): подписи явно указывают LOD0.
-    //
-    // `stats.sel_triangles` / `stats.sel_vertices` считаются по
-    // **исходному** мешу (`MeshHandle` без суффикса `__lod*`) — это
-    // LOD0. Реальный LOD выбирается в `Game::collect_draws` per-frame
-    // (по расстоянию до камеры), и на момент построения `Stats` движок
-    // ещё не знает, какой LOD реально нарисован. Поэтому подпись
-    // "Triangles" вводила в заблуждение — пользователь думал, что это
-    // текущая нагрузка; на самом деле это «сколько полигонов в
-    // оригинале». Добавлен `(LOD0)` + hover-пояснение.
     ui.label("Selection");
     ui.label(format!("Entities: {}", stats.sel_entities));
     ui.label(format!("Triangles (LOD0): {}", stats.sel_triangles))
@@ -555,18 +760,12 @@ fn draw_prefabs_section(ui: &mut egui::Ui, editor: &mut EditorState, action: &mu
 fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Option<EditorAction>) {
     ui.heading("Assets"); ui.separator();
 
-    // ИЗМЕНЕНО (#8): две отдельные кнопки. Раньше была одна
-    // «Load Texture(s)…», и любая загруженная текстура создавалась
-    // в формате `Rgba8UnormSrgb`. Для normal maps и metallic-roughness
-    // это давало двойную гамма-коррекцию (аппаратное sRGB-декодирование
-    // поверх уже linear-данных) — освещение выглядело неправильно.
     ui.horizontal_wrapped(|ui| {
         if ui
             .button("➕ Load sRGB (color)…")
             .on_hover_text(
                 "Albedo / base color / emissive.\n\
-                 GPU decodes the stored sRGB bytes to linear at sample time.\n\
-                 Supported: PNG, JPEG, GIF, WebP, BMP, TIFF, TGA, DDS, HDR, EXR, ICO, PNM, QOI, Farbfeld",
+                 GPU decodes the stored sRGB bytes to linear at sample time.",
             )
             .clicked()
         {
@@ -576,8 +775,7 @@ fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Op
             .button("➕ Load Linear (data)…")
             .on_hover_text(
                 "Normal maps, metallic-roughness, AO, height/displacement, masks.\n\
-                 No sRGB decode — bytes are used as-is. Load albedo textures with\n\
-                 the sRGB button above; loading them as linear will darken them.",
+                 No sRGB decode — bytes are used as-is.",
             )
             .clicked()
         {
@@ -601,9 +799,6 @@ fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Op
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(180.0).show(ui, |ui| {
         for (name, w, h, is_srgb) in assets.texture_list {
-            // ИЗМЕНЕНО (#8): бейдж типа в самом label + детальная
-            // подсказка в hover-тексте. Пользователь сразу видит, как
-            // была загружена каждая текстура.
             let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
             let tag_color = if *is_srgb {
                 egui::Color32::from_rgb(230, 200, 130)
@@ -713,7 +908,7 @@ fn draw_bookmarks_panel(ctx: &egui::Context, state: &mut UiState,
     if !state.show_bookmarks_panel { return; }
     let mut open = state.show_bookmarks_panel;
     egui::Window::new("📷 Camera Bookmarks").open(&mut open)
-        .default_pos(egui::pos2(320.0, 120.0)).default_width(260.0).resizable(true)
+        .default_pos(egui::pos2(680.0, 120.0)).default_width(260.0).resizable(true)
         .show(ctx, |ui| {
             ui.label(egui::RichText::new("Ctrl+1..9 — save · Alt+1..9 — goto").small().weak());
             ui.separator();
@@ -748,6 +943,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { label: "File · Save scene", action: EditorAction::Save },
         PaletteCommand { label: "File · Load scene", action: EditorAction::Load },
         PaletteCommand { label: "File · New scene", action: EditorAction::NewScene },
+        PaletteCommand { label: "Audio · Load sound…", action: EditorAction::LoadSound },
         PaletteCommand { label: "FBX · Export all", action: EditorAction::ExportFbxAll },
         PaletteCommand { label: "FBX · Export selected", action: EditorAction::ExportFbxSelected },
         PaletteCommand { label: "FBX · Import…", action: EditorAction::ImportFbx },
@@ -877,6 +1073,11 @@ fn draw_inspector(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut 
     if world.has::<TextureTiling>(e) { inspector_texture_tiling(ui, world, e, editor); }
     if world.has::<Elevator>(e) { inspector_elevator(ui, world, e, editor); }
     if world.has::<SlidingDoor>(e) { inspector_sliding_door(ui, world, e, editor); }
+    if world.has::<AudioSource>(e) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("🔊 AudioSource — см. окно").small().weak().italics());
+        });
+    }
     if let Some((name, original)) = &assets.selected_material {
         inspector_material(ui, world, e, editor, action, assets, name, original);
     }
@@ -892,10 +1093,6 @@ fn draw_inspector(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut 
     ui.separator();
     if ui.button("Deselect").clicked() { editor.selected.clear(); }
 }
-
-// ============================================================
-// Light / decal inspectors
-// ============================================================
 
 fn inspector_directional_light(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("☀ Directional Light").default_open(true).show(ui, |ui| {
@@ -992,10 +1189,6 @@ fn inspector_decal(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut
     });
 }
 
-// ============================================================
-// Component chips / add / remove
-// ============================================================
-
 fn draw_component_chips(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     let mut chips: Vec<(&'static str, ComponentKind)> = Vec::new();
     if world.has::<Transform>(e) { chips.push(("Transform", ComponentKind::Transform)); }
@@ -1021,6 +1214,7 @@ fn draw_component_chips(ui: &mut egui::Ui, world: &mut World, e: Entity, editor:
     if world.has::<DirectionalLight>(e) { chips.push(("☀ DirLight", ComponentKind::DirectionalLight)); }
     if world.has::<PointLight>(e) { chips.push(("💡 PointLight", ComponentKind::PointLight)); }
     if world.has::<crate::game::decals::Decal>(e) { chips.push(("🎨 Decal", ComponentKind::Decal)); }
+    if world.has::<AudioSource>(e) { chips.push(("🔊 Audio", ComponentKind::AudioSource)); }
 
     ui.horizontal_wrapped(|ui| {
         for (label, kind) in &chips {
@@ -1045,10 +1239,6 @@ fn draw_component_chips(ui: &mut egui::Ui, world: &mut World, e: Entity, editor:
         }
     });
 }
-
-// ============================================================
-// Transform / hierarchy / geometry
-// ============================================================
 
 fn inspector_transform(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Transform").default_open(true).show(ui, |ui| {
@@ -1380,14 +1570,8 @@ fn inspector_velocity(ui: &mut egui::Ui, world: &mut World, e: Entity) {
     });
 }
 
-// ИЗМЕНЕНО (#4): добавлено предупреждение для случая Parent + RigidBody.
-// Раньше такие тела молча не симулировались — пользователь ставил
-// Dynamic RigidBody на дочернюю entity и удивлялся, почему тело
-// «висит в воздухе». Теперь предупреждение видно прямо в инспекторе.
 fn inspector_rigidbody(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("RigidBody").default_open(true).show(ui, |ui| {
-        // ИЗМЕНЕНО (#4): предупреждаем, если entity имеет Parent.
-        // Проверяем до `get_mut`, чтобы не занимать borrow.
         let has_parent = world.has::<Parent>(e);
         if has_parent {
             if let Some(rb) = world.get::<RigidBody>(e) {
@@ -1531,15 +1715,12 @@ fn inspector_physics_material(ui: &mut egui::Ui, world: &mut World, e: Entity, e
     });
 }
 
-// ============================================================
-// Add / remove component
-// ============================================================
-
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ComponentKind {
     Transform, Mesh, Material, Skeleton, Animation, Spinner, Velocity, Health, Chase,
     Interactable, Trigger, Parent, Tint, Visible, TextureTiling, Elevator, SlidingDoor,
     RigidBody, Collider, PhysicsMaterial, DirectionalLight, PointLight, Decal,
+    AudioSource,
 }
 
 fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
@@ -1568,6 +1749,7 @@ fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
         ComponentKind::DirectionalLight => { world.remove::<DirectionalLight>(e); }
         ComponentKind::PointLight => { world.remove::<PointLight>(e); }
         ComponentKind::Decal => { world.remove::<crate::game::decals::Decal>(e); }
+        ComponentKind::AudioSource => { world.remove::<AudioSource>(e); }
     }
 }
 
@@ -1600,6 +1782,27 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         if ui.button("Texture Tiling").on_hover_text("Size of one tile in world units (1.0 = 1 unit per tile)").clicked() {
             world.insert(e, TextureTiling::default()); editor.undo_requested = true; ui.close();
         }
+    }
+    if !world.has::<AudioSource>(e) {
+        any = true;
+        ui.menu_button("🔊 Audio Source", |ui| {
+            let presets = [
+                ("pickup (SFX)", AudioSource::new("pickup").with_bus(AudioBus::Sfx).with_range(1.0, 20.0)),
+                ("shot (SFX)",   AudioSource::new("shot").with_bus(AudioBus::Sfx).with_range(1.0, 30.0)),
+                ("ding (Music)", AudioSource::new("ding").with_bus(AudioBus::Music).with_range(0.5, 15.0)),
+                ("pickup (UI, non-spatial)",
+                    AudioSource::non_spatial("pickup").with_bus(AudioBus::Ui)),
+                ("ambient loop (Music)",
+                    AudioSource::looping("ding").with_bus(AudioBus::Music).with_range(2.0, 25.0)),
+            ];
+            for (label, src) in presets {
+                if ui.button(label).clicked() {
+                    world.insert(e, src);
+                    editor.undo_requested = true;
+                    ui.close();
+                }
+            }
+        });
     }
     if !world.has::<Elevator>(e) {
         any = true;
@@ -1656,7 +1859,9 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             if ui.button("Tint (green)").clicked() {
                 world.insert(e, Trigger::new(2.5, TriggerAction::Tint([0.2, 1.0, 0.2, 1.0]))); editor.undo_requested = true; ui.close();
             }
-            if ui.button("Despawn").clicked() { world.insert(e, Trigger::new(2.5, TriggerAction::Despawn)); editor.undo_requested = true; ui.close(); }
+            if ui.button("Despawn").clicked() {
+                world.insert(e, Trigger::new(2.5, TriggerAction::Despawn)); editor.undo_requested = true; ui.close();
+            }
             if ui.button("Play Sound (pickup)").clicked() {
                 world.insert(e, Trigger::repeatable(2.5, TriggerAction::PlaySound("pickup".to_string()))); editor.undo_requested = true; ui.close();
             }
@@ -1679,9 +1884,6 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     ui.separator();
     if !world.has::<RigidBody>(e) {
         any = true;
-        // ИЗМЕНЕНО (#4): предупреждаем в меню, если у entity есть
-        // Parent — Dynamic/Kinematic под Parent не симулируются,
-        // поэтому опции заблокированы с понятным hover-текстом.
         let has_parent = world.has::<Parent>(e);
         ui.menu_button("RigidBody", |ui| {
             if has_parent {
@@ -1692,7 +1894,6 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
                 );
                 ui.separator();
             }
-
             if ui.button("Static").clicked() {
                 world.insert(e, RigidBody::static_body());
                 editor.undo_requested = true;
@@ -1700,10 +1901,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             }
             if ui
                 .add_enabled(!has_parent, egui::Button::new("Dynamic (mass 1)"))
-                .on_disabled_hover_text(
-                    "Cannot add Dynamic body to a child entity: Parent-space \
-                     dynamics is unsupported. Remove Parent first.",
-                )
+                .on_disabled_hover_text("Parent-space dynamics is unsupported. Remove Parent first.")
                 .clicked()
             {
                 world.insert(e, RigidBody::dynamic(1.0));
@@ -1712,10 +1910,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             }
             if ui
                 .add_enabled(!has_parent, egui::Button::new("Kinematic"))
-                .on_disabled_hover_text(
-                    "Cannot add Kinematic body to a child entity: Parent-space \
-                     dynamics is unsupported. Remove Parent first.",
-                )
+                .on_disabled_hover_text("Parent-space dynamics is unsupported. Remove Parent first.")
                 .clicked()
             {
                 world.insert(e, RigidBody::kinematic());
@@ -1778,7 +1973,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
 }
 
 // ============================================================
-// Graphics quality presets
+// Renderer panel
 // ============================================================
 
 fn apply_preset(postfx: &mut PostFx, mut preset: PostFx) {
@@ -1834,7 +2029,7 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
         ui.add(egui::Slider::new(&mut postfx.taa_strength, 0.0..=1.0).text("TAA strength"));
         ui.label(egui::RichText::new("1.0 = полное накопление истории. 0.0 = passthrough.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.taa_sharpening, 0.0..=1.0).text("TAA sharpening"));
-        ui.label(egui::RichText::new("Unsharp-mask поверх TAA. Большие значения усиливают per-frame шум.").small().weak());
+        ui.label(egui::RichText::new("Unsharp-mask поверх TAA.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.fxaa_strength, 0.0..=1.0).text("FXAA strength"));
         ui.label(egui::RichText::new("При активной TAA ослабляется автоматически (в 2×).").small().weak());
     });
@@ -1869,7 +2064,7 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
         ui.label(egui::RichText::new("0 = выключено. 0.02..0.05 — плотный туман с god rays.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.volumetric_scattering, 0.0..=1.0).text("Scattering (albedo)"));
         ui.add(egui::Slider::new(&mut postfx.volumetric_phase_g, 0.0..=0.9).text("Phase g (god rays)"));
-        ui.label(egui::RichText::new("Больше g → сильнее forward scattering (яркие лучи на солнце).").small().weak());
+        ui.label(egui::RichText::new("Больше g → сильнее forward scattering.").small().weak());
     });
     ui.separator();
     egui::CollapsingHeader::new("Screen effects").default_open(false).show(ui, |ui| {
@@ -1911,23 +2106,81 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
     draw_fly_settings(ui, editor);
 }
 
+/// ИЗМЕНЕНО (Фаза 5): расширен платформерными параметрами.
 fn draw_play_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Play").default_open(false).show(ui, |ui| {
         let p = &mut editor.play;
+
+        ui.label(egui::RichText::new("Movement").strong());
         ui.add(egui::Slider::new(&mut p.walk_speed, 0.5..=20.0).text("Walk speed"));
         ui.add(egui::Slider::new(&mut p.run_speed, 1.0..=40.0).text("Run speed"));
         ui.add(egui::Slider::new(&mut p.jump_speed, 1.0..=20.0).text("Jump"));
         ui.add(egui::Slider::new(&mut p.gravity, 1.0..=60.0).text("Gravity"));
         ui.add(egui::Slider::new(&mut p.eye_height, 0.5..=3.0).text("Eye height"));
         ui.add(egui::Slider::new(&mut p.look_sensitivity, 0.0005..=0.01).text("Look sensitivity"));
+
+        ui.separator();
+        ui.label(egui::RichText::new("Feel").strong());
+        ui.add(egui::Slider::new(&mut p.coyote_time, 0.0..=0.5)
+            .text("Coyote time (s)")
+            .fixed_decimals(2))
+            .on_hover_text(
+                "Время после схода с платформы, когда прыжок ещё срабатывает. \
+                 0.1-0.2 — стандарт для платформеров."
+            );
+        ui.add(egui::Slider::new(&mut p.jump_buffer_time, 0.0..=0.5)
+            .text("Jump buffer (s)")
+            .fixed_decimals(2))
+            .on_hover_text(
+                "Если игрок нажал прыжок за N секунд до касания земли — \
+                 прыжок сработает автоматически при контакте."
+            );
+        ui.add(egui::Slider::new(&mut p.ground_accel_tau, 0.01..=0.3)
+            .text("Ground accel τ (s)")
+            .fixed_decimals(3))
+            .on_hover_text("Меньше = резче разгон/торможение на земле.");
+        ui.add(egui::Slider::new(&mut p.air_accel_tau, 0.05..=1.0)
+            .text("Air accel τ (s)")
+            .fixed_decimals(2))
+            .on_hover_text("Больше = меньше контроля в воздухе.");
+
+        ui.separator();
+        ui.label(egui::RichText::new("Slope / step").strong());
+        ui.add(egui::Slider::new(&mut p.step_down_max, 0.0..=1.5)
+            .text("Step-down max (m)")
+            .fixed_decimals(2))
+            .on_hover_text(
+                "Максимальная высота уступа, к которому персонаж \
+                 «прилипает» при спуске. 0.0 — выключает step-down."
+            );
+        let mut walk_deg = p.slope_walk_limit_cos.acos().to_degrees();
+        let r = ui.add(egui::Slider::new(&mut walk_deg, 10.0..=80.0)
+            .text("Walkable slope (°)")
+            .fixed_decimals(0));
+        if r.changed() {
+            p.slope_walk_limit_cos = walk_deg.to_radians().cos();
+        }
+        ui.add(egui::Slider::new(&mut p.slope_slide_speed, 0.0..=20.0)
+            .text("Slope slide speed (m/s)")
+            .fixed_decimals(1))
+            .on_hover_text("Скорость скольжения по вертикальной стене.");
+        if p.ground_normal.y < 0.999 {
+            ui.label(egui::RichText::new(format!(
+                "ground normal: ({:.2}, {:.2}, {:.2})",
+                p.ground_normal.x, p.ground_normal.y, p.ground_normal.z,
+            )).small().weak().monospace());
+        }
+
         ui.separator();
         ui.label("Player capsule");
         ui.add(egui::Slider::new(&mut p.player_radius, 0.1..=1.0).text("Radius"));
         ui.add(egui::Slider::new(&mut p.player_height, 0.5..=3.0).text("Height"));
+
         ui.separator();
         ui.label("Crouch (Ctrl)");
         ui.add(egui::Slider::new(&mut p.crouch_height, 0.5..=1.7).text("Eye height"));
         ui.add(egui::Slider::new(&mut p.crouch_speed_mult, 0.1..=1.0).text("Speed mult"));
+
         ui.separator();
         ui.label("Combat");
         ui.add(egui::Slider::new(&mut p.max_health, 10.0..=500.0).text("Max HP"));
@@ -1937,9 +2190,11 @@ fn draw_play_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
         ui.add(egui::Slider::new(&mut p.bullet_speed, 0.0..=300.0).text("Bullet speed"));
         ui.add(egui::Slider::new(&mut p.fire_cooldown_max, 0.02..=1.0).text("Fire cd"));
         ui.add(egui::Slider::new(&mut p.interact_distance, 1.0..=20.0).text("Interact dist"));
+
         ui.separator();
         ui.checkbox(&mut p.bob_enabled, "Head bob");
         ui.add(egui::Slider::new(&mut p.bob_amplitude, 0.0..=0.15).text("Bob amplitude"));
+
         ui.separator();
         ui.checkbox(&mut p.show_crosshair, "Show crosshair");
         ui.checkbox(&mut p.show_hud, "Show HUD");
@@ -1958,10 +2213,6 @@ fn draw_fly_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
         ui.add(egui::Slider::new(&mut editor.fly_sensitivity, 0.0005..=0.01).text("Fly sensitivity"));
     });
 }
-
-// ============================================================
-// Multi-edit
-// ============================================================
 
 fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorState) {
     let selected: Vec<Entity> = editor.selected.clone();
@@ -2053,10 +2304,6 @@ fn common_vec3<I: Iterator<Item = Vec3>>(mut it: I) -> Option<Vec3> {
     Some(first)
 }
 
-// ============================================================
-// Play HUD
-// ============================================================
-
 fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
     let fps = stats.fps;
 
@@ -2102,6 +2349,19 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
                             else if play.on_ground { "on ground" } else { "airborne" };
                         ui.label(egui::RichText::new(state_str).monospace()
                             .color(egui::Color32::from_rgb(180, 200, 180)));
+                        // ИЗМЕНЕНО (Фаза 5): показываем coyote/jump buffer в HUD.
+                        if play.coyote_timer > 0.0 && !play.on_ground {
+                            ui.label(egui::RichText::new(
+                                format!("coyote: {:.2}s", play.coyote_timer)
+                            ).monospace().small()
+                                .color(egui::Color32::from_rgb(255, 220, 120)));
+                        }
+                        if play.jump_buffer_timer > 0.0 {
+                            ui.label(egui::RichText::new(
+                                format!("jump buffered: {:.2}s", play.jump_buffer_timer)
+                            ).monospace().small()
+                                .color(egui::Color32::from_rgb(200, 240, 160)));
+                        }
                     });
             });
     }
@@ -2161,15 +2421,6 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
     }
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
-// ИЗМЕНЕНО (#4): добавлен маркер «⚠» для entity, у которой
-// есть Parent и не-Static RigidBody. Такая комбинация означает,
-// что тело не симулируется (см. physics::world::collect_states).
-// Без бейджа пользователь видел «Ph» в списке и думал, что
-// физика работает.
 fn component_badges(world: &World, e: Entity) -> String {
     let mut s = String::with_capacity(24);
     if world.has::<Transform>(e) { s.push_str("T "); }
@@ -2195,8 +2446,8 @@ fn component_badges(world: &World, e: Entity) -> String {
     if world.has::<DirectionalLight>(e) { s.push_str("☀ "); }
     if world.has::<PointLight>(e) { s.push_str("💡 "); }
     if world.has::<crate::game::decals::Decal>(e) { s.push_str("🎨 "); }
+    if world.has::<AudioSource>(e) { s.push_str("🔊 "); }
 
-    // ИЗМЕНЕНО (#4): бейдж «physics disabled».
     if world.has::<Parent>(e) {
         if let Some(rb) = world.get::<RigidBody>(e) {
             if rb.body_type != BodyType::Static {
@@ -2226,16 +2477,6 @@ fn would_create_cycle(world: &World, child: Entity, new_parent: Entity) -> bool 
     true
 }
 
-/// ИЗМЕНЕНО (#8): принимает 4-tuple `(name, w, h, is_srgb)`.
-///
-/// `UiAssets::texture_list` расширен флагом `is_srgb`, чтобы UI мог
-/// показать пользователю, как загружена каждая текстура. В combo-box
-/// рядом с именем рисуем бейдж `[sRGB]` / `[Linear]` — это
-/// подсказывает, что для normal map / MR-маски нужен Linear.
-///
-/// Раньше сигнатура была `&[(String, u32, u32)]` и UI никак не
-/// различал sRGB/linear. После #8 `assets.texture_list` стал
-/// 4-tuple — функция обновлена под это.
 fn texture_picker(
     ui: &mut egui::Ui,
     id: &str,
@@ -2258,9 +2499,6 @@ fn texture_picker(
             for (name, w, h, is_srgb) in textures {
                 let selected = current.as_deref() == Some(name.as_str());
 
-                // Бейдж типа текстуры — цвет совпадает с тем, что
-                // используется в `draw_assets_section`, чтобы визуально
-                // было понятно: жёлтый = sRGB, синеватый = Linear.
                 let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
                 let tag_color = if *is_srgb {
                     egui::Color32::from_rgb(230, 200, 130)
