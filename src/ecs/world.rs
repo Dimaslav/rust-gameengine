@@ -14,6 +14,22 @@ pub struct World {
     entity_pos: HashMap<Entity, usize>,
     storages: HashMap<TypeId, Box<dyn AnyStorage>>,
     events: Events,
+
+    /// ИЗМЕНЕНО (#9): скретч-буфер для `for_each_pair`.
+    ///
+    /// Раньше при каждом вызове `for_each_pair` создавался новый
+    /// `Vec<Entity>` через `ComponentStorage::entity_list()` (который
+    /// делал `.clone()`). В `MovementSystem::update` это происходило
+    /// каждый кадр — 60+ аллокаций/сек для сцены средней величины.
+    ///
+    /// Теперь: один `Vec<Entity>` живёт в `World`, `for_each_pair`
+    /// вынимает его через `mem::take`, заполняет из `entities_iter()`
+    /// A-стораджа, обходит, возвращает обратно. Аллокация происходит
+    /// только при первом вызове (или если буфер вырос).
+    ///
+    /// `Default` даёт `Vec::new()` — первая итерация аллоцирует, дальше
+    /// только переиспользуется.
+    scratch_entities: Vec<Entity>,
 }
 
 impl World {
@@ -141,6 +157,22 @@ impl World {
         })
     }
 
+    /// ИЗМЕНЕНО (#9): переписано на переиспользуемый скретч-буфер.
+    ///
+    /// До этого `entity_list()` клонировал `Vec<Entity>` из A-стораджа
+    /// **на каждый вызов**. `MovementSystem::update` дёргает этот метод
+    /// каждый кадр → 60+ аллокаций/сек + memcpy. Теперь буфер живёт
+    /// в `World` и переиспользуется между вызовами.
+    ///
+    /// Рекурсивный вызов `for_each_pair` из `f` технически возможен
+    /// (хотя требует `unsafe` или передачи `World` через `RefCell`),
+    /// и он тоже безопасен: `mem::take` вынимает буфер локально, а
+    /// вложенный вызов получит `Vec::new()` (аллоцирует свой), потом
+    /// вернёт его. Внешний вызов не увидит внутренний буфер и вернёт
+    /// свой — никаких гонок, никакого UB.
+    ///
+    /// Все ранние `return` возвращают скретч обратно, чтобы следующая
+    /// итерация не потеряла capacity.
     pub fn for_each_pair<A, B, F>(&mut self, mut f: F)
     where
         A: Send + Sync + 'static,
@@ -151,15 +183,31 @@ impl World {
         let b_type = TypeId::of::<B>();
         assert_ne!(a_type, b_type, "for_each_pair requires distinct component types");
 
-        let entities: Vec<Entity> = match self.storages.get(&a_type) {
-            Some(s) => s
-                .as_any()
-                .downcast_ref::<ComponentStorage<A>>()
-                .map(|s| s.entity_list())
-                .unwrap_or_default(),
-            None => return,
-        };
+        // ИЗМЕНЕНО (#9): `mem::take` — вынимаем скретч локально.
+        // `self.scratch_entities` остаётся пустым `Vec::new()` на время
+        // работы метода; вернём заполненный в конце.
+        let mut entities = std::mem::take(&mut self.scratch_entities);
+        entities.clear();
 
+        // Заполняем буфер entity из A-стораджа без промежуточной
+        // аллокации (`entities_iter()` возвращает `slice::Iter`,
+        // `.copied()` даёт `u32`, `extend` пишет прямо в буфер).
+        if let Some(s) = self.storages.get(&a_type) {
+            if let Some(storage) = s.as_any().downcast_ref::<ComponentStorage<A>>() {
+                entities.extend(storage.entities_iter().copied());
+            }
+        }
+
+        if entities.is_empty() {
+            // A-сторадж пуст или отсутствует — работа сделана,
+            // возвращаем capacity-буфер в World.
+            self.scratch_entities = entities;
+            return;
+        }
+
+        // Raw pointers — обходим borrow checker, т.к. оба стораджа
+        // берутся из одной HashMap. Разные TypeId → разные Box →
+        // непересекающиеся регионы памяти.
         let a_ptr: *mut ComponentStorage<A> = self
             .storages
             .get_mut(&a_type)
@@ -173,20 +221,30 @@ impl World {
                 .downcast_ref::<ComponentStorage<B>>()
                 .map(|s| s as *const _)
                 .unwrap(),
-            None => return,
+            None => {
+                // B-стораджа нет — пересечения быть не может.
+                // Возвращаем скретч обратно в World.
+                self.scratch_entities = entities;
+                return;
+            }
         };
 
         // SAFETY: два разных TypeId → две разные Box-аллокации → два
-        // непересекающихся участка памяти. HashMap не модифицируется.
+        // непересекающихся участка памяти. HashMap (`self.storages`)
+        // не модифицируется во время цикла. `a_ptr` мутабельный, но
+        // `b_ptr` указывает на другой объект.
         unsafe {
             let a_store = &mut *a_ptr;
             let b_store = &*b_ptr;
-            for e in entities {
+            for &e in &entities {
                 if let (Some(a), Some(b)) = (a_store.get_mut(e), b_store.get(e)) {
                     f(e, a, b);
                 }
             }
         }
+
+        // ИЗМЕНЕНО (#9): возвращаем capacity-буфер в World.
+        self.scratch_entities = entities;
     }
 
     // ============================================================

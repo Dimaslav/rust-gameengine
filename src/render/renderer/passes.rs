@@ -146,20 +146,31 @@ pub(super) fn encode_csm_all(
     }
 }
 
+/// ИЗМЕНЕНО (#7): рендерит cube shadow maps для **всех** активных
+/// point-light теней, а не только для первой. `cube_count` ограничен
+/// `MAX_SHADOW_CUBES` сверху (значение приходит из `Renderer::render`).
+///
+/// Слоты нумеруются как `3 + cube * 6 + face`, что совпадает с
+/// нумерацией слоёв в `cube_shadow_texture` — слой `cube * 6 + face`.
 pub(super) fn encode_cube_shadow_all(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     draws: &[MeshDraw],
+    cube_count: u32,
 ) {
-    for face in 0..6u64 {
-        let slot_offset = ((3 + face) as u64 * r.shadow_pass_stride) as u32;
-        encode_shadow_pass(
-            r,
-            encoder,
-            draws,
-            &r.cube_shadow_face_views[face as usize],
-            slot_offset,
-        );
+    let cube_count = (cube_count as usize).min(MAX_SHADOW_CUBES);
+    for cube in 0..cube_count {
+        for face in 0..6 {
+            let slot = 3 + (cube * 6 + face) as u64;
+            let slot_offset = (slot * r.shadow_pass_stride) as u32;
+            encode_shadow_pass(
+                r,
+                encoder,
+                draws,
+                &r.cube_shadow_face_views[cube][face],
+                slot_offset,
+            );
+        }
     }
 }
 
@@ -233,14 +244,6 @@ pub(super) fn encode_decal_pass(
         return;
     }
 
-    // ИСПРАВЛЕНО: раньше здесь был Some(depth_stencil_attachment с
-    // gbuffer_depth_view), и в этом же pass'е та же depth-текстура
-    // читалась через decal_depth_bind_group. wgpu 25 валит валидацию:
-    //   "Current usage RESOURCE and new usage DEPTH_STENCIL_WRITE"
-    //   (DEPTH_STENCIL_WRITE — эксклюзивный, нельзя смешивать).
-    //
-    // Decal-шейдер сам делает всю depth-логику через textureLoad и
-    // discard, поэтому GPU depth-attachment ему не нужен. Убираем его.
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("decal_pass"),
         color_attachments: &[
@@ -586,9 +589,12 @@ pub(super) fn encode_bloom_prefilter(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     write_idx: usize,
+    use_taa: bool,
 ) {
     let mip0 = &r.sd.bloom_chain.mips[0];
-    let bg = &r.sd.bloom_chain.prefilter_bgs[write_idx];
+    let bg_idx = if use_taa { write_idx } else { 2 };
+    let bg = &r.sd.bloom_chain.prefilter_bgs[bg_idx];
+
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("bloom_prefilter"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -657,8 +663,9 @@ pub(super) fn encode_bloom_chain(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     write_idx: usize,
+    use_taa: bool,
 ) {
-    encode_bloom_prefilter(r, encoder, write_idx);
+    encode_bloom_prefilter(r, encoder, write_idx, use_taa);
     encode_bloom_downsample(r, encoder);
     encode_bloom_upsample(r, encoder);
 }
@@ -671,8 +678,11 @@ pub(super) fn encode_composite_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
     write_idx: usize,
+    use_taa: bool,
 ) {
-    let bg = &r.sd.composite_bgs[write_idx];
+    let bg_idx = if use_taa { write_idx } else { 2 };
+    let bg = &r.sd.composite_bgs[bg_idx];
+
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("composite_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -715,9 +725,10 @@ pub(super) fn encode_post_processing(
     encoder: &mut wgpu::CommandEncoder,
     swap_view: &wgpu::TextureView,
     write_idx: usize,
+    use_taa: bool,
 ) {
-    encode_bloom_chain(r, encoder, write_idx);
-    encode_composite_pass(r, encoder, write_idx);
+    encode_bloom_chain(r, encoder, write_idx, use_taa);
+    encode_composite_pass(r, encoder, write_idx, use_taa);
     encode_fxaa_pass(r, encoder, swap_view);
 }
 

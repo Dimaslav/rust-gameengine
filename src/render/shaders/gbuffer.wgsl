@@ -1,8 +1,9 @@
 // G-buffer pass. MRT: albedo, world-normal + linear-depth, emissive, motion.
 //
-// Motion = project(prev_P, prev_vp_unjit) - pixel_center_uv.
+// Motion = project(prev_P, prev_vp_unjit) - pixel_center_uv_unjit.
 // prev_vp_unjit — **unjittered** view-proj прошлого кадра.
-// pixel_center_uv = frag_coord.xy / screen_size.xy (без jitter'а).
+// pixel_center_uv_unjit = (frag_coord.xy - camera.near_far.zw) / screen_size,
+// где near_far.zw = jitter текущего кадра в пикселях.
 //
 // @invariant на @builtin(position) сохранён для совместимости с
 // потенциальным `depth_compare: Equal`. Текущий `make_gbuffer_pipeline`
@@ -15,6 +16,7 @@ struct Camera {
     view:           mat4x4<f32>,
     inv_view:       mat4x4<f32>,
     camera_pos:     vec4<f32>,
+    // xy = (near, far), zw = (jitter_x_px, jitter_y_px) текущего кадра.
     near_far:       vec4<f32>,
     prev_view_proj: mat4x4<f32>,
     screen_size:    vec4<f32>,
@@ -29,12 +31,6 @@ struct Material {
 
 struct Skeleton {
     joints: array<mat4x4<f32>, 64>,
-};
-
-struct Instance {
-    model:         mat4x4<f32>,
-    normal_matrix: mat4x4<f32>,
-    color:         vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -195,7 +191,15 @@ fn fs_main(
 
     let depth_norm = clamp(in.view_depth / camera.near_far.y, 0.0, 1.0);
 
-    let pixel_center_uv = in.frag_coord.xy / camera.screen_size.xy;
+    // ИСПРАВЛЕНО: `frag_coord` содержит jitter текущего кадра (камера
+    // проецируется jittered-матрицей), а `prev_view_proj` — unjittered.
+    // Раньше motion содержал паразитный jitter-сдвиг, и TAA сэмплила
+    // историю не в той субпозиции → изображение «тряслось» на
+    // субпиксель каждый кадр.
+    //
+    // near_far.zw хранит (jitter_x, jitter_y) в пикселях — вычитаем,
+    // чтобы получить unjittered UV текущего пикселя.
+    let pixel_center_uv = (in.frag_coord.xy - camera.near_far.zw) / camera.screen_size.xy;
     let prev_uv = project_to_uv(camera.prev_view_proj, in.prev_world_pos);
     let motion  = prev_uv - pixel_center_uv;
 

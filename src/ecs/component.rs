@@ -72,8 +72,28 @@ impl<T> ComponentStorage<T> {
         self.data.is_empty()
     }
 
-    /// Копия списка сущностей — нужно для for_each_pair (чтобы не держать
-    /// borrow на self во время итерации).
+    /// Ссылка на внутренний список entity без копирования.
+    ///
+    /// ИЗМЕНЕНО (#9): используется `World::for_each_pair` для заполнения
+    /// скретч-буфера — без промежуточной аллокации `Vec<Entity>`.
+    ///
+    /// Раньше здесь был `entity_list() -> Vec<Entity>` с `.clone()`,
+    /// который аллоцировал на каждый вызов `for_each_pair` (то есть на
+    /// каждый кадр в `MovementSystem::update`).
+    ///
+    /// Возвращаемый `slice::Iter` живёт ровно столько, сколько живёт
+    /// borrow `self`. Клонирование больше не нужно: caller сам решает,
+    /// куда сложить результат (в скретч-буфер World).
+    pub fn entities_iter(&self) -> std::slice::Iter<'_, Entity> {
+        self.entities.iter()
+    }
+
+    /// Оставлено для обратной совместимости внешнего API.
+    ///
+    /// **Внутри движка не используется** — `World::for_each_pair`
+    /// предпочитает `entities_iter()` + скретч-буфер. Метод сохранён
+    /// публичным, потому что `ComponentStorage` экспортируется из
+    /// `ecs::mod` и может использоваться извне.
     pub fn entity_list(&self) -> Vec<Entity> {
         self.entities.clone()
     }

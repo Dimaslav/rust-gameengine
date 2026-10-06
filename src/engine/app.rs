@@ -11,6 +11,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::ecs::{Entity, World};
 use crate::editor::gizmo::{self, GizmoMode};
+use crate::editor::picking::PickableSet;
 use crate::editor::palette::PaletteItem;
 use crate::editor::placement;
 use crate::editor::ui::{self as editor_ui, Stats, UiAssets, UiState};
@@ -55,15 +56,7 @@ pub trait Game: 'static {
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 
-    /// Сериализует game-specific состояние (например, `RpgState`) в
-    /// RON-строку. Возвращается при Save сцены; восстанавливается при
-    /// Load и при Undo/Redo через `load_game_state`.
-    ///
-    /// Default: `None` — сцена сохраняется без game-state.
     fn save_game_state(&self) -> Option<String> { None }
-
-    /// Восстанавливает game-specific состояние из строки, ранее
-    /// полученной из `save_game_state`.
     fn load_game_state(&mut self, _ron: &str) {}
 }
 
@@ -71,6 +64,19 @@ pub trait Game: 'static {
 struct Projectile { position: Vec3, velocity: Vec3, age: f32, max_age: f32, damage: f32 }
 
 struct PlaySnapshot {
+    /// ИЗМЕНЕНО (#14): `scene_ron` теперь содержит не только мир, но и
+    /// материалы + пути к текстурам (через `save_scene_with_assets_to_string`).
+    ///
+    /// Раньше здесь был `save_scene_to_string` — world-only. При restore
+    /// (`load_scene_from_str_full`) материалы и текстуры не откатывались:
+    /// если во время Play что-то их меняло (например, косвенно через
+    /// `dirty_materials` при неосторожном UI-клике или игровую логику),
+    /// после Stop редактор показывал бы «после»-состояние материалов.
+    ///
+    /// Теперь `restore_play_snapshot` идёт через
+    /// `load_scene_with_assets_from_str_full_with_ids` — материалы,
+    /// текстуры и `id_map` для remap выделения восстанавливаются вместе
+    /// с миром.
     scene_ron: String,
     saved_position: Vec3,
     selection: Vec<Entity>,
@@ -103,6 +109,9 @@ pub struct App<G: Game> {
     physics: PhysicsWorld,
     play_snapshot: Option<PlaySnapshot>,
     elevator_prev_state: HashMap<Entity, ElevatorState>,
+
+    /// ИЗМЕНЕНО (#3): кэш пикабельных entity на текущий кадр.
+    pickable: Option<PickableSet>,
 }
 
 impl<G: Game> Drop for App<G> {
@@ -150,10 +159,22 @@ impl<G: Game> App<G> {
             physics: PhysicsWorld::default(),
             play_snapshot: None,
             elevator_prev_state: HashMap::new(),
+            pickable: None,
         };
         let initial_postfx = app.editor.state.settings.postfx;
         app.game.apply_postfx(initial_postfx);
         app
+    }
+
+    fn ensure_pickable<'a>(
+        world: &World,
+        renderer: &Renderer,
+        slot: &'a mut Option<PickableSet>,
+    ) -> &'a PickableSet {
+        if slot.is_none() {
+            *slot = Some(PickableSet::build(world, renderer));
+        }
+        slot.as_ref().unwrap()
     }
 
     fn apply_camera_preset(&mut self, preset: u8) {
@@ -175,9 +196,19 @@ impl<G: Game> App<G> {
         log::info!("Camera preset {} applied", preset);
     }
 
+    /// ИЗМЕНЕНО (#14): используем `save_scene_with_assets_to_string`,
+    /// чтобы при restore материалы и текстуры откатились вместе с миром.
+    ///
+    /// Раньше здесь был `save_scene_to_string` — world-only. При
+    /// stop-play мир откатывался, а изменения `renderer.materials`,
+    /// сделанные во время Play (если были), оставались висеть.
     fn capture_play_snapshot(&mut self) -> PlaySnapshot {
-        let scene_ron = crate::scene::save_scene_to_string(&self.world, None)
-            .unwrap_or_else(|e| { log::error!("Failed to snapshot scene for Play: {}", e); String::new() });
+        let scene_ron = crate::scene::save_scene_with_assets_to_string(
+            &self.world, &self.renderer, None,
+        ).unwrap_or_else(|e| {
+            log::error!("Failed to snapshot scene for Play: {}", e);
+            String::new()
+        });
         let cam = self.game.camera();
         let camera_mode = cam.mode;
         let camera_pos = cam.first_person_pos;
@@ -195,19 +226,35 @@ impl<G: Game> App<G> {
         }
     }
 
+    /// ИЗМЕНЕНО (#14): используем
+    /// `load_scene_with_assets_from_str_full_with_ids`.
+    ///
+    /// `_with_ids` возвращает `id_map` (old_entity_id → new_entity),
+    /// который **обязателен** для remap выделения: `snap.selection`
+    /// хранит старые id — при `World::load` из RON они получают
+    /// новые id, и selection нужно пересобрать через map.
+    ///
+    /// Материалы и текстуры восстанавливаются из RON (см.
+    /// `capture_play_snapshot`), поэтому после Stop редактор видит
+    /// материалы в том виде, в каком они были на момент Play.
     fn restore_play_snapshot(&mut self, snap: PlaySnapshot) {
         if snap.scene_ron.is_empty() {
             log::error!("Play-in-Editor: empty snapshot, skipping restore");
             return;
         }
-        match crate::scene::load_scene_from_str_full(&snap.scene_ron) {
-            Ok((mut new_world, _spawn, id_map)) => {
+        match crate::scene::load_scene_with_assets_from_str_full_with_ids(
+            &snap.scene_ron, &mut self.renderer,
+        ) {
+            Ok((mut new_world, _spawn, _embedded_gs, id_map)) => {
                 new_world.sync_next_id();
                 self.world = new_world;
                 self.editor.state.selected = snap.selection.iter()
                     .filter_map(|old| id_map.get(old).copied()).collect();
-                log::info!("Play-in-Editor: world restored ({} entities, {} selected remapped)",
-                    self.world.len(), self.editor.state.selected.len());
+                log::info!(
+                    "Play-in-Editor: world restored ({} entities, {} selected remapped, \
+                     materials + textures from snapshot)",
+                    self.world.len(), self.editor.state.selected.len()
+                );
             }
             Err(e) => log::error!("Failed to restore world after Play: {}", e),
         }
@@ -347,7 +394,11 @@ impl<G: Game> App<G> {
 
         let origin = self.game.camera().position();
         let dir = self.game.camera().forward();
-        let aim_hit = crate::editor::picking::pick_ray(&self.world, &self.renderer, origin, dir);
+
+        let aim_hit = {
+            let cache = Self::ensure_pickable(&self.world, &self.renderer, &mut self.pickable);
+            crate::editor::picking::pick_ray_cached(&self.renderer, cache, origin, dir)
+        };
 
         let interact_dist = self.editor.state.play.interact_distance;
         self.editor.state.play.highlight = aim_hit.as_ref().and_then(|(e, d)| {
@@ -473,6 +524,74 @@ impl<G: Game> App<G> {
         particles::emit_burst(&mut self.particles, origin, params);
     }
 
+    fn load_textures_common(&mut self, linear: bool) {
+        let files = rfd::FileDialog::new()
+            .add_filter("Images", &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp",
+                "tif", "tiff", "tga", "dds", "hdr", "exr",
+                "ico", "pnm", "pbm", "pgm", "ppm", "qoi",
+                "ff", "farbfeld",
+            ])
+            .add_filter("All files", &["*"])
+            .pick_files();
+        let Some(paths) = files else { return; };
+
+        let mut loaded = 0usize;
+        let mut failed = 0usize;
+
+        for path in paths {
+            let base_name = path.file_stem().and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos()).unwrap_or(0);
+                    format!("tex_{}", now)
+                });
+
+            let mut final_name = base_name.clone();
+            let mut counter = 1u32;
+            while self.renderer.textures.contains_key(&final_name) {
+                final_name = format!("{}_{}", base_name, counter);
+                counter += 1;
+            }
+
+            let path_str = path.to_string_lossy().into_owned();
+
+            let result = if linear {
+                self.renderer.load_texture_linear(&final_name, &path_str)
+            } else {
+                self.renderer.load_texture(&final_name, &path_str)
+            };
+
+            match result {
+                Ok(()) => {
+                    let (w, h) = self.renderer.texture_size(&final_name).unwrap_or((0, 0));
+                    log::info!(
+                        "Loaded texture '{}' ({}×{}, {}) from {}",
+                        final_name, w, h,
+                        if linear { "linear" } else { "sRGB" },
+                        path.display()
+                    );
+                    loaded += 1;
+                }
+                Err(e) => {
+                    log::error!("Failed to load texture '{}': {}", path.display(), e);
+                    failed += 1;
+                }
+            }
+        }
+
+        if loaded + failed > 0 {
+            log::info!(
+                "Textures: {} loaded ({}), {} failed",
+                loaded,
+                if linear { "linear" } else { "sRGB" },
+                failed
+            );
+        }
+    }
+
     fn ensure_unique_material_for(&mut self, entity: Entity) -> Option<String> {
         let mh = self.world.get::<MaterialHandle>(entity).cloned()?;
         let current_name = mh.0;
@@ -507,30 +626,40 @@ impl<G: Game> App<G> {
         if self.projectiles.is_empty() { return; }
         let floor_y = self.editor.state.play.floor_y;
         let mut hits: Vec<(Vec3, Option<Entity>, f32, Vec3)> = Vec::new();
-        let mut alive: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
 
-        for mut p in self.projectiles.drain(..) {
-            p.age += dt;
-            if p.age >= p.max_age { continue; }
-            let prev = p.position;
-            p.position += p.velocity * dt;
-            let vel_dir = p.velocity.normalize_or_zero();
-            if p.position.y <= floor_y {
-                hits.push((Vec3::new(p.position.x, floor_y, p.position.z), None, p.damage, vel_dir));
-                continue;
-            }
-            let seg = p.position - prev;
-            let seg_len = seg.length();
-            if seg_len < 1e-5 { alive.push(p); continue; }
-            let dir = seg / seg_len;
-            if let Some((e, t)) = crate::editor::picking::pick_ray(&self.world, &self.renderer, prev, dir) {
-                if t <= seg_len {
-                    hits.push((prev + dir * t, Some(e), p.damage, vel_dir));
+        let projectiles = std::mem::take(&mut self.projectiles);
+        let mut alive: Vec<Projectile> = Vec::with_capacity(projectiles.len());
+
+        {
+            let cache = Self::ensure_pickable(&self.world, &self.renderer, &mut self.pickable);
+
+            for mut p in projectiles {
+                p.age += dt;
+                if p.age >= p.max_age { continue; }
+                let prev = p.position;
+                p.position += p.velocity * dt;
+                let vel_dir = p.velocity.normalize_or_zero();
+                if p.position.y <= floor_y {
+                    hits.push((Vec3::new(p.position.x, floor_y, p.position.z), None, p.damage, vel_dir));
                     continue;
                 }
+                let seg = p.position - prev;
+                let seg_len = seg.length();
+                if seg_len < 1e-5 { alive.push(p); continue; }
+                let dir = seg / seg_len;
+
+                if let Some((e, t)) =
+                    crate::editor::picking::pick_ray_cached(&self.renderer, cache, prev, dir)
+                {
+                    if t <= seg_len {
+                        hits.push((prev + dir * t, Some(e), p.damage, vel_dir));
+                        continue;
+                    }
+                }
+                alive.push(p);
             }
-            alive.push(p);
         }
+
         self.projectiles = alive;
 
         for (point, target, dmg, vel_dir) in hits {
@@ -558,7 +687,13 @@ impl<G: Game> App<G> {
     fn redraw(&mut self, elwt: &ActiveEventLoop) {
         self.time.tick();
         self.input.tick_begin_frame();
-        let dt_smooth = self.time.delta_smooth;
+
+        self.pickable = None;
+
+        // ИЗМЕНЕНО (#11): сырой (клампленный) `delta` для физики и
+        // геймплея. `delta_smooth` — только для UI (Stats).
+        let dt = self.time.delta;
+
         self.world.update_events();
 
         if self.input.key_pressed(KeyCode::F9) {
@@ -610,18 +745,18 @@ impl<G: Game> App<G> {
             self.input.editor_flying = want_fly;
         }
 
-        let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt_smooth);
+        let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt);
         if !continue_running { elwt.exit(); return; }
 
         self.update_elevator_ding();
-        self.physics.step(&mut self.world, dt_smooth);
+        self.physics.step(&mut self.world, dt);
 
         if self.editor.state.play.active {
             self.input.editor_captured = false;
-            self.update_player(dt_smooth);
+            self.update_player(dt);
         } else if self.editor.state.flying {
             self.input.editor_captured = true;
-            self.update_fly(dt_smooth);
+            self.update_fly(dt);
         } else {
             let (mx, my) = self.input.mouse_pos;
             self.input.editor_captured = self.editor.state.gizmo.drag.is_some() || !self.in_viewport(mx, my);
@@ -640,8 +775,8 @@ impl<G: Game> App<G> {
             } else { self.editor.state.palette.preview_pos = None; }
         } else { self.editor.state.palette.preview_pos = None; }
 
-        self.update_particles(dt_smooth);
-        self.update_projectiles(dt_smooth);
+        self.update_particles(dt);
+        self.update_projectiles(dt);
 
         if matches!(self.editor.state.pending_action, Some(EditorAction::TogglePlay)) {
             self.editor.state.pending_action = None;
@@ -711,8 +846,9 @@ impl<G: Game> App<G> {
                 let mat = self.renderer.materials.get(&mh.0)?.clone();
                 Some((mh.0.clone(), mat))
             });
-        let mut texture_list: Vec<(String, u32, u32)> = self.renderer.textures.iter()
-            .map(|(n, t)| (n.clone(), t.size.0, t.size.1)).collect();
+
+        let mut texture_list: Vec<(String, u32, u32, bool)> = self.renderer.textures.iter()
+            .map(|(n, t)| (n.clone(), t.size.0, t.size.1, t.is_srgb)).collect();
         texture_list.sort_by(|a, b| a.0.cmp(&b.0));
 
         let assets = UiAssets {
@@ -720,10 +856,6 @@ impl<G: Game> App<G> {
             texture_list: &texture_list, selected_material,
         };
 
-        // ИСПРАВЛЕНО: pre-UI snapshot сцены теперь снимается без
-        // game_state — game-state будет приложен в момент `push`,
-        // отдельным аргументом. Это позволяет сохранить
-        // «до»-состояние мира без лишней сериализации game_state.
         let pre_ui_undo_snapshot: Option<String> = if self.editor.state.undo.can_push_now() {
             crate::scene::save_scene_with_assets_to_string(&self.world, &self.renderer, None).ok()
         } else { None };
@@ -731,6 +863,19 @@ impl<G: Game> App<G> {
         let raw_input = self.editor.egui_state.take_egui_input(&*self.window);
         let lod_counts = self.game.lod_stats();
 
+        // ИЗМЕНЕНО (#19): `sel_triangles` / `sel_vertices` считаются по
+        // **исходному** мешу (`MeshHandle` без `__lod*`-суффикса). Это
+        // LOD0, а не то, что реально рисуется в текущем кадре.
+        //
+        // Почему: реальный LOD выбирается в `Game::collect_draws` per-frame
+        // (distance-based), и на момент построения `Stats` мы ещё не
+        // знаем результата (draws собираются позже). Показывать «сырые»
+        // размеры исходного меша — осмысленная метрика («сколько
+        // полигонов в оригинале»), но подпись должна явно говорить
+        // про LOD0, чтобы не путать с реальной нагрузкой.
+        //
+        // В `ui.rs::draw_stats_section` лейблы изменены на
+        // "Triangles (LOD0)" / "Vertices (LOD0)" с пояснением в hover.
         let mut sel_triangles = 0usize;
         let mut sel_vertices = 0usize;
         for &e in &self.editor.state.selected {
@@ -751,10 +896,6 @@ impl<G: Game> App<G> {
             frame_time_max_ms: self.time.frame_time_max_ms(),
             hitches: self.time.hitches,
             entities: self.world.len(),
-            // ИСПРАВЛЕНО: значения из предыдущего кадра — реальные
-            // draws/instances текущего кадра известны только после
-            // `renderer.render()` ниже. Отставание на 1 кадр
-            // визуально не заметно.
             draws: self.renderer.last_draw_count,
             instances: self.renderer.last_instance_count,
             dir_lights: dir_lights_pre.len(),
@@ -791,9 +932,6 @@ impl<G: Game> App<G> {
             self.editor.egui_renderer.update_texture(&self.renderer.device, &self.renderer.queue, *id, image_delta);
         }
 
-        // ИСПРАВЛЕНО: undo push теперь с game_state. Раньше game-state
-        // (золото, ключи, квесты) не сохранялся, и после Ctrl+Z мир
-        // откатывался, а HUD оставался «после»-состоянием.
         if self.editor.state.undo_requested {
             self.editor.state.undo_requested = false;
             let gs = self.game.save_game_state();
@@ -873,7 +1011,6 @@ impl<G: Game> App<G> {
             });
         }
 
-        // --- Сбор decals ---
         let mut decal_draws: Vec<DecalDraw> = Vec::new();
         for &e in self.world.entities() {
             let Some(dec) = self.world.get::<Decal>(e) else { continue; };
@@ -961,12 +1098,6 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Дублирует выделенные entity, копируя **все** компоненты.
-    ///
-    /// ИСПРАВЛЕНО (в этой ревизии): смещение `+1.0 X` применяется только
-    /// к «корневым» сущностям копируемого подмножества. Раньше offset
-    /// применялся ко всем — и ребёнок получал его дважды: один раз
-    /// через свой Transform, второй — через нового Parent.
     fn duplicate_selected(&mut self) {
         use crate::game::components::{
             AnimationPlayer, Chase, Health, Interactable, MaterialHandle, MeshHandle, Name,
@@ -981,8 +1112,6 @@ impl<G: Game> App<G> {
             .filter(|&e| self.world.entities().contains(&e)).collect();
         if originals.is_empty() { return; }
 
-        // Множество выделенных entity — для определения «является ли
-        // Parent данной сущности частью копируемого подмножества».
         let originals_set: std::collections::HashSet<Entity> =
             originals.iter().copied().collect();
 
@@ -1212,14 +1341,6 @@ impl<G: Game> App<G> {
                 let mut old_to_new: HashMap<u32, Entity> = HashMap::new();
                 let mut new_selected: Vec<Entity> = Vec::with_capacity(snaps.len());
 
-                // ИСПРАВЛЕНО: раньше offset применялся только к
-                // сущностям с `parent == None`. Но если `Parent`
-                // ссылался на entity, которой в буфере нет — после
-                // вставки родителя тоже не будет, и копия окажется
-                // «сиротой» с локальными координатами без сдвига.
-                // Теперь для сирот вычисляем world-матрицу родителя
-                // (он мог остаться в мире), «запекаем» её в локальный
-                // Transform и добавляем offset.
                 let snap_ids: std::collections::HashSet<u32> = snaps.iter()
                     .enumerate()
                     .map(|(idx, s)| s.entity_id.unwrap_or(idx as u32))
@@ -1232,7 +1353,6 @@ impl<G: Game> App<G> {
                         .unwrap_or(false);
 
                     if !parent_in_buffer {
-                        // Мировая матрица старого родителя, если он ещё в мире.
                         let mut parent_world = glam::Mat4::IDENTITY;
                         if let Some(old_parent) = snap.parent {
                             let pe = old_parent as Entity;
@@ -1254,9 +1374,6 @@ impl<G: Game> App<G> {
                             t.scale = s.to_array();
                         }
 
-                        // Родителя в буфере нет — после вставки его не
-                        // будет, копия становится корнем. Сбрасываем
-                        // `parent` в снапшоте.
                         snap.parent = None;
                     }
 
@@ -1267,9 +1384,6 @@ impl<G: Game> App<G> {
                     new_selected.push(e);
                 }
                 for (idx, &new_e) in new_selected.iter().enumerate() {
-                    // Восстанавливаем Parent только для тех, чей
-                    // родитель есть в буфере — `old_to_new` содержит
-                    // исключительно вставленные entity.
                     let old_parent = snaps[idx].parent;
                     if let Some(op) = old_parent {
                         if let Some(&new_parent) = old_to_new.get(&op) {
@@ -1467,49 +1581,8 @@ impl<G: Game> App<G> {
                 log::info!("Instantiated prefab '{}' ({} entities) at ({:.2}, {:.2}, {:.2})",
                     path.display(), n, spawn_pos.x, spawn_pos.y, spawn_pos.z);
             }
-            EditorAction::LoadTextures => {
-                let files = rfd::FileDialog::new()
-                    .add_filter("Images", &[
-                        "png", "jpg", "jpeg", "gif", "webp", "bmp",
-                        "tif", "tiff", "tga", "dds", "hdr", "exr",
-                        "ico", "pnm", "pbm", "pgm", "ppm", "qoi",
-                        "ff", "farbfeld",
-                    ])
-                    .add_filter("All files", &["*"])
-                    .pick_files();
-                let Some(paths) = files else { return; };
-                let mut loaded = 0usize;
-                let mut failed = 0usize;
-                for path in paths {
-                    let base_name = path.file_stem().and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_nanos()).unwrap_or(0);
-                            format!("tex_{}", now)
-                        });
-                    let mut final_name = base_name.clone();
-                    let mut counter = 1u32;
-                    while self.renderer.textures.contains_key(&final_name) {
-                        final_name = format!("{}_{}", base_name, counter);
-                        counter += 1;
-                    }
-                    let path_str = path.to_string_lossy().into_owned();
-                    match self.renderer.load_texture(&final_name, &path_str) {
-                        Ok(()) => {
-                            let (w, h) = self.renderer.texture_size(&final_name).unwrap_or((0, 0));
-                            log::info!("Loaded texture '{}' ({}×{}) from {}", final_name, w, h, path.display());
-                            loaded += 1;
-                        }
-                        Err(e) => {
-                            log::error!("Failed to load texture '{}': {}", path.display(), e);
-                            failed += 1;
-                        }
-                    }
-                }
-                if loaded + failed > 0 { log::info!("Textures: {} loaded, {} failed", loaded, failed); }
-            }
+            EditorAction::LoadTextures => self.load_textures_common(false),
+            EditorAction::LoadTexturesLinear => self.load_textures_common(true),
             EditorAction::RemoveTexture(name) => {
                 if self.renderer.remove_texture(&name) { log::info!("Removed texture '{}'", name); }
                 else { log::warn!("Texture '{}' not found", name); }

@@ -353,10 +353,14 @@ impl DemoGame {
                 bloom_strength: 0.6,
                 bloom_knee: 0.5,
                 bloom_radius: 1.0,
-                exposure: 1.0,
+                // ИСПРАВЛЕНО: было 1.0 — картинка была вымыта. Теперь
+                // 0.6: AgX + новый ambient дают нормальный контраст.
+                exposure: 0.6,
                 ssao_strength: 0.8,
                 ssao_radius: 0.6,
-                ibl_strength: 0.35,
+                // ИСПРАВЛЕНО: было 0.35 — слишком сильная полусферная
+                // подсветка от IBL. 0.15 даёт мягкий fill без забеления.
+                ibl_strength: 0.15,
                 debug_view: DebugView::Final,
                 fxaa_strength: 1.0,
                 fog_color: [0.55, 0.62, 0.72],
@@ -374,7 +378,10 @@ impl DemoGame {
                 lod_distances: [30.0, 80.0, 200.0, 500.0],
                 taa_strength: 1.0,
                 taa_sharpening: 0.1,
-                volumetric_density: 0.005,
+                // ИСПРАВЛЕНО: было 0.005 (и раньше 0.025). При far = 200
+                // это давало scattering ≈ 1.0 — туман забеливал сцену.
+                // 0.001 — лёгкая дымка на горизонте без потери деталей.
+                volumetric_density: 0.001,
                 volumetric_scattering: 0.4,
                 volumetric_phase_g: 0.6,
             },
@@ -531,7 +538,14 @@ impl Game for DemoGame {
                 let e = world.spawn();
                 world.insert(e, Name("Sun".into()));
                 world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
-                world.insert(e, DirectionalLight::sun());
+                // ИСПРАВЛЕНО: было DirectionalLight::sun() с intensity = 1.2.
+                // Сцена выглядела плоско — солнце не давало выразительных
+                // хайлайтов. 3.0 даёт нормальный динамический диапазон
+                // (небо ~1.0, освещённые поверхности ~2-3, хайлайты ~5-10),
+                // AgX их хорошо раскладывает.
+                let mut sun = DirectionalLight::sun();
+                sun.intensity = 3.0;
+                world.insert(e, sun);
             }
             {
                 let e = world.spawn();
@@ -821,7 +835,10 @@ impl Game for DemoGame {
             .collect()
     }
 
-    fn ambient(&self) -> [f32; 3] { [0.15, 0.17, 0.22] }
+    // ИСПРАВЛЕНО: было [0.15, 0.17, 0.22] — ambient + IBL вымывали
+    // сцену. Теперь 0.03: тени становятся тёмными (высокий контраст),
+    // но не чёрными, потому что IBL = 0.15 добавляет полусферный fill.
+    fn ambient(&self) -> [f32; 3] { [0.03, 0.035, 0.05] }
     fn postfx(&self) -> PostFx { self.postfx }
     fn camera(&self) -> &Camera3D { &self.camera }
     fn camera_mut(&mut self) -> &mut Camera3D { &mut self.camera }

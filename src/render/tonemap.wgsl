@@ -1,12 +1,19 @@
 // Tonemap + post-processing финал.
 //
-// Заменяет устаревший ACES (Narkowicz 2015) на AgX (Sobotka 2022):
-// AgX лучше держит highlights, меньше «orange-teal» сдвига и заметно
-// естественнее по восприятию.
+// AgX (Sobotka 2022, "Minimal AgX").
 //
-// Также добавлена правильная хроматическая аберрация (radial shift
-// ∝ uv.r², а не по обеим осям) и film grain через 3D-hash-шум,
-// а не per-pixel hash (который «залипает» на статичной картинке).
+// ИСПРАВЛЕНО: в оригинальном шейдере была потеряна нормализация.
+// Правильная формула:
+//
+//     x' = (log2(x) − AGX_MIN_EV) / (AGX_MAX_EV − AGX_MIN_EV)
+//
+// В старой версии было:
+//
+//     x' = log2(x) + ( −AGX_MIN_EV / (AGX_MAX_EV − AGX_MIN_EV) )
+//
+// Также убран post-AgX contrast-boost: он жёстко клипал значения
+// выше 0.9 в 1.0, обрезая highlight rolloff — ради которого AgX
+// и используется.
 
 @group(0) @binding(0) var t_hdr: texture_2d<f32>;
 @group(0) @binding(1) var t_bloom: texture_2d<f32>;
@@ -46,15 +53,6 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 // ============================================================
 // AgX tonemap (Sobotka 2022, "Minimal AgX")
 // ============================================================
-//
-// AgX работает в специфическом «rec2020 + log2» пространстве:
-//   1. RGB → AgX matrix (линейный)
-//   2. log2 + bias
-//   3. Sigmoid (полином)
-//   4. Обратно в linear
-//
-// Матрицы и коэффициенты — из открытой референсной реализации
-// (https://iolite-engine.com/blog_posts/minimal_agx_implementation).
 
 const AGX_MAT_IN: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>( 0.842479062253094,  0.0423282422610123, 0.0423756549057051),
@@ -73,8 +71,6 @@ const AGX_MAX_EV: f32 = 4.026069;
 
 fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
     // Полиномиальная аппроксимация sigmoid из AgX.
-    // Точная реализация использует LUT, но эта аппроксимация
-    // визуально неотличима и не требует дополнительных ресурсов.
     let x2 = x * x;
     let x4 = x2 * x2;
     return 15.5 * x4 * x2
@@ -89,8 +85,13 @@ fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
 fn agx(x: vec3<f32>) -> vec3<f32> {
     var v = AGX_MAT_IN * x;
 
-    // Log2 с bias + clamp в EV-диапазон.
-    v = clamp(log2(max(v, vec3<f32>(1e-10))) + vec3<f32>(-AGX_MIN_EV / (AGX_MAX_EV - AGX_MIN_EV)), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Правильная нормализация AgX.
+    let log_v = log2(max(v, vec3<f32>(1e-10)));
+    v = clamp(
+        (log_v - vec3<f32>(AGX_MIN_EV)) / (AGX_MAX_EV - AGX_MIN_EV),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
 
     // Sigmoid.
     v = agx_default_contrast_approx(v);
@@ -112,8 +113,6 @@ fn hash13(p3_in: vec3<f32>) -> f32 {
 }
 
 // Простой 3D value noise для film grain.
-// В отличие от per-pixel hash, привязан к экранной позиции и времени,
-// поэтому «дышит» органично и не мерцает на статике.
 fn film_grain(uv: vec2<f32>, t: f32) -> f32 {
     let p = vec3<f32>(uv * 1024.0, t);
     return hash13(p) * 2.0 - 1.0;
@@ -128,15 +127,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var uv = in.uv;
 
     // --- Хроматическая аберрация ---------------------------------
-    // Правильная: смещение по радиусу от центра экрана, ∝ r².
-    // Было: смещение по обеим осям одновременно (не физично).
     let chromatic = params.effects.z;
     var hdr: vec3<f32>;
     if (chromatic > 0.0001) {
         let center = vec2<f32>(0.5, 0.5);
         let to_center = uv - center;
         let r2 = dot(to_center, to_center);
-        // Сдвиг: на краю экрана ~ 0.5 * strength пикселя (примерно).
         let shift = chromatic * r2 * 0.004;
         let dir = normalize(to_center + vec2<f32>(1e-6, 1e-6));
 
@@ -157,8 +153,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     hdr = hdr * params.values.y;
 
     // --- AgX tonemap --------------------------------------------
-    // Применяем сразу — AgX работает с любым HDR.
-    // sRGB-энкодинг делает сам GPU (LDR_FORMAT = Rgba8UnormSrgb).
+    // ИСПРАВЛЕНО: убран post-AgX contrast-boost. Он делал
+    //   out = 0.5 + (out - 0.5) * 1.25
+    // что для out = 0.9 давало 1.0, а для out = 0.95 → 1.0625 → clamp → 1.0.
+    // Это убивало highlight rolloff AgX и превращало светлые части
+    // сцены в чистый белый. AgX сам по себе имеет правильную кривую.
     var out_rgb = agx(max(hdr, vec3<f32>(0.0)));
 
     // --- Vignette ------------------------------------------------
@@ -173,10 +172,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Film grain (в perceptual sRGB пространстве) ------------
     let grain = params.effects.y;
     if (grain > 0.0001) {
-        let t = floor(params.values.z * 24.0); // 24 fps — кинематографично
+        let t = floor(params.values.z * 24.0);
         let g = film_grain(uv, t);
-        // Модулируем зерно по яркости: тени шумят сильнее,
-        // highlights — меньше (как в реальной плёнке).
         let luma = dot(out_rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
         let grain_mod = mix(1.0, 0.4, luma);
         out_rgb = clamp(out_rgb + g * grain * 0.08 * grain_mod, vec3<f32>(0.0), vec3<f32>(1.0));

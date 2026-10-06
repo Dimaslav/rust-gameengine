@@ -11,6 +11,21 @@ pub struct Texture {
     /// что их не нужно перезагружать при load сцены — они создаются
     /// при старте движка.
     pub source_path: Option<String>,
+    /// ИЗМЕНЕНО (#8): была ли текстура создана как sRGB (`Rgba8UnormSrgb`)
+    /// или linear (`Rgba8Unorm`).
+    ///
+    /// sRGB-текстуры: albedo (base color), emissive, любые «цветные»
+    /// картинки, отображающие воспринимаемое (гамма-корректированное)
+    /// значение.
+    ///
+    /// Linear-текстуры: normal maps, metallic-roughness маски, AO,
+    /// height/displacement, маски прозрачности. Их значения — это
+    /// физические величины или векторы, а не «цвет».
+    ///
+    /// Раньше поле отсутствовало, и любая текстура, загруженная через
+    /// `Assets → Load Texture(s)`, шла как sRGB. Для normal/MR это давало
+    /// двойную гамма-коррекцию.
+    pub is_srgb: bool,
 }
 
 impl Texture {
@@ -26,6 +41,7 @@ impl Texture {
         Self::from_rgba(device, queue, layout, &img, width, height, label)
     }
 
+    /// Загрузка sRGB-текстуры из файла (albedo, emissive).
     pub fn from_file(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -36,7 +52,27 @@ impl Texture {
         let img = image::load_from_memory(&bytes)?.to_rgba8();
         let (width, height) = img.dimensions();
         let mut tex = Self::from_rgba(device, queue, layout, &img, width, height, path)?;
-        // Запоминаем путь — понадобится для сериализации сцены.
+        tex.source_path = Some(path.to_string());
+        Ok(tex)
+    }
+
+    /// ИЗМЕНЕНО (#8): загрузка linear-текстуры из файла (normal map,
+    /// metallic-roughness, AO, height, маски).
+    ///
+    /// Отличие от `from_file` — только формат GPU-текстуры:
+    /// `Rgba8Unorm` вместо `Rgba8UnormSrgb`. Это убирает аппаратное
+    /// sRGB → linear декодирование при сэмплировании, из-за которого
+    /// normal maps и MR-маски раньше трактовались неверно.
+    pub fn from_file_linear(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        path: &str,
+    ) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let img = image::load_from_memory(&bytes)?.to_rgba8();
+        let (width, height) = img.dimensions();
+        let mut tex = Self::from_rgba_linear(device, queue, layout, &img, width, height, path)?;
         tex.source_path = Some(path.to_string());
         Ok(tex)
     }
@@ -117,11 +153,6 @@ impl Texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        // ИСПРАВЛЕНО: был Nearest/Nearest/Nearest, из-за чего decals
-        // (единственный потребитель `tex.sampler` напрямую) выглядели
-        // блочно при растяжении. Repeat по U/V — потому что для decals
-        // часто нужен тайлинг; для материалов это неважно, там свой
-        // sampler из SamplerDesc.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("texture_sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -155,6 +186,7 @@ impl Texture {
             bind_group,
             size: (width, height),
             source_path: None,
+            is_srgb: srgb,
         })
     }
 

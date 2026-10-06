@@ -1,6 +1,17 @@
 //! Picking: луч → BVH-accelerated raycast по треугольникам, box select.
+//!
+//! Две точки входа:
+//!
+//! * `pick_ray` — простой линейный обход World. Строит world-матрицы и
+//!   bounding-сферы заново на каждый вызов. Используется в редких
+//!   контекстах (клик по вьюпорту, обработка `E` в DemoGame).
+//!
+//! * `PickableSet` + `pick_ray_cached` — снимок «пикабельного» состояния
+//!   мира. Строится **один раз на кадр** и переиспользуется всеми
+//!   per-frame вызовами (`update_player` — прицеливание,
+//!   `update_projectiles` — по разу на каждый снаряд).
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use crate::ecs::{Entity, World};
 use crate::game::components::MeshHandle;
@@ -22,38 +33,108 @@ pub fn pick_entity(
     pick_ray(world, renderer, origin, dir).map(|(e, _)| e)
 }
 
-/// Возвращает (entity, t_world) — ближайшее попадание луча.
+/// Простой raycast по всему World.
 ///
-/// `t_world` — расстояние в мировых единицах вдоль `dir` (который
-/// должен быть нормализован). Это позволяет использовать результат
-/// для сравнения с `interact_distance` / `gun_range`.
+/// Строит `PickableSet` «на лету» и делегирует в `pick_ray_cached`.
+/// Для per-frame вызовов используйте `PickableSet::build` + `pick_ray_cached`
+/// напрямую — иначе world-матрицы и bounding-сферы будут пересчитаны
+/// заново на каждый вызов.
 pub fn pick_ray(
     world: &World,
     renderer: &Renderer,
     origin: Vec3,
     dir: Vec3,
 ) -> Option<(Entity, f32)> {
+    let cache = PickableSet::build(world, renderer);
+    pick_ray_cached(renderer, &cache, origin, dir)
+}
+
+// ============================================================
+// Кэш пикабельных entity
+// ============================================================
+
+/// Снимок «пикабельного» состояния мира.
+///
+/// Содержит по одной записи на каждую entity с `MeshHandle`, у которой
+/// меш имеет хотя бы один треугольник. Каждая запись хранит:
+///   * саму `Entity` (чтобы вернуть её из `pick_ray_cached`),
+///   * имя меша (для поиска в `Renderer::meshes` — BVH и triangles),
+///   * запечённую world-матрицу (с учётом Parent-цепочки),
+///   * bounding sphere (центр + радиус) в world-space.
+///
+/// Раньше `pick_ray` пересчитывал `world_matrix` и `world_bounds` для
+/// каждой entity на каждый вызов. При прицеливании в `update_player`
+/// и обстреле в `update_projectiles` это давало несколько O(n)-проходов
+/// с обходом Parent-цепочек в кадр. Кэш устраняет дублирующиеся расчёты.
+pub struct PickableSet {
+    entries: Vec<PickableEntry>,
+}
+
+struct PickableEntry {
+    entity: Entity,
+    mesh_name: String,
+    model: Mat4,
+    center: Vec3,
+    radius: f32,
+}
+
+impl PickableSet {
+    /// Снимок World + Renderer на текущий момент.
+    pub fn build(world: &World, renderer: &Renderer) -> Self {
+        let mut entries = Vec::new();
+
+        for &e in world.entities() {
+            let Some(mh) = world.get::<MeshHandle>(e) else { continue };
+            let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
+            // Пустой набор треугольников = BVH пуст → pick всё равно
+            // не сработает. Проверяем напрямую, чтобы не триггерить
+            // ленивое построение BVH впустую (`Mesh::bvh()` строит
+            // `OnceLock` при первом обращении).
+            if mesh.triangles.is_empty() {
+                continue;
+            }
+
+            let model = crate::game::world_matrix(world, e);
+            let (center, radius) = mesh.world_bounds(&model);
+
+            entries.push(PickableEntry {
+                entity: e,
+                mesh_name: mh.0.clone(),
+                model,
+                center,
+                radius,
+            });
+        }
+
+        Self { entries }
+    }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+}
+
+/// Raycast по заранее построенному `PickableSet`.
+///
+/// Семантически эквивалентна `pick_ray`, но не пересчитывает
+/// world-матрицы и bounding-сферы.
+pub fn pick_ray_cached(
+    renderer: &Renderer,
+    cache: &PickableSet,
+    origin: Vec3,
+    dir: Vec3,
+) -> Option<(Entity, f32)> {
     let mut best: Option<(Entity, f32)> = None;
 
-    for &e in world.entities() {
-        let Some(mh) = world.get::<MeshHandle>(e) else { continue };
-        let Some(mesh) = renderer.meshes.get(&mh.0) else { continue };
-        // Ленивое построение BVH: первый raycast по этому мешу
-        // запустит Bvh::build, дальше результат закэширован.
-        if mesh.bvh().is_empty() {
+    for entry in &cache.entries {
+        // Broad phase — bounding sphere.
+        if ray_sphere_hit(origin, dir, entry.center, entry.radius).is_none() {
             continue;
         }
 
-        let model = crate::game::world_matrix(world, e);
-
-        // Broad phase — bounding sphere.
-        let (center, radius) = mesh.world_bounds(&model);
-        let Some(_) = ray_sphere_hit(origin, dir, center, radius) else {
-            continue;
-        };
+        let Some(mesh) = renderer.meshes.get(&entry.mesh_name) else { continue };
 
         // Переводим луч в локальное пространство меша.
-        let inv_model = model.inverse();
+        let inv_model = entry.model.inverse();
         let local_o = inv_model.transform_point3(origin);
         let local_d_unnorm = inv_model.transform_vector3(dir);
         let local_d_len = local_d_unnorm.length();
@@ -70,7 +151,7 @@ pub fn pick_ray(
         {
             let t_world = t_local / local_d_len;
             if best.map_or(true, |(_, bt)| t_world < bt) {
-                best = Some((e, t_world));
+                best = Some((entry.entity, t_world));
             }
         }
     }

@@ -1,5 +1,7 @@
 //! PhysicsWorld: пошаговая симуляция.
 
+use std::collections::HashSet;
+
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
@@ -13,13 +15,36 @@ const CONTACT_SLOP: f32 = 0.001;
 const BAUMGARTE: f32 = 0.2;
 const MAX_LINEAR_VELOCITY: f32 = 500.0;
 const VELOCITY_ITERATIONS: u32 = 4;
-const MAX_DT: f32 = 0.05;
+
+/// ИЗМЕНЕНО (#20): максимальный шаг физики. Всё, что медленнее —
+/// «замедление времени» вместо «физического взрыва».
+///
+/// **Публичная константа**, потому что `engine::time::MAX_DELTA`
+/// теперь ссылается на неё. Раньше было два независимых `0.05`
+/// (здесь и в `time.rs`), синхронизированных комментарием. Если
+/// поменять здесь — time подхватит автоматически, компилятор
+/// проследит.
+///
+/// `time.rs` клампит свой `delta` этой же величиной, чтобы движок
+/// не получал `dt` больше, чем физика может обработать за один шаг.
+/// 0.05 s = 20 FPS. Всё медленнее — «замедляет» игровое время.
+pub const MAX_DT: f32 = 0.05;
 
 pub struct PhysicsWorld {
     pub gravity: Vec3,
     pub enabled: bool,
     pub last_broad_pairs: usize,
     pub last_contacts: usize,
+
+    /// ИЗМЕНЕНО (#4): entity, для которых в прошлом кадре было
+    /// залогировано предупреждение «RigidBody + Parent → не симулируется».
+    ///
+    /// Раньше `collect_states` писал `log::debug!` на каждую такую entity
+    /// **каждый кадр**. В dev-сборке это давало до N×60 строк/сек спама,
+    /// в release — молчание. Теперь: `log::warn!` один раз на entity,
+    /// с автоматическим сбросом, когда entity перестаёт попадать
+    /// в категорию (убрали Parent или RigidBody).
+    warned_parent_bodies: HashSet<Entity>,
 }
 
 impl Default for PhysicsWorld {
@@ -29,6 +54,7 @@ impl Default for PhysicsWorld {
             enabled: true,
             last_broad_pairs: 0,
             last_contacts: 0,
+            warned_parent_bodies: HashSet::new(),
         }
     }
 }
@@ -62,7 +88,12 @@ impl PhysicsWorld {
         if !self.enabled || dt <= 0.0 { return; }
         let dt = dt.min(MAX_DT);
 
-        let mut states = collect_states(world);
+        // ИЗМЕНЕНО (#4): `collect_states` теперь возвращает и список
+        // пропущенных entity (RigidBody + Parent). Логируем их один
+        // раз на entity через `warn_skipped_bodies`.
+        let (mut states, skipped) = collect_states(world);
+        self.warn_skipped_bodies(&skipped);
+
         if states.is_empty() {
             self.last_broad_pairs = 0;
             self.last_contacts = 0;
@@ -152,19 +183,58 @@ impl PhysicsWorld {
         // 7. Записать обратно в ECS.
         write_back(world, &states);
     }
+
+    /// ИЗМЕНЕНО (#4): единожды логируем каждую entity, которую физика
+    /// пропускает из-за наличия `Parent`. Множество `warned_parent_bodies`
+    /// полностью перезаписывается текущим списком — если entity
+    /// перестала быть «Parent + RigidBody», она исчезнет из множества
+    /// и при следующем появлении снова получит одно предупреждение.
+    fn warn_skipped_bodies(&mut self, skipped: &[Entity]) {
+        let now: HashSet<Entity> = skipped.iter().copied().collect();
+        for &e in &now {
+            if !self.warned_parent_bodies.contains(&e) {
+                log::warn!(
+                    "Physics: entity #{} has both RigidBody (non-static) and \
+                     Parent — entity is NOT simulated. Parent-space dynamics \
+                     is unsupported: Transform.position is parent-local, and \
+                     gravity in a rotated parent frame would be wrong. \
+                     Remove Parent to enable simulation, or remove RigidBody \
+                     if the entity is meant to be driven by a parent system \
+                     (e.g. SlidingDoor).",
+                    e
+                );
+            }
+        }
+        self.warned_parent_bodies = now;
+    }
 }
 
-fn collect_states(world: &World) -> Vec<BodyState> {
+/// ИЗМЕНЕНО (#4): возвращает также список entity, которые **хотели**
+/// бы симулироваться (RigidBody Dynamic/Kinematic), но пропущены
+/// из-за наличия `Parent`.
+///
+/// `Static` тела мы не считаем «пропущенными» — они и так не двигаются,
+/// `Parent` для них нормален (например, статичная деталь на движущейся
+/// платформе — но тогда она двигается через `world_matrix`, а не через
+/// физику).
+fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     for &e in world.entities() {
         let Some(rb) = world.get::<RigidBody>(e).copied() else { continue };
         let Some(col) = world.get::<Collider>(e).copied() else { continue };
 
         if world.get::<Parent>(e).is_some() {
-            log::debug!(
-                "Physics: entity #{} имеет Parent — пропускаем (симуляция в мире не поддерживается)",
-                e
-            );
+            // ИЗМЕНЕНО (#4): молчаливый `continue` заменён сбором
+            // в `skipped`. Логирование — на стороне `step`, чтобы
+            // иметь доступ к `self.warned_parent_bodies`.
+            //
+            // Static-тела не считаем проблемой: у них и без Parent
+            // никогда не бывает velocity, а Parent часто используется
+            // для группировки декора.
+            if rb.body_type != BodyType::Static {
+                skipped.push(e);
+            }
             continue;
         }
 
@@ -193,7 +263,7 @@ fn collect_states(world: &World) -> Vec<BodyState> {
             sleep_timer: rb.sleep_timer,
         });
     }
-    out
+    (out, skipped)
 }
 
 fn write_back(world: &mut World, states: &[BodyState]) {
@@ -248,14 +318,8 @@ fn global_aabb(s: &BodyState) -> (Vec3, Vec3) {
             (s.position - h, s.position + h)
         }
         Collider::Capsule { radius, height } => {
-            // ИСПРАВЛЕНО: `height` теперь полная высота капсулы
-            // (включая обе полусферы-крышки), а не высота цилиндра.
+            // `height` — полная высота капсулы (включая обе полусферы).
             // См. doc-комментарий на `Collider::Capsule`.
-            //
-            // Полная высота H ⇒ половина AABB по Y = H/2. Раньше
-            // формула была `hy + r`, что давало `H/2 + r` — это была
-            // «высота цилиндра + радиус», т.е. соглашение старой
-            // семантики.
             let r = radius * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
             let h = Vec3::new(r, hy, r);

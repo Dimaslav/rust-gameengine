@@ -61,7 +61,11 @@ pub struct Stats {
 pub struct UiAssets<'a> {
     pub mesh_names: &'a [String],
     pub material_names: &'a [String],
-    pub texture_list: &'a [(String, u32, u32)],
+    /// ИЗМЕНЕНО (#8): четвёртый элемент — `is_srgb`.
+    /// UI показывает бейдж `[sRGB]` / `[Linear]` и меняет подсказку
+    /// в hover-тексте, чтобы пользователь сразу видел, как текстура
+    /// была загружена.
+    pub texture_list: &'a [(String, u32, u32, bool)],
     pub selected_material: Option<(String, Material)>,
 }
 
@@ -207,7 +211,7 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
                 if ui.selectable_label(*m == GizmoMode::Translate, "T").on_hover_text("Translate (1)").clicked() { *m = GizmoMode::Translate; }
                 if ui.selectable_label(*m == GizmoMode::Rotate, "R").on_hover_text("Rotate (2)").clicked() { *m = GizmoMode::Rotate; }
                 if ui.selectable_label(*m == GizmoMode::Scale, "S").on_hover_text("Scale (3)").clicked() { *m = GizmoMode::Scale; }
-                ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap").on_hover_text("Snap без Ctrl (0.5 м / 15°)");
+                ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap").on_hover_text("Snap без Ctrl (0.5 м / 15°)"); 
                 ui.separator();
             }
             if ui.add_enabled(!editor.selected.is_empty(), egui::Button::new("Copy (Ctrl+C)")).clicked() {
@@ -347,10 +351,27 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
     ui.label(format!("Dir lights: {}", stats.dir_lights));
     ui.label(format!("Point lights: {}", stats.point_lights));
     ui.separator();
+
+    // ИЗМЕНЕНО (#19): подписи явно указывают LOD0.
+    //
+    // `stats.sel_triangles` / `stats.sel_vertices` считаются по
+    // **исходному** мешу (`MeshHandle` без суффикса `__lod*`) — это
+    // LOD0. Реальный LOD выбирается в `Game::collect_draws` per-frame
+    // (по расстоянию до камеры), и на момент построения `Stats` движок
+    // ещё не знает, какой LOD реально нарисован. Поэтому подпись
+    // "Triangles" вводила в заблуждение — пользователь думал, что это
+    // текущая нагрузка; на самом деле это «сколько полигонов в
+    // оригинале». Добавлен `(LOD0)` + hover-пояснение.
     ui.label("Selection");
     ui.label(format!("Entities: {}", stats.sel_entities));
-    ui.label(format!("Triangles: {}", stats.sel_triangles));
-    ui.label(format!("Vertices: {}", stats.sel_vertices));
+    ui.label(format!("Triangles (LOD0): {}", stats.sel_triangles))
+        .on_hover_text(
+            "Triangles in the source mesh (LOD0), not what's currently drawn.\n\
+             LOD selection happens per-frame in `collect_draws` (distance-based);\n\
+             use the LOD counters below to see what's actually rendered.",
+        );
+    ui.label(format!("Vertices (LOD0): {}", stats.sel_vertices))
+        .on_hover_text("Vertices in the source mesh (LOD0).");
     ui.separator();
     ui.label("LOD");
     ui.label(format!("LOD0: {} · LOD1: {} · LOD2: {} · LOD3: {}",
@@ -533,12 +554,43 @@ fn draw_prefabs_section(ui: &mut egui::Ui, editor: &mut EditorState, action: &mu
 
 fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Option<EditorAction>) {
     ui.heading("Assets"); ui.separator();
-    if ui.button("➕ Load Texture(s)…")
-        .on_hover_text("PNG, JPEG, GIF, WebP, BMP, TIFF, TGA, DDS, HDR, EXR, ICO, PNM, QOI, Farbfeld")
-        .clicked()
-    {
-        *action = Some(EditorAction::LoadTextures);
-    }
+
+    // ИЗМЕНЕНО (#8): две отдельные кнопки. Раньше была одна
+    // «Load Texture(s)…», и любая загруженная текстура создавалась
+    // в формате `Rgba8UnormSrgb`. Для normal maps и metallic-roughness
+    // это давало двойную гамма-коррекцию (аппаратное sRGB-декодирование
+    // поверх уже linear-данных) — освещение выглядело неправильно.
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("➕ Load sRGB (color)…")
+            .on_hover_text(
+                "Albedo / base color / emissive.\n\
+                 GPU decodes the stored sRGB bytes to linear at sample time.\n\
+                 Supported: PNG, JPEG, GIF, WebP, BMP, TIFF, TGA, DDS, HDR, EXR, ICO, PNM, QOI, Farbfeld",
+            )
+            .clicked()
+        {
+            *action = Some(EditorAction::LoadTextures);
+        }
+        if ui
+            .button("➕ Load Linear (data)…")
+            .on_hover_text(
+                "Normal maps, metallic-roughness, AO, height/displacement, masks.\n\
+                 No sRGB decode — bytes are used as-is. Load albedo textures with\n\
+                 the sRGB button above; loading them as linear will darken them.",
+            )
+            .clicked()
+        {
+            *action = Some(EditorAction::LoadTexturesLinear);
+        }
+    });
+    ui.label(
+        egui::RichText::new("sRGB for color, Linear for data. Wrong choice = wrong shading.")
+            .small()
+            .weak()
+            .italics(),
+    );
+
     ui.separator();
     let tex_count = assets.texture_list.len();
     if tex_count == 0 {
@@ -546,17 +598,45 @@ fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Op
         return;
     }
     ui.label(format!("{} textures", tex_count));
+
     egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(180.0).show(ui, |ui| {
-        for (name, w, h) in assets.texture_list {
-            let resp = ui.button(format!("🖼 {}", name))
-                .on_hover_text(format!("{} × {} pixels\nRight-click to remove", w, h));
+        for (name, w, h, is_srgb) in assets.texture_list {
+            // ИЗМЕНЕНО (#8): бейдж типа в самом label + детальная
+            // подсказка в hover-тексте. Пользователь сразу видит, как
+            // была загружена каждая текстура.
+            let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
+            let tag_color = if *is_srgb {
+                egui::Color32::from_rgb(230, 200, 130)
+            } else {
+                egui::Color32::from_rgb(150, 200, 230)
+            };
+
+            let resp = ui
+                .horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(tag)
+                            .small()
+                            .monospace()
+                            .color(tag_color),
+                    );
+                    ui.button(format!("🖼 {}", name))
+                })
+                .inner
+                .on_hover_text(format!(
+                    "{} × {} pixels\nLoaded as: {}\nRight-click to remove",
+                    w, h,
+                    if *is_srgb { "sRGB (color)" } else { "Linear (data)" },
+                ));
             resp.context_menu(|ui| {
                 if ui.button("Remove texture").clicked() {
-                    *action = Some(EditorAction::RemoveTexture(name.clone())); ui.close();
+                    *action = Some(EditorAction::RemoveTexture(name.clone()));
+                    ui.close();
                 }
                 if ui.button("Copy name").clicked() {
                     let text = name.clone();
-                    ui.output_mut(|o| { o.commands.push(egui::OutputCommand::CopyText(text)); });
+                    ui.output_mut(|o| {
+                        o.commands.push(egui::OutputCommand::CopyText(text));
+                    });
                     ui.close();
                 }
             });
@@ -671,7 +751,8 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { label: "FBX · Export all", action: EditorAction::ExportFbxAll },
         PaletteCommand { label: "FBX · Export selected", action: EditorAction::ExportFbxSelected },
         PaletteCommand { label: "FBX · Import…", action: EditorAction::ImportFbx },
-        PaletteCommand { label: "Textures · Load images…", action: EditorAction::LoadTextures },
+        PaletteCommand { label: "Textures · Load sRGB (color)…", action: EditorAction::LoadTextures },
+        PaletteCommand { label: "Textures · Load Linear (normal/data)…", action: EditorAction::LoadTexturesLinear },
         PaletteCommand { label: "Scene · Add cube", action: EditorAction::AddCube },
         PaletteCommand { label: "Scene · Add sphere", action: EditorAction::AddSphere },
         PaletteCommand { label: "Scene · Duplicate selection", action: EditorAction::Duplicate },
@@ -1299,8 +1380,44 @@ fn inspector_velocity(ui: &mut egui::Ui, world: &mut World, e: Entity) {
     });
 }
 
+// ИЗМЕНЕНО (#4): добавлено предупреждение для случая Parent + RigidBody.
+// Раньше такие тела молча не симулировались — пользователь ставил
+// Dynamic RigidBody на дочернюю entity и удивлялся, почему тело
+// «висит в воздухе». Теперь предупреждение видно прямо в инспекторе.
 fn inspector_rigidbody(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("RigidBody").default_open(true).show(ui, |ui| {
+        // ИЗМЕНЕНО (#4): предупреждаем, если entity имеет Parent.
+        // Проверяем до `get_mut`, чтобы не занимать borrow.
+        let has_parent = world.has::<Parent>(e);
+        if has_parent {
+            if let Some(rb) = world.get::<RigidBody>(e) {
+                if rb.body_type != BodyType::Static {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgba_unmultiplied(120, 30, 30, 60))
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("⚠ Physics disabled: has Parent")
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(240, 130, 130)),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Parent-space dynamics is unsupported: \
+                                     Transform.position is parent-local, and \
+                                     gravity in a rotated parent frame would \
+                                     be wrong. Remove Parent to enable simulation.",
+                                )
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 200, 200)),
+                            );
+                        });
+                    ui.separator();
+                }
+            }
+        }
+
         let Some(rb) = world.get_mut::<RigidBody>(e) else { return; };
         let mut changed = false;
         ui.horizontal(|ui| {
@@ -1562,10 +1679,49 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     ui.separator();
     if !world.has::<RigidBody>(e) {
         any = true;
+        // ИЗМЕНЕНО (#4): предупреждаем в меню, если у entity есть
+        // Parent — Dynamic/Kinematic под Parent не симулируются,
+        // поэтому опции заблокированы с понятным hover-текстом.
+        let has_parent = world.has::<Parent>(e);
         ui.menu_button("RigidBody", |ui| {
-            if ui.button("Static").clicked() { world.insert(e, RigidBody::static_body()); editor.undo_requested = true; ui.close(); }
-            if ui.button("Dynamic (mass 1)").clicked() { world.insert(e, RigidBody::dynamic(1.0)); editor.undo_requested = true; ui.close(); }
-            if ui.button("Kinematic").clicked() { world.insert(e, RigidBody::kinematic()); editor.undo_requested = true; ui.close(); }
+            if has_parent {
+                ui.label(
+                    egui::RichText::new("⚠ Entity has Parent — physics disabled")
+                        .small()
+                        .color(egui::Color32::from_rgb(240, 130, 130)),
+                );
+                ui.separator();
+            }
+
+            if ui.button("Static").clicked() {
+                world.insert(e, RigidBody::static_body());
+                editor.undo_requested = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(!has_parent, egui::Button::new("Dynamic (mass 1)"))
+                .on_disabled_hover_text(
+                    "Cannot add Dynamic body to a child entity: Parent-space \
+                     dynamics is unsupported. Remove Parent first.",
+                )
+                .clicked()
+            {
+                world.insert(e, RigidBody::dynamic(1.0));
+                editor.undo_requested = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(!has_parent, egui::Button::new("Kinematic"))
+                .on_disabled_hover_text(
+                    "Cannot add Kinematic body to a child entity: Parent-space \
+                     dynamics is unsupported. Remove Parent first.",
+                )
+                .clicked()
+            {
+                world.insert(e, RigidBody::kinematic());
+                editor.undo_requested = true;
+                ui.close();
+            }
         });
     }
     if !world.has::<Collider>(e) {
@@ -1709,7 +1865,7 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
     });
     ui.separator();
     egui::CollapsingHeader::new("Volumetric fog").default_open(true).show(ui, |ui| {
-        ui.add(egui::Slider::new(&mut postfx.volumetric_density, 0.0..=0.2).logarithmic(true).text("Density"));
+        ui.add(egui::Slider::new(&mut postfx.volumetric_density, 0.0..=0.02).logarithmic(true).text("Density"));
         ui.label(egui::RichText::new("0 = выключено. 0.02..0.05 — плотный туман с god rays.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.volumetric_scattering, 0.0..=1.0).text("Scattering (albedo)"));
         ui.add(egui::Slider::new(&mut postfx.volumetric_phase_g, 0.0..=0.9).text("Phase g (god rays)"));
@@ -1735,14 +1891,6 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
         ui.add(egui::Slider::new(&mut postfx.lod_distances[1], 20.0..=500.0).text("Distance LOD1→2"));
         ui.add(egui::Slider::new(&mut postfx.lod_distances[2], 50.0..=1000.0).text("Distance LOD2→3"));
 
-        // ИСПРАВЛЕНО: гарантируем строгую монотонность порогов.
-        // Раньше диапазоны слайдеров позволяли выставить, например,
-        // lod_distances = [200, 20, 500]. Тогда LOD0-уровень
-        // становился недостижим (код брал min(dist0, dist1) = 20), а
-        // весь смысл LOD0 (наиболее детальный меш) пропадал.
-        //
-        // Правило: каждое следующее расстояние должно быть хотя бы
-        // на 1 м больше предыдущего.
         let d = &mut postfx.lod_distances;
         if d[1] <= d[0] { d[1] = d[0] + 1.0; }
         if d[2] <= d[1] { d[2] = d[1] + 1.0; }
@@ -2017,6 +2165,11 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
 // Helpers
 // ============================================================
 
+// ИЗМЕНЕНО (#4): добавлен маркер «⚠» для entity, у которой
+// есть Parent и не-Static RigidBody. Такая комбинация означает,
+// что тело не симулируется (см. physics::world::collect_states).
+// Без бейджа пользователь видел «Ph» в списке и думал, что
+// физика работает.
 fn component_badges(world: &World, e: Entity) -> String {
     let mut s = String::with_capacity(24);
     if world.has::<Transform>(e) { s.push_str("T "); }
@@ -2042,6 +2195,16 @@ fn component_badges(world: &World, e: Entity) -> String {
     if world.has::<DirectionalLight>(e) { s.push_str("☀ "); }
     if world.has::<PointLight>(e) { s.push_str("💡 "); }
     if world.has::<crate::game::decals::Decal>(e) { s.push_str("🎨 "); }
+
+    // ИЗМЕНЕНО (#4): бейдж «physics disabled».
+    if world.has::<Parent>(e) {
+        if let Some(rb) = world.get::<RigidBody>(e) {
+            if rb.body_type != BodyType::Static {
+                s.push_str("⚠ ");
+            }
+        }
+    }
+
     s.trim_end().to_string()
 }
 
@@ -2063,23 +2226,68 @@ fn would_create_cycle(world: &World, child: Entity, new_parent: Entity) -> bool 
     true
 }
 
-fn texture_picker(ui: &mut egui::Ui, id: &str, label: &str, current: &mut Option<String>,
-    textures: &[(String, u32, u32)]) -> bool {
+/// ИЗМЕНЕНО (#8): принимает 4-tuple `(name, w, h, is_srgb)`.
+///
+/// `UiAssets::texture_list` расширен флагом `is_srgb`, чтобы UI мог
+/// показать пользователю, как загружена каждая текстура. В combo-box
+/// рядом с именем рисуем бейдж `[sRGB]` / `[Linear]` — это
+/// подсказывает, что для normal map / MR-маски нужен Linear.
+///
+/// Раньше сигнатура была `&[(String, u32, u32)]` и UI никак не
+/// различал sRGB/linear. После #8 `assets.texture_list` стал
+/// 4-tuple — функция обновлена под это.
+fn texture_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    current: &mut Option<String>,
+    textures: &[(String, u32, u32, bool)],
+) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
         let display = current.as_deref().unwrap_or("(none)");
         egui::ComboBox::from_id_salt(id).selected_text(display).width(170.0).show_ui(ui, |ui| {
-            if ui.selectable_label(current.is_none(), "(none)").clicked() { *current = None; changed = true; }
+            if ui.selectable_label(current.is_none(), "(none)").clicked() {
+                *current = None;
+                changed = true;
+            }
             if textures.is_empty() {
                 ui.label(egui::RichText::new("(no textures loaded)").weak().italics());
             }
-            for (name, w, h) in textures {
+            for (name, w, h, is_srgb) in textures {
                 let selected = current.as_deref() == Some(name.as_str());
-                if ui.selectable_label(selected, name).on_hover_text(format!("{}×{} pixels", w, h)).clicked() {
-                    *current = Some(name.clone());
-                    changed = true;
-                }
+
+                // Бейдж типа текстуры — цвет совпадает с тем, что
+                // используется в `draw_assets_section`, чтобы визуально
+                // было понятно: жёлтый = sRGB, синеватый = Linear.
+                let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
+                let tag_color = if *is_srgb {
+                    egui::Color32::from_rgb(230, 200, 130)
+                } else {
+                    egui::Color32::from_rgb(150, 200, 230)
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(tag)
+                            .small()
+                            .monospace()
+                            .color(tag_color),
+                    );
+                    let resp = ui.selectable_label(selected, name);
+                    if resp
+                        .on_hover_text(format!(
+                            "{}×{} pixels\nLoaded as: {}",
+                            w, h,
+                            if *is_srgb { "sRGB (color)" } else { "Linear (data)" },
+                        ))
+                        .clicked()
+                    {
+                        *current = Some(name.clone());
+                        changed = true;
+                    }
+                });
             }
         });
     });

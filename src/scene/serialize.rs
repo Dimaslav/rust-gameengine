@@ -1,18 +1,3 @@
-//! Сцена: снимок всех сущностей в RON + spawn игрока.
-//!
-//! Две пары API:
-//!
-//! * `save_scene_to_*` / `load_scene_from_*` — только World.
-//!   Используются там, где Renderer недоступен или не нужен
-//!   (undo/redo, Play-in-Editor snapshot).
-//!
-//! * `save_scene_with_assets_to_*` / `load_scene_with_assets_from_*` —
-//!   World + материалы + пути к текстурам. Используются для Save/Load
-//!   файла сцены пользователем.
-//!
-//! * `save_scene_with_game_state_*` / `load_scene_with_assets_from_str_full`
-//!   — то же + game-specific состояние (RON-строка, формируется игрой).
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -607,10 +592,39 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
 ///
 /// Третий элемент — то, что было сохранено в `SceneFile::game_state_ron`
 /// (для игры; движок его не парсит).
+///
+/// ИЗМЕНЕНО (#14): теперь это тонкая обёртка над
+/// `load_scene_with_assets_from_str_full_with_ids`. Раньше функция
+/// **не возвращала `id_map`**, из-за чего вызывающий код (например,
+/// `App::restore_play_snapshot`) не мог перемапить выделение на новые
+/// entity после load. Теперь полный вариант доступен — `_with_ids`.
 pub fn load_scene_with_assets_from_str_full(
     text: &str,
     renderer: &mut Renderer,
 ) -> Result<(World, Option<Vec3>, Option<String>)> {
+    let (w, spawn, gs, _) = load_scene_with_assets_from_str_full_with_ids(text, renderer)?;
+    Ok((w, spawn, gs))
+}
+
+/// ИЗМЕНЕНО (#14): полная версия `load_scene_with_assets_from_str_full`,
+/// дополнительно возвращающая `id_map` — отображение `old_entity_id →
+/// new_entity`.
+///
+/// `id_map` строится в `spawn_all_entities` и нужен вызывающему коду
+/// для remap сохранённого выделения (Play-in-Editor: `PlaySnapshot`
+/// хранит старые id, при restore они должны указывать на новые entity
+/// того же объекта, а не на произвольные).
+///
+/// `SceneFile::game_state_ron` возвращается как есть — движок его не
+/// парсит, это «непрозрачный blob» для игры.
+///
+/// Порядок в кортеже:
+///   `(World, Option<Vec3> player_spawn, Option<String> game_state_ron,
+///     HashMap<u32, Entity> id_map)`.
+pub fn load_scene_with_assets_from_str_full_with_ids(
+    text: &str,
+    renderer: &mut Renderer,
+) -> Result<(World, Option<Vec3>, Option<String>, HashMap<u32, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
 
     let mut restored_tex = 0usize;
@@ -656,7 +670,7 @@ pub fn load_scene_with_assets_from_str_full(
     fix_call_elevator_refs(&mut world, &id_map);
 
     let spawn = file.player_spawn.map(Vec3::from_array);
-    Ok((world, spawn, file.game_state_ron))
+    Ok((world, spawn, file.game_state_ron, id_map))
 }
 
 pub fn load_scene_with_assets_from_str(

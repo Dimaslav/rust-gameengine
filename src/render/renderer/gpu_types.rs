@@ -26,7 +26,21 @@ pub const VOLUMETRIC_GRID_D: u32 = 64;
 
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
-pub const SHADOW_SLOT_COUNT: u64 = 9;
+
+/// ИЗМЕНЕНО (#7): максимум point-light'ов, для которых рендерится
+/// cube shadow map. Раньше значение было жёстко 1 — тени были только
+/// от первого point light в массиве, остальные светили сквозь стены.
+///
+/// Каждый куб — 6 depth-only рендер-пассов за кадр. `MAX_SHADOW_CUBES = 4`
+/// даёт 24 пасса + 3 CSM = 27. Увеличение до 8+ заметно просаживает
+/// FPS на больших сценах. При уменьшении до 2 тени будут только
+/// у первых двух point-light'ов.
+pub const MAX_SHADOW_CUBES: usize = 4;
+
+/// Общее число shadow-slot'ов в `shadow_pass_buffer`:
+/// 3 каскада CSM (слоты 0..3) + `MAX_SHADOW_CUBES` × 6 граней cube
+/// shadow (слоты 3..3+6*MAX_SHADOW_CUBES).
+pub const SHADOW_SLOT_COUNT: u64 = (3 + 6 * MAX_SHADOW_CUBES) as u64;
 
 pub const TAA_JITTER_SEQUENCE: u32 = 8;
 
@@ -52,6 +66,7 @@ pub struct CameraUniform {
     pub view: [[f32; 4]; 4],
     pub inv_view: [[f32; 4]; 4],
     pub camera_pos: [f32; 4],
+    /// xy = (near, far), zw = (jitter_x_px, jitter_y_px) текущего кадра.
     pub near_far: [f32; 4],
     pub prev_view_proj: [[f32; 4]; 4],
     pub screen_size: [f32; 4],
@@ -63,6 +78,9 @@ pub struct LightsUniform {
     pub cascade_vp: [[[f32; 4]; 4]; CASCADE_COUNT],
     pub cascade_splits: [f32; 4],
     pub ambient_color: [f32; 4],
+    /// x = dir_count, y = point_count, z = shadow_point_count (0..MAX_SHADOW_CUBES), w = unused.
+    /// ИЗМЕНЕНО (#7): `z` раньше был 0/1 (флаг «есть ли хоть один point shadow»),
+    /// теперь — фактическое число активных cube shadow maps.
     pub counts: [u32; 4],
     pub light_view_proj: [[f32; 4]; 4],
     pub misc: [f32; 4],
@@ -71,6 +89,10 @@ pub struct LightsUniform {
     pub shadow_params: [f32; 4],
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
+    /// ИЗМЕНЕНО (#7): позиция + range для каждого из `MAX_SHADOW_CUBES`
+    /// point-light'ов, для которых активна cube shadow map. Раньше
+    /// заполнялся только [0], но `deferred_lighting.wgsl` уже читал
+    /// элементы по индексу — теперь это работает по назначению.
     pub cube_shadow_pos: [[f32; 4]; 4],
 }
 
@@ -150,11 +172,20 @@ pub struct SsaoUniform {
     pub view: [[f32; 4]; 4],
 }
 
+/// Uniform TAA-пасса.
+///
+/// Layout (48 байт, кратен 16 — требование wgpu):
+///   values.xyzw   — (alpha, velocity_weight, sharpen, reset_flag)
+///   screen.xy     — (w_px, h_px)
+///   screen.zw     — jitter **текущего** кадра в пикселях
+///   prev_jitter.xy — jitter **предыдущего** кадра в пикселях
+///   prev_jitter.zw — unused (padding)
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TaaParams {
     pub values: [f32; 4],
     pub screen: [f32; 4],
+    pub prev_jitter: [f32; 4],
 }
 
 #[repr(C)]
@@ -199,7 +230,7 @@ pub struct MeshDraw {
     pub double_sided: bool,
 }
 
-fn default_volumetric_density() -> f32 { 0.025 }
+fn default_volumetric_density() -> f32 { 0.001 }
 fn default_volumetric_scattering() -> f32 { 0.4 }
 fn default_volumetric_phase_g() -> f32 { 0.6 }
 
@@ -246,10 +277,10 @@ impl Default for PostFx {
             bloom_strength: 0.6,
             bloom_knee: 0.5,
             bloom_radius: 1.0,
-            exposure: 1.0,
+            exposure: 0.6,
             ssao_strength: 0.8,
             ssao_radius: 0.6,
-            ibl_strength: 0.35,
+            ibl_strength: 0.15,
             debug_view: DebugView::Final,
             fxaa_strength: 1.0,
             fog_color: [0.55, 0.62, 0.72],
@@ -267,7 +298,7 @@ impl Default for PostFx {
             lod_distances: [30.0, 80.0, 200.0, 500.0],
             taa_strength: 1.0,
             taa_sharpening: 0.1,
-            volumetric_density: 0.025,
+            volumetric_density: 0.001,
             volumetric_scattering: 0.4,
             volumetric_phase_g: 0.6,
         }
@@ -382,8 +413,6 @@ pub fn create_noise_texture(
         view_formats: &[],
     });
 
-    // wgpu 25: `ImageCopyTexture` → `TexelCopyTextureInfo`,
-    //          `ImageDataLayout` → `TexelCopyBufferLayout`.
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,

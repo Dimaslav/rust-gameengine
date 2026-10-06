@@ -5,10 +5,6 @@
 //   1. SSR — screen-space reflections, добавляется к HDR.
 //   2. Fog composite — накладывается поверх.
 //   3. Результат идёт в hdr_fog_view, откуда его читает TAA.
-//
-// ВАЖНО: depth-текстуры читаются через textureLoad (пиксельные координаты),
-// а не textureSampleLevel. WGSL 25 не разрешает sampling depth texture
-// через filtering sampler.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -34,12 +30,10 @@ struct Volumetric {
 @group(0) @binding(3) var t_depth: texture_depth_2d;
 @group(0) @binding(4) var<uniform> vol: Volumetric;
 
-// G-buffer для SSR.
 @group(0) @binding(5) var t_normal:   texture_2d<f32>;
 @group(0) @binding(6) var t_albedo:   texture_2d<f32>;
 @group(0) @binding(7) var t_emissive: texture_2d<f32>;
 
-// Камера — для реконструкции world-позиции и проекции луча.
 @group(0) @binding(8) var<uniform> camera: Camera;
 
 const FROXEL_Z: f32 = 64.0;
@@ -67,12 +61,6 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
     return out;
 }
 
-// ============================================================
-// Depth read helper
-// ============================================================
-
-/// Читает depth-значение в UV-координатах через textureLoad.
-/// Возвращает 0 если UV вне экрана.
 fn load_depth(uv: vec2<f32>) -> f32 {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return 1.0;
@@ -87,18 +75,12 @@ fn load_depth(uv: vec2<f32>) -> f32 {
     return textureLoad(t_depth, clamped, 0);
 }
 
-// ============================================================
-// SSR helpers
-// ============================================================
-
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = camera.inv_view_proj * ndc;
     return world_h.xyz / max(world_h.w, 1e-6);
 }
 
-/// Проекция world-точки в UV. Возвращает (u, v, ndc_z).
-/// ndc_z = -1 если вне frustum.
 fn project_world_to_uv(world_pos: vec3<f32>) -> vec3<f32> {
     let clip = camera.view_proj * vec4<f32>(world_pos, 1.0);
     if (clip.w < 1e-6) { return vec3<f32>(0.0, 0.0, -1.0); }
@@ -111,8 +93,6 @@ fn project_world_to_uv(world_pos: vec3<f32>) -> vec3<f32> {
     );
 }
 
-/// Трассировка отражённого луча по depth-буферу.
-/// Возвращает (reflection_color, weight). weight = 0 если нет hit.
 fn trace_ssr(
     world_pos: vec3<f32>,
     world_normal: vec3<f32>,
@@ -140,7 +120,6 @@ fn trace_ssr(
 
         let sample_depth = load_depth(uvz.xy);
         if (sample_depth >= 0.9999) {
-            // Луч уходит в небо — нет hit.
             continue;
         }
 
@@ -148,7 +127,6 @@ fn trace_ssr(
         let ray_dist = length(ray_pos - ray_origin);
         let surface_dist = length(sample_world - ray_origin);
 
-        // Поверхность в пикселе БЛИЖЕ к камере, чем наш луч → hit.
         if (surface_dist < ray_dist - 0.02) {
             let dist_fade = 1.0 - smoothstep(max_dist * 0.5, max_dist, ray_dist);
             let weight = fresnel_max * (1.0 - roughness) * dist_fade;
@@ -159,10 +137,6 @@ fn trace_ssr(
 
     return vec4<f32>(0.0);
 }
-
-// ============================================================
-// fs_main
-// ============================================================
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
@@ -183,21 +157,20 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
         let world_pos = reconstruct_world_pos(in.uv, depth_raw);
         let view_dir = normalize(camera.camera_pos.xyz - world_pos);
-        let n_dot_v = max(dot(world_normal, view_dir), 1e-4);
+        // clamp верхней границы обязателен: dot(n, v) может дать
+        // 1.00001 при численной ошибке → pow(отрицательного, 5) = NaN.
+        let n_dot_v = clamp(dot(world_normal, view_dir), 1e-4, 1.0);
 
         let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-        let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
+        let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - n_dot_v, 0.0, 1.0), 5.0);
         let fresnel_max = max(max(fresnel.x, fresnel.y), fresnel.z);
 
-        // Ранний выход для матовых и диффузных поверхностей —
-        // экономит 32 texture fetch'а на большинстве пикселей.
         let refl_strength = fresnel_max * (1.0 - roughness);
         if (refl_strength > 0.02) {
             let ssr = trace_ssr(
                 world_pos, world_normal, view_dir,
                 fresnel_max, roughness,
             );
-            // Аддитивно: reflected light — дополнительный вклад.
             hdr = hdr + ssr.rgb * ssr.a;
         }
     }

@@ -74,8 +74,11 @@ pub struct Renderer {
     csm_cascade_views: [wgpu::TextureView; CASCADE_COUNT],
     csm_sampler: wgpu::Sampler,
 
-    cube_shadow_cube_view: wgpu::TextureView,
-    cube_shadow_face_views: [wgpu::TextureView; 6],
+    /// ИЗМЕНЕНО (#7): единая cube-array текстура (6 × MAX_SHADOW_CUBES слоёв).
+    /// Раньше был один cube (6 слоёв) — тени только для первого point light.
+    cube_shadow_array_view: wgpu::TextureView,
+    /// Face-views для рендера в слои: `[cube][face]`.
+    cube_shadow_face_views: [[wgpu::TextureView; 6]; MAX_SHADOW_CUBES],
     cube_shadow_sampler: wgpu::Sampler,
 
     material_bind_groups: HashMap<String, MaterialGpu>,
@@ -148,12 +151,32 @@ pub struct Renderer {
 
     skybox_time: f32,
 
+    /// Счётчик кадров TAA. Чётность определяет, в какую из двух
+    /// `taa_resolved_views` писать (ping-pong).
+    ///
+    /// ИЗМЕНЕНО (#27): инкрементируется через флаг `use_taa`
+    /// (`taa_strength > 0.01`), не через повторную проверку. При
+    /// выключенной TAA счётчик не растёт, `write_idx` остаётся 0, а
+    /// `read_idx = 1` — но сам TAA-pass не выполняется, и bloom/
+    /// composite переключаются на чтение из `hdr_fog_view` (индекс 2
+    /// в `bloom_chain.prefilter_bgs` / `composite_bgs`). См. #6.
     taa_frame_index: u32,
     taa_prev_view_proj: Mat4,
     taa_reset_frames: u32,
     /// Режим камеры в прошлом кадре — нужен для сброса TAA-истории
     /// при переходах Orbit ↔ FPS ↔ Fly.
     taa_prev_camera_mode: Option<CameraMode>,
+    /// Jitter (в пикселях) **предыдущего** кадра.
+    /// При jitter = 0 (текущая конфигурация) всегда (0, 0).
+    taa_prev_jitter_px: Vec2,
+
+    /// ИЗМЕНЕНО (#6): предыдущее значение «включена ли TAA»
+    /// (`postfx.taa_strength > 0.01`). Нужно для сброса
+    /// `taa_reset_frames` при переключении TAA через UI: иначе после
+    /// включения TAA первые 1-2 кадра шейдер прочитает устаревшую
+    /// историю (в `taa_resolved_views` лежит resolve, сделанный до
+    /// выключения) — визуально это «фантомный» след.
+    taa_prev_enabled: bool,
 
     /// Статистика последнего **успешно отрисованного** кадра.
     /// Обновляется в `render()` после сортировки draws. `App::redraw`
@@ -194,23 +217,19 @@ fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
     v
 }
 
-fn radical_inverse(mut n: u32, base: u32) -> f32 {
-    let mut result = 0.0f32;
-    let mut f = 1.0f32 / base as f32;
-    while n > 0 {
-        result += f * (n % base) as f32;
-        n /= base;
-        f /= base as f32;
-    }
-    result
-}
-
-fn halton_jitter_pixels(i: u32) -> Vec2 {
-    let s = i % TAA_JITTER_SEQUENCE;
-    let hx = radical_inverse(s + 1, 2);
-    let hy = radical_inverse(s + 1, 3);
-    Vec2::new(hx - 0.5, hy - 0.5)
-}
+// ИЗМЕНЕНО (#12): удалены `radical_inverse` и `halton_jitter_pixels`.
+//
+// Обе функции использовались для Halton-последовательности, которая
+// давала суб-пиксельный jitter камеры в TAA. Когда jitter был
+// отключён (`let jitter_pixels = Vec2::ZERO;`), они перестали
+// вызываться и держались только через `let _ = halton_jitter_pixels;`
+// — заглушку «не удалять, вдруг пригодится».
+//
+// Заглушка опасна тем, что скрывает реальное состояние: `cargo
+// build` не жалуется, а тот, кто вернёт jitter обратно, не найдёт
+// намёка на то, что что-то было сломано. Если jitter понадобится
+// снова — восстановить функции из истории git вместе с сопутствующим
+// ремонтом motion vectors (см. комментарий в `render()` ниже).
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
@@ -303,9 +322,10 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
+                // ИЗМЕНЕНО (#7): Cube → CubeArray (до MAX_SHADOW_CUBES теней).
                 wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false }, count: None },
+                        view_dimension: wgpu::TextureViewDimension::CubeArray, multisampled: false }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
@@ -700,12 +720,15 @@ impl Renderer {
             ..Default::default()
         });
 
+        // ИЗМЕНЕНО (#7): `depth_or_array_layers` = 6 × MAX_SHADOW_CUBES.
+        // Layout в памяти: слой `cube * 6 + face`. Грани куба идут
+        // в порядке +X, -X, +Y, -Y, +Z, -Z (см. shadow_cube::cube_face_matrices).
         let cube_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cube_shadow_texture"),
             size: wgpu::Extent3d {
                 width: shadow_cube::CUBE_SIZE,
                 height: shadow_cube::CUBE_SIZE,
-                depth_or_array_layers: 6,
+                depth_or_array_layers: (6 * MAX_SHADOW_CUBES) as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -714,22 +737,27 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let cube_shadow_cube_view = cube_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("cube_shadow_cube_view"),
-            dimension: Some(wgpu::TextureViewDimension::Cube),
+        let cube_shadow_array_view = cube_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("cube_shadow_array_view"),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
             base_array_layer: 0,
-            array_layer_count: Some(6),
+            array_layer_count: Some((6 * MAX_SHADOW_CUBES) as u32),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
             ..Default::default()
         });
-        let cube_shadow_face_views: [wgpu::TextureView; 6] = std::array::from_fn(|i| {
-            cube_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("cube_shadow_face_view"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: i as u32,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        });
+        let cube_shadow_face_views: [[wgpu::TextureView; 6]; MAX_SHADOW_CUBES] =
+            std::array::from_fn(|cube| {
+                std::array::from_fn(|face| {
+                    cube_texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("cube_shadow_face_view"),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: (cube * 6 + face) as u32,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+            });
         let cube_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cube_shadow_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -869,7 +897,7 @@ impl Renderer {
             &ssao_uniform, &volumetric_uniform,
             &ssao_noise_view,
             &csm_array_view, &csm_sampler,
-            &cube_shadow_cube_view, &cube_shadow_sampler,
+            &cube_shadow_array_view, &cube_shadow_sampler,
             &camera_buffer, &lights_buffer, &ibl, 0.5, 1.0, &tonemap_uniform,
         );
 
@@ -954,7 +982,7 @@ impl Renderer {
             lights_buffer, lights_bind_group,
             shadow_pass_buffer, shadow_pass_bind_group, shadow_pass_stride,
             csm_array_view, csm_cascade_views, csm_sampler,
-            cube_shadow_cube_view, cube_shadow_face_views, cube_shadow_sampler,
+            cube_shadow_array_view, cube_shadow_face_views, cube_shadow_sampler,
             material_bind_groups: HashMap::new(),
             default_material_bind_group,
             sampler_cache: HashMap::new(),
@@ -990,6 +1018,8 @@ impl Renderer {
             taa_prev_view_proj: Mat4::IDENTITY,
             taa_reset_frames: 2,
             taa_prev_camera_mode: None,
+            taa_prev_jitter_px: Vec2::ZERO,
+            taa_prev_enabled: true,
             last_draw_count: 0,
             last_instance_count: 0,
         }
@@ -1151,8 +1181,22 @@ impl Renderer {
         Ok(())
     }
 
+    /// Загрузка sRGB-текстуры из файла (albedo, emissive, любые «цветные»
+    /// картинки, где значения — воспринимаемый цвет).
     pub fn load_texture(&mut self, name: &str, path: &str) -> anyhow::Result<()> {
         let tex = Texture::from_file(&self.device, &self.queue, &self.texture_layout, path)?;
+        self.textures.insert(name.to_string(), tex);
+        Ok(())
+    }
+
+    /// ИЗМЕНЕНО (#8): загрузка linear-текстуры из файла (normal map,
+    /// metallic-roughness, AO, height, маски).
+    ///
+    /// Отличие от `load_texture` — только формат GPU-текстуры:
+    /// `Rgba8Unorm` вместо `Rgba8UnormSrgb`. Аппаратное sRGB-декодирование
+    /// отключено.
+    pub fn load_texture_linear(&mut self, name: &str, path: &str) -> anyhow::Result<()> {
+        let tex = Texture::from_file_linear(&self.device, &self.queue, &self.texture_layout, path)?;
         self.textures.insert(name.to_string(), tex);
         Ok(())
     }
@@ -1291,7 +1335,7 @@ impl Renderer {
             &self.ssao_uniform, &self.volumetric_uniform,
             &self.ssao_noise_view,
             &self.csm_array_view, &self.csm_sampler,
-            &self.cube_shadow_cube_view, &self.cube_shadow_sampler,
+            &self.cube_shadow_array_view, &self.cube_shadow_sampler,
             &self.camera_buffer, &self.lights_buffer, ibl_ref, 0.5, 1.0, &self.tonemap_uniform,
         );
         self.decal_depth_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1364,15 +1408,29 @@ impl Renderer {
             self.taa_prev_camera_mode = Some(camera.mode);
         }
 
-        // ИСПРАВЛЕНО: jitter применяется только когда TAA реально
-        // что-то смешивает. Раньше при taa_strength = 0 (preset Low или
-        // ручной 0) камера продолжала дрожать по Halton-последовательности,
-        // что давало заметное sub-pixel мерцание рёбер.
-        let jitter_pixels = if postfx.taa_strength > 0.01 {
-            halton_jitter_pixels(self.taa_frame_index)
-        } else {
-            Vec2::ZERO
-        };
+        // ИЗМЕНЕНО (#6): TAA-проход имеет смысл только при
+        // `taa_strength > 0.01`.
+        let use_taa = postfx.taa_strength > 0.01;
+        if use_taa != self.taa_prev_enabled {
+            self.taa_reset_frames = 2;
+            self.taa_prev_enabled = use_taa;
+        }
+
+        // ИЗМЕНЕНО (#12): jitter полностью отключён, `radical_inverse`
+        // и `halton_jitter_pixels` удалены. При включённом jitter'е не
+        // получалось добиться стабильной картинки: motion buffer,
+        // prev_jitter и TAA-history требуют тонкой согласованности во
+        // всех шейдерах и во всех uniform'ах. Любая мелкая
+        // рассинхронизация давала видимую тряску на субпиксель. При
+        // jitter = 0 тряски нет, при этом TAA всё равно сглаживает шум
+        // и края за счёт временного накопления истории.
+        //
+        // Если понадобится настоящий sub-pixel AA — включать jitter
+        // обратно нужно вместе с переработкой motion vectors и
+        // clip_history. См. историю git: `halton_jitter_pixels` была
+        // удалена именно здесь.
+        let jitter_pixels = Vec2::ZERO;
+
         let jitter_ndc = Vec2::new(jitter_pixels.x * 2.0 / w_px, jitter_pixels.y * 2.0 / h_px);
 
         let view = camera.view_matrix();
@@ -1389,7 +1447,7 @@ impl Renderer {
             view: view.to_cols_array_2d(),
             inv_view: view.inverse().to_cols_array_2d(),
             camera_pos: camera.position().extend(1.0).to_array(),
-            near_far: [camera.near, camera.far, 0.0, 0.0],
+            near_far: [camera.near, camera.far, jitter_pixels.x, jitter_pixels.y],
             prev_view_proj: self.taa_prev_view_proj.to_cols_array_2d(),
             screen_size: [w_px, h_px, 1.0 / w_px, 1.0 / h_px],
         };
@@ -1407,12 +1465,26 @@ impl Renderer {
                 postfx.taa_sharpening,
                 reset_flag,
             ],
-            screen: [w_px, h_px, 1.0 / w_px, 1.0 / h_px],
+            screen: [w_px, h_px, jitter_pixels.x, jitter_pixels.y],
+            prev_jitter: [
+                self.taa_prev_jitter_px.x,
+                self.taa_prev_jitter_px.y,
+                0.0,
+                0.0,
+            ],
         };
         self.queue.write_buffer(&self.sd.taa_uniform, 0, bytemuck::bytes_of(&taa_params));
-        // Инкремент только когда TAA активен — иначе Halton-индекс
-        // уходит вперёд, а после включения TAA история резко «прыгает».
-        if postfx.taa_strength > 0.01 {
+
+        self.taa_prev_jitter_px = jitter_pixels;
+
+        // ИЗМЕНЕНО (#27): используем `use_taa` вместо повторной проверки
+        // `postfx.taa_strength > 0.01`. Семантически то же, но:
+        //   1. Единая точка правды: если порог когда-нибудь изменится
+        //      (например, 0.05), поменять нужно в одном месте.
+        //   2. При `use_taa = false` счётчик не растёт — `write_idx`
+        //      остаётся 0, что согласовано с пропуском TAA-pass и
+        //      bypass'ом bloom/composite на `hdr_fog_view`.
+        if use_taa {
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
         }
 
@@ -1432,9 +1504,13 @@ impl Renderer {
             pt_packed[i * 2] = point_lights[i].position;
             pt_packed[i * 2 + 1] = point_lights[i].color;
         }
-        let cube_count = if pt_count > 0 { 1 } else { 0 };
+
+        // ИЗМЕНЕНО (#7): теней от point light теперь до MAX_SHADOW_CUBES.
+        let shadow_point_count = pt_count.min(MAX_SHADOW_CUBES);
         let mut cube_pos_packed = [[0.0f32; 4]; 4];
-        if pt_count > 0 { cube_pos_packed[0] = point_lights[0].position; }
+        for i in 0..shadow_point_count {
+            cube_pos_packed[i] = point_lights[i].position;
+        }
 
         let splits = csm::split_distances(camera.near, camera.far.min(200.0), 0.5);
         let cascade_vp = csm::build_cascades(
@@ -1456,7 +1532,7 @@ impl Renderer {
             cascade_vp: csm_packed,
             cascade_splits: [splits[1], splits[2], splits[3], 0.0],
             ambient_color,
-            counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
+            counts: [dir_count as u32, pt_count as u32, shadow_point_count as u32, 0],
             light_view_proj: cascade_vp[0].to_cols_array_2d(),
             misc, fog_params, fog_color, shadow_params,
             dir_lights: dir_packed,
@@ -1475,7 +1551,7 @@ impl Renderer {
                     cascade_vp: csm_packed,
                     cascade_splits: [splits[1], splits[2], splits[3], 0.0],
                     ambient_color,
-                    counts: [dir_count as u32, pt_count as u32, cube_count as u32, 0],
+                    counts: [dir_count as u32, pt_count as u32, shadow_point_count as u32, 0],
                     light_view_proj: mat.to_cols_array_2d(),
                     misc, fog_params, fog_color, shadow_params,
                     dir_lights: dir_packed,
@@ -1489,20 +1565,29 @@ impl Renderer {
 
             for c in 0..CASCADE_COUNT { write_slot(&mut bytes, c, cascade_vp[c]); }
 
-            if pt_count > 0 {
-                let light_pos = Vec3::new(point_lights[0].position[0], point_lights[0].position[1], point_lights[0].position[2]);
-                let range = point_lights[0].position[3];
+            // ИЗМЕНЕНО (#7): записываем матрицы для всех cube shadow maps.
+            for cube in 0..shadow_point_count {
+                let light_pos = Vec3::new(
+                    point_lights[cube].position[0],
+                    point_lights[cube].position[1],
+                    point_lights[cube].position[2],
+                );
+                let range = point_lights[cube].position[3];
                 let faces = shadow_cube::cube_face_matrices(light_pos, range);
-                for (i, m) in faces.iter().enumerate() { write_slot(&mut bytes, 3 + i, *m); }
-            } else {
-                for i in 0..6 { write_slot(&mut bytes, 3 + i, Mat4::IDENTITY); }
+                for (face, m) in faces.iter().enumerate() {
+                    write_slot(&mut bytes, 3 + cube * 6 + face, *m);
+                }
+            }
+            // Неиспользуемые слоты заполняем identity — на случай, если
+            // шейдер случайно прочитает их, не будет мусора.
+            for cube in shadow_point_count..MAX_SHADOW_CUBES {
+                for face in 0..6 {
+                    write_slot(&mut bytes, 3 + cube * 6 + face, Mat4::IDENTITY);
+                }
             }
             self.queue.write_buffer(&self.shadow_pass_buffer, 0, &bytes);
         }
 
-        // ИСПРАВЛЕНО: обновляем все uniform'ы bloom-цепочки — раньше
-        // downsample/upsample были `_`-полями и никогда не менялись,
-        // из-за чего bloom_radius/knee работали только на prefilter.
         self.sd.bloom_chain.update_params(
             &self.queue,
             postfx.bloom_threshold,
@@ -1532,12 +1617,13 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
 
+        let fog_far = camera.far.min(200.0);
         let vol_data = VolumetricParams {
             grid: [
                 VOLUMETRIC_GRID_W as f32, VOLUMETRIC_GRID_H as f32,
                 1.0 / VOLUMETRIC_GRID_W as f32, 1.0 / VOLUMETRIC_GRID_H as f32,
             ],
-            cam: [camera.near, camera.far, (camera.fov_y * 0.5).tan(), camera.aspect],
+            cam: [camera.near, fog_far, (camera.fov_y * 0.5).tan(), camera.aspect],
             params: [postfx.volumetric_density, postfx.volumetric_scattering, postfx.volumetric_phase_g, 0.0],
             fog_color: [postfx.fog_color[0], postfx.fog_color[1], postfx.fog_color[2], 0.0],
         };
@@ -1553,9 +1639,6 @@ impl Renderer {
 
         let sorted_draws = sort_draws_for_render(draws, camera.position());
 
-        // ИСПРАВЛЕНО: сохраняем статистику последнего кадра. Раньше
-        // App::redraw захардкодивал draws=0, instances=0 в Stats,
-        // потому что эти значения становятся известны только здесь.
         self.last_draw_count = sorted_draws.len();
         self.last_instance_count = sorted_draws.iter()
             .map(|d| d.instances.len())
@@ -1599,7 +1682,15 @@ impl Renderer {
         });
 
         passes::encode_csm_all(self, &mut encoder, &sorted_draws);
-        if cube_count > 0 { passes::encode_cube_shadow_all(self, &mut encoder, &sorted_draws); }
+        // ИЗМЕНЕНО (#7): рендерим cube shadow для всех активных теней.
+        if shadow_point_count > 0 {
+            passes::encode_cube_shadow_all(
+                self,
+                &mut encoder,
+                &sorted_draws,
+                shadow_point_count as u32,
+            );
+        }
         passes::encode_gbuffer_pass(self, &mut encoder, &sorted_draws);
         passes::encode_decal_pass(self, &mut encoder, decals);
         passes::encode_ssao_pass(self, &mut encoder);
@@ -1611,12 +1702,22 @@ impl Renderer {
         passes::encode_transparent_pass(self, &mut encoder, &sorted_draws);
         passes::encode_volumetric_compute(self, &mut encoder);
         passes::encode_volumetric_composite(self, &mut encoder);
-        passes::encode_taa_pass(self, &mut encoder, write_idx);
+
+        // ИЗМЕНЕНО (#6): TAA-проход выполняется только при `use_taa`.
+        if use_taa {
+            passes::encode_taa_pass(self, &mut encoder, write_idx);
+        }
 
         if postfx.debug_view.is_debug() {
             passes::encode_debug_pass(self, &mut encoder, &swap_view, postfx.debug_view);
         } else {
-            passes::encode_post_processing(self, &mut encoder, &swap_view, write_idx);
+            passes::encode_post_processing(
+                self,
+                &mut encoder,
+                &swap_view,
+                write_idx,
+                use_taa,
+            );
         }
 
         if let Some(egui_data) = egui_data {
@@ -2303,17 +2404,6 @@ fn make_decal_pipeline(
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: GBUFFER_FORMAT,
-                    // ИСПРАВЛЕНО: `ALPHA_BLENDING` — это `src*src.a + dst*(1-src.a)`
-                    // **для всех четырёх каналов**. Но target 0 хранит
-                    // `(albedo.rgb, metallic)` — блендинг канала alpha
-                    // портит metallic: под decal'ом он становится
-                    // `decal.a² + metallic*(1-decal.a)`.
-                    //
-                    // Decal не имеет своего metallic — он должен
-                    // сохранять underlying-значение. Поэтому:
-                    //   RGB — обычный alpha-блендинг (SrcAlpha/OneMinusSrcAlpha),
-                    //   A   — passthrough dst (Zero/One), т.е. металлик
-                    //         от нижележащего G-buffer остаётся нетронутым.
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -2352,11 +2442,6 @@ fn make_decal_pipeline(
             cull_mode: None,
             ..Default::default()
         },
-        // ИСПРАВЛЕНО: None — decal pass больше не имеет depth attachment
-        // (см. passes::encode_decal_pass). wgpu валидирует, что
-        // depth_stencil в pipeline и наличие depth attachment в pass'е
-        // должны совпадать; depth-test шейдер делает сам через
-        // textureLoad и discard.
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

@@ -12,10 +12,15 @@ pub struct BloomMip {
     pub size: (u32, u32),
 }
 
+/// ИЗМЕНЕНО (#6): `prefilter_bgs` теперь `[_; 3]`.
+///
+/// Индекс 0 — prefilter читает `taa_resolved_views[0]` (TAA on, write_idx = 0).
+/// Индекс 1 — prefilter читает `taa_resolved_views[1]` (TAA on, write_idx = 1).
+/// Индекс 2 — prefilter читает `hdr_fog_view`      (TAA off, bypass).
 pub struct BloomChain {
     pub mips: Vec<BloomMip>,
     pub sampler: wgpu::Sampler,
-    pub prefilter_bgs: [wgpu::BindGroup; 2],
+    pub prefilter_bgs: [wgpu::BindGroup; 3],
     pub downsample_bgs: Vec<wgpu::BindGroup>,
     pub upsample_bgs: Vec<wgpu::BindGroup>,
     pub prefilter_uniform: wgpu::Buffer,
@@ -28,11 +33,6 @@ pub struct BloomChain {
 impl BloomChain {
     /// Обновить threshold / knee / radius во всех uniform'ах цепочки,
     /// сохранив texel-размеры каждого уровня.
-    ///
-    /// Вызывается каждый кадр из `Renderer::render`. Раньше
-    /// downsample/upsample-uniform'ы были `_`-полями и никогда не
-    /// обновлялись — ползунок `bloom_radius` менял только prefilter,
-    /// то есть на итоговый ореол не влиял.
     pub fn update_params(
         &self,
         queue: &wgpu::Queue,
@@ -78,9 +78,6 @@ impl BloomChain {
         }
 
         // --- Upsample.
-        // В build-цикле: `for src_level in (1..BLOOM_MIP_COUNT).rev()`.
-        // upsample_uniforms[0] соответствует src_level = BLOOM_MIP_COUNT - 1,
-        // upsample_uniforms[last] — src_level = 1.
         for i in 0..self.upsample_uniforms.len() {
             let src_level = BLOOM_MIP_COUNT - 1 - i;
             let src = self.mips[src_level].size;
@@ -127,7 +124,12 @@ pub struct SizeDependent {
     pub bloom_chain: BloomChain,
     pub linear_sampler: wgpu::Sampler,
 
-    pub composite_bgs: [wgpu::BindGroup; 2],
+    /// ИЗМЕНЕНО (#6): `composite_bgs` теперь `[_; 3]`.
+    ///
+    /// Индекс 0 — composite читает `taa_resolved_views[0]` (TAA on, write_idx = 0).
+    /// Индекс 1 — composite читает `taa_resolved_views[1]` (TAA on, write_idx = 1).
+    /// Индекс 2 — composite читает `hdr_fog_view`      (TAA off, bypass).
+    pub composite_bgs: [wgpu::BindGroup; 3],
 
     pub ldr_view: wgpu::TextureView,
     pub fxaa_uniform: wgpu::Buffer,
@@ -171,7 +173,11 @@ pub fn build_size_dependent(
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
     csm_sampler: &wgpu::Sampler,
-    cube_shadow_cube_view: &wgpu::TextureView,
+    // ИЗМЕНЕНО (#7): теперь cube array вместо одного куба.
+    // Тип `TextureView` не меняется (view_dimension — свойство view'а,
+    // не Rust-типа), но семантически: этот view имеет dimension
+    // `CubeArray` и содержит `6 * MAX_SHADOW_CUBES` слоёв.
+    cube_shadow_array_view: &wgpu::TextureView,
     cube_shadow_sampler: &wgpu::Sampler,
     camera_buffer: &wgpu::Buffer,
     lights_buffer: &wgpu::Buffer,
@@ -329,7 +335,6 @@ pub fn build_size_dependent(
 
     // ============================================================
     // Volumetric composite bind group (fog + SSR).
-    // SSR читает normal / albedo / emissive / camera.
     // ============================================================
     let volumetric_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("volumetric_composite_bg"),
@@ -355,7 +360,6 @@ pub fn build_size_dependent(
                 binding: 4,
                 resource: volumetric_uniform.as_entire_binding(),
             },
-            // SSR-источники:
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view),
@@ -435,6 +439,8 @@ pub fn build_size_dependent(
         ],
     });
 
+    // ИЗМЕНЕНО (#7): shadow2_bind_group binding 2 → cube_shadow_array_view.
+    // Layout (`shadow2_layout`) в `mod.rs` приведён к `CubeArray`.
     let shadow2_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shadow2_bind_group"),
         layout: shadow2_layout,
@@ -449,7 +455,7 @@ pub fn build_size_dependent(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(cube_shadow_cube_view),
+                resource: wgpu::BindingResource::TextureView(cube_shadow_array_view),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -518,26 +524,33 @@ pub fn build_size_dependent(
     });
 
     // ============================================================
-    // Bloom chain — prefilter читает TAA resolved.
+    // Bloom chain
     // ============================================================
     let bloom_chain = build_bloom_chain(
         device,
         bloom_layout,
         &taa_resolved_views,
+        &hdr_fog_view,
         w,
         h,
         bloom_knee,
         bloom_radius,
     );
 
-    let composite_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
+    // ИЗМЕНЕНО (#6): три варианта composite bind group.
+    let composite_bgs: [wgpu::BindGroup; 3] = std::array::from_fn(|i| {
+        let src_view: &wgpu::TextureView = if i < 2 {
+            &taa_resolved_views[i]
+        } else {
+            &hdr_fog_view
+        };
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
             layout: tonemap_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&taa_resolved_views[i]),
+                    resource: wgpu::BindingResource::TextureView(src_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -655,6 +668,7 @@ fn build_bloom_chain(
     device: &wgpu::Device,
     bloom_layout: &wgpu::BindGroupLayout,
     taa_resolved_views: &[wgpu::TextureView; 2],
+    hdr_fog_view: &wgpu::TextureView,
     screen_w: u32,
     screen_h: u32,
     knee: f32,
@@ -711,14 +725,20 @@ fn build_bloom_chain(
         radius,
     );
 
-    let prefilter_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
+    // ИЗМЕНЕНО (#6): три prefilter bind group.
+    let prefilter_bgs: [wgpu::BindGroup; 3] = std::array::from_fn(|i| {
+        let src_view: &wgpu::TextureView = if i < 2 {
+            &taa_resolved_views[i]
+        } else {
+            hdr_fog_view
+        };
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_prefilter_bg"),
             layout: bloom_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&taa_resolved_views[i]),
+                    resource: wgpu::BindingResource::TextureView(src_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

@@ -1,6 +1,35 @@
+// TAA resolve.
+//
+// Jitter в текущей версии всегда Vec2::ZERO (см. renderer/mod.rs).
+// Тем не менее шейдер полностью поддерживает и jittered-конвенцию —
+// формулы компенсации ниже работают при любом jitter_px.
+//
+// Конвенция (совпадает с gbuffer.wgsl / forward_transparent.wgsl):
+//
+//   - `t_current` содержит jittered-сцену. Пиксель (i, j) содержит
+//     фрагмент F, чья unjittered-UV = ((i+0.5) − jitter_px) / screen.
+//     При jitter = 0 это просто (i+0.5, j+0.5)/screen.
+//
+//   - `t_motion` в пикселе (i, j) описывает displacement
+//     **unjittered**-позиции F между кадрами:
+//       motion = prev_uv_F − uv_F_unjit_current
+//     где uv_F_unjit_current = uv − jitter_uv.
+//
+//   - `t_history[x, y]` содержит resolved-цвет фрагмента, попавшего
+//     в (x, y) при растеризации кадра N-1. Его unjittered-UV:
+//       u_hist(x, y) = ((x+0.5) − prev_jitter_px) / screen
+//
+// Из этих трёх определений:
+//   prev_uv_F = (uv − jitter_uv) + motion
+//   history_uv = prev_uv_F + prev_jitter_uv
+//
+// При jitter = 0 формула сводится к классической:
+//   history_uv = uv + motion
+
 struct TaaParams {
-    values: vec4<f32>,
-    screen: vec4<f32>,
+    values: vec4<f32>,       // x = alpha, y = velocity_weight, z = sharpen, w = reset_flag
+    screen: vec4<f32>,       // xy = (w_px, h_px), zw = jitter текущего кадра (пиксели)
+    prev_jitter: vec4<f32>,  // xy = jitter предыдущего кадра (пиксели), zw = unused
 };
 
 @group(0) @binding(0) var t_current: texture_2d<f32>;
@@ -72,7 +101,11 @@ fn clip_history(uv: vec2<f32>, texel: vec2<f32>, history: vec3<f32>) -> vec3<f32
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let texel = params.screen.zw;
+    let screen_px = params.screen.xy;
+    let jitter_px = params.screen.zw;
+    let prev_jitter_px = params.prev_jitter.xy;
+    let texel = 1.0 / screen_px;
+
     let uv = in.uv;
 
     let pixel = vec2<i32>(i32(in.frag_coord.x), i32(in.frag_coord.y));
@@ -83,15 +116,24 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     let motion = textureLoad(t_motion, pixel, 0).rg;
-    let velocity_len = length(motion * params.screen.xy);
+    let velocity_len = length(motion * screen_px);
 
-    let prev_uv = uv + motion;
+    let jitter_uv = jitter_px / screen_px;
+    let uv_unjit = uv - jitter_uv;
+    let prev_uv = uv_unjit + motion;
 
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
         return vec4<f32>(current, 1.0);
     }
 
-    let history_raw = textureSample(t_history, s_lin, prev_uv).rgb;
+    let prev_jitter_uv = prev_jitter_px / screen_px;
+    let history_uv = prev_uv + prev_jitter_uv;
+
+    if (history_uv.x < 0.0 || history_uv.x > 1.0 || history_uv.y < 0.0 || history_uv.y > 1.0) {
+        return vec4<f32>(current, 1.0);
+    }
+
+    let history_raw = textureSample(t_history, s_lin, history_uv).rgb;
     let history = clip_history(uv, texel, history_raw);
 
     let base_alpha = params.values.x;

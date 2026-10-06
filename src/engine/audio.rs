@@ -4,15 +4,88 @@
 //!   - `OutputStreamBuilder::open_default_stream()` — открыть устройство.
 //!   - `Sink::connect_new(&stream.mixer())` — создать sink.
 //!   - `SamplesBuffer::new(channels: u16, sample_rate: u32, data)`.
+//!
+//! ИЗМЕНЕНО (#18): добавлена реализация `rodio::Source` поверх
+//! `Arc<Vec<f32>>` — `SharedSamples`. Раньше `play` делал
+//! `SamplesBuffer::new(1, sr, samples.clone())`, копируя весь буфер
+//! сэмплов (для `explosion` — ~105 КБ на каждый звук). Теперь
+//! `play` — дешёвая атомарная операция `Arc::clone`, а сам `Source`
+//! отдаёт по одному `f32` из общего буфера.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStreamBuilder, Sink};
+use rodio::{OutputStreamBuilder, Sink, Source};
+
+/// ИЗМЕНЕНО (#18): обёртка над `Arc<Vec<f32>>`, реализующая
+/// `rodio::Source`.
+///
+/// Раньше `play` создавал `SamplesBuffer::new(1, sr, samples.clone())` —
+/// `Vec::clone()` копировал весь буфер сэмплов в новый Vec. Для
+/// `shot` это ~14 КБ, для `explosion` — ~105 КБ **на каждый вызов**.
+/// При стрельбе ~10 раз/сек это до мегабайта в секунду лишних
+/// аллокаций+memcpy.
+///
+/// `SamplesBuffer::new` принимает `Into<Vec<f32>>` (владение). Замена
+/// на `Arc<Vec<f32>>` через `SamplesBuffer::new` невозможна — нужен
+/// `Vec` по значению. Поэтому — своя реализация `Source`, которая
+/// читает данные из `Arc` без копирования: rodio вызывает `next()`
+/// по одному сэмплу, не требуя владения всем буфером.
+///
+/// `Send + 'static`: `Arc<Vec<f32>>` — `Send + Sync`, `usize` и
+/// `u32` — тоже. `Sink::detach()` переносит source на аудио-поток,
+/// где это обязательно.
+struct SharedSamples {
+    data: Arc<Vec<f32>>,
+    pos: usize,
+    sample_rate: u32,
+}
+
+impl Iterator for SharedSamples {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        let s = self.data.get(self.pos).copied();
+        if s.is_some() {
+            self.pos += 1;
+        }
+        s
+    }
+}
+
+impl Source for SharedSamples {
+    /// rodio 0.21: `current_span_len` вместо старого `current_frame_len`.
+    /// `None` — «длина следующего блока неизвестна, читай по одному
+    /// сэмплу до `None`». Для коротких процедурных эффектов это
+    /// нормально: rodio сам буферизует.
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        1
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
 
 pub struct AudioSystem {
     _stream: rodio::OutputStream,
-    cache: HashMap<&'static str, Vec<f32>>,
+
+    /// ИЗМЕНЕНО (#18): `Arc<Vec<f32>>` вместо `Vec<f32>`.
+    ///
+    /// `Arc::clone` — одна атомарная операция (инкремент счётчика),
+    /// `Vec::clone` — аллокация + memcpy всего буфера. Для
+    /// коротких звуков (shot, pickup, ding) разница заметна только
+    /// на больших частотах, но убирать её бесплатно — правильный
+    /// trade-off.
+    cache: HashMap<&'static str, Arc<Vec<f32>>>,
     sample_rate: u32,
 }
 
@@ -28,10 +101,11 @@ impl AudioSystem {
 
         let sample_rate: u32 = 44_100;
         let mut cache = HashMap::new();
-        cache.insert("shot",      gen_shot(sample_rate));
-        cache.insert("explosion", gen_explosion(sample_rate));
-        cache.insert("pickup",    gen_pickup(sample_rate));
-        cache.insert("ding",      gen_ding(sample_rate));
+        // ИЗМЕНЕНО (#18): каждая запись обёрнута в `Arc`.
+        cache.insert("shot",      Arc::new(gen_shot(sample_rate)));
+        cache.insert("explosion", Arc::new(gen_explosion(sample_rate)));
+        cache.insert("pickup",    Arc::new(gen_pickup(sample_rate)));
+        cache.insert("ding",      Arc::new(gen_ding(sample_rate)));
 
         log::info!(
             "audio: initialized @ {} Hz, {} procedural sounds",
@@ -45,11 +119,17 @@ impl AudioSystem {
     pub fn play(&self, name: &'static str) {
         let Some(samples) = self.cache.get(name) else { return; };
 
-        let buf = SamplesBuffer::new(1u16, self.sample_rate, samples.clone());
+        // ИЗМЕНЕНО (#18): `Arc::clone` вместо `samples.clone()`.
+        // Сам `Source` (`SharedSamples`) читает данные из общего
+        // `Arc<Vec<f32>>` без копирования.
+        let source = SharedSamples {
+            data: Arc::clone(samples),
+            pos: 0,
+            sample_rate: self.sample_rate,
+        };
 
-        // rodio 0.21: Sink::connect_new(&mixer).
         let sink = Sink::connect_new(self._stream.mixer());
-        sink.append(buf);
+        sink.append(source);
         sink.detach();
     }
 }

@@ -1,5 +1,8 @@
 // Forward transparent. 2 MRT: HDR + motion.
-// Motion — как в gbuffer: prev_vp **unjittered**, база = pixel_center_uv.
+// Motion — как в gbuffer: prev_vp **unjittered**, база = pixel_center_uv_unjit.
+//
+// pixel_center_uv_unjit = (frag_coord.xy - camera.near_far.zw) / screen_size,
+// где near_far.zw = jitter текущего кадра в пикселях.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -7,6 +10,7 @@ struct Camera {
     view:           mat4x4<f32>,
     inv_view:       mat4x4<f32>,
     camera_pos:     vec4<f32>,
+    // xy = (near, far), zw = (jitter_x_px, jitter_y_px) текущего кадра.
     near_far:       vec4<f32>,
     prev_view_proj: mat4x4<f32>,
     screen_size:    vec4<f32>,
@@ -16,12 +20,20 @@ struct Lights {
     cascade_vp:      array<mat4x4<f32>, 3>,
     cascade_splits:  vec4<f32>,
     ambient_color:   vec4<f32>,
+    // x = dir_count, y = point_count, z = cube_shadow_count, w = unused.
+    // ИЗМЕНЕНО (#7): раньше z всегда был 0/1; теперь — фактическое
+    // число активных cube shadow maps. Шейдер всё равно не читает
+    // тени, но layout должен совпадать.
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
     misc:            vec4<f32>,
     fog_params:      vec4<f32>,
     fog_color:       vec4<f32>,
-    _pad1:           vec4<f32>,
+    // ИЗМЕНЕНО (#7): переименовано `_pad1` → `shadow_params`.
+    // Слот содержит (depth_bias, normal_bias, fade_start, fade_end).
+    // Раньше комментарий вводил в заблуждение — в `deferred_lighting.wgsl`
+    // и `volumetric_fog.wgsl` тот же слот называется `shadow_params`.
+    shadow_params:   vec4<f32>,
     dir_lights:      array<vec4<f32>, 8>,
     point_lights:    array<vec4<f32>, 32>,
     cube_shadow_pos: array<vec4<f32>, 4>,
@@ -43,7 +55,11 @@ struct Skeleton {
 
 @group(2) @binding(0)  var csm_tex:          texture_depth_2d_array;
 @group(2) @binding(1)  var csm_samp:         sampler_comparison;
-@group(2) @binding(2)  var cube_shadow_tex:  texture_depth_cube;
+// ИЗМЕНЕНО (#7): `texture_depth_cube` → `texture_depth_cube_array`.
+// Раньше был один куб (только для первого point light), теперь —
+// массив `6 * MAX_SHADOW_CUBES` слоёв. Шейдер сам не читает cube
+// shadow, но тип binding'а обязан совпадать с `shadow2_layout`.
+@group(2) @binding(2)  var cube_shadow_tex:  texture_depth_cube_array;
 @group(2) @binding(3)  var cube_shadow_samp: sampler_comparison;
 @group(2) @binding(4)  var ssao_tex:         texture_2d<f32>;
 @group(2) @binding(5)  var linear_samp:      sampler;
@@ -154,22 +170,9 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(T * invmax, B * invmax, N);
 }
 
-// ИСПРАВЛЕНО: раньше терялась интенсивность источника.
-// Соглашение по layout (см. gpu_types::LightsUniform):
-//   dir_lights[i*2]   = (dir.xyz, intensity)
-//   dir_lights[i*2+1] = (color.rgb, _)
-//   point_lights[i*2]   = (pos.xyz, range)
-//   point_lights[i*2+1] = (color.rgb, intensity)
-//
-// Теперь формула совпадает с deferred_lighting.wgsl:
-//   dir   : radiance = color * intensity * NdotL
-//   point : radiance = color * intensity * NdotL * atten²
 fn dir_contrib(n: vec3<f32>, idx: u32) -> vec3<f32> {
     let dir_p = lights.dir_lights[idx * 2u];
     let col_p = lights.dir_lights[idx * 2u + 1u];
-    // В Lights.dir_lights[i*2].xyz лежит направление К источнику —
-    // то же соглашение, что и в deferred_lighting.wgsl:
-    //     let l = normalize(dir_w.xyz);
     let l = normalize(dir_p.xyz);
     let ndl = max(dot(n, l), 0.0);
     return col_p.rgb * dir_p.w * ndl;
@@ -253,7 +256,7 @@ fn fs_main(
         out_rgb = mix(out_rgb, lights.fog_color.rgb, fog_amount);
     }
 
-    let pixel_center_uv = in.frag_coord.xy / camera.screen_size.xy;
+    let pixel_center_uv = (in.frag_coord.xy - camera.near_far.zw) / camera.screen_size.xy;
     let prev_uv = project_to_uv(camera.prev_view_proj, in.prev_world_pos);
     let motion  = prev_uv - pixel_center_uv;
 

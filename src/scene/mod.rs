@@ -1,5 +1,3 @@
-//! Сериализация сцены в RON, префабы, экспорт/импорт FBX.
-
 pub mod fbx_ast;
 pub mod fbx_binary;
 pub mod fbx_export;
@@ -17,6 +15,7 @@ pub use serialize::{
     load_scene_from_file, load_scene_from_str, load_scene_from_str_full,
     load_scene_with_assets_from_file, load_scene_with_assets_from_str,
     load_scene_with_assets_from_str_full,
+    load_scene_with_assets_from_str_full_with_ids,
     save_scene_to_file, save_scene_to_string,
     save_scene_with_assets_to_file, save_scene_with_assets_to_string,
     save_scene_with_game_state_to_file, save_scene_with_game_state_to_string,

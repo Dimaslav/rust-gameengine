@@ -97,7 +97,20 @@ pub enum EditorAction {
     SavePrefab,
     RefreshPrefabs,
     InstantiatePrefab(u32),
+
+    /// Загрузка sRGB-текстур (albedo / base color / emissive).
+    /// GPU декодирует sRGB-байты в linear при сэмплировании.
     LoadTextures,
+
+    /// ИЗМЕНЕНО (#8): загрузка linear-текстур (normal map, MR-маска,
+    /// AO, height/displacement, маски). Отличие от `LoadTextures` —
+    /// формат GPU-текстуры: `Rgba8Unorm` вместо `Rgba8UnormSrgb`.
+    ///
+    /// Раньше был только `LoadTextures`; любая текстура, загруженная
+    /// через UI, получала sRGB-формат, что для normal/MR давало
+    /// двойную гамма-коррекцию.
+    LoadTexturesLinear,
+
     RemoveTexture(String),
     ExportFbxAll,
     ExportFbxSelected,
@@ -243,8 +256,6 @@ impl Editor {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(egui::Visuals::dark());
 
-        // egui-winit 0.32: State::new принимает 6 аргументов:
-        //   ctx, viewport_id, window, native_ppp, theme, max_texture_side.
         let egui_state = EguiWinitState::new(
             egui_ctx.clone(),
             viewport_id,
@@ -254,8 +265,6 @@ impl Editor {
             None,   // max_texture_side
         );
 
-        // egui-wgpu 0.32: Renderer::new(device, format, depth_format, msaa_samples, dithering).
-        // Пять аргументов; `RendererOptions` появится только в 0.33+.
         let egui_renderer = EguiRenderer::new(device, surface_format, None, 1, false);
 
         Self {
