@@ -8,11 +8,13 @@ pub mod ibl;
 pub mod line;
 pub mod lod;
 pub mod material;
+pub mod props;
 pub mod mesh;
 pub mod renderer;
 pub mod shader_source;
 pub mod shadow_cube;
 pub mod skinning;
+pub mod terrain;
 pub mod texture;
 
 pub use bvh::Bvh;
@@ -32,3 +34,4 @@ pub use renderer::{
 };
 pub use shadow_cube::CUBE_SIZE as POINT_SHADOW_SIZE;
 pub use skinning::{AnimationClip, Skeleton, MAX_JOINTS};
+pub use terrain::{generate_terrain_mesh, generate_terrain_texture, Heightmap};

@@ -161,6 +161,7 @@ pub struct Renderer {
     pub materials: MaterialRegistry,
     pub textures: HashMap<String, Texture>,
     default_material: Material,
+    pub terrain: Option<crate::render::terrain::Heightmap>,
 
     skybox_time: f32,
 
@@ -1140,6 +1141,7 @@ impl Renderer {
             materials: MaterialRegistry::new(),
             textures: HashMap::new(),
             default_material,
+            terrain: None,
             skybox_time: 0.0,
             taa_frame_index: 0,
             taa_prev_view_proj: Mat4::IDENTITY,
@@ -1457,7 +1459,7 @@ impl Renderer {
         self.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&data));
     }
 
-    pub fn resize(&mut self, new_size: wgpu::PhysicalSize<u32>) {
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 { return; }
         self.size = new_size;
         self.config.width = new_size.width;

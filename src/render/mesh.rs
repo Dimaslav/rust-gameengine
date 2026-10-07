@@ -58,27 +58,19 @@ pub struct InstanceData {
     pub model: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
     pub color: [f32; 4],
-    /// `xy` — множитель UV (сколько раз текстура повторяется),
-    /// `zw` — padding для 16-байтового выравнивания.
     pub uv_scale: [f32; 4],
-    /// Матрица модели из **предыдущего кадра**. Нужна G-buffer'у для
-    /// per-object motion vectors: prev_world_pos = prev_model * local_pos.
-    /// Для статических объектов == model.
     pub prev_model: [[f32; 4]; 4],
 }
 
 impl InstanceData {
-    /// Устаревший конструктор без motion: prev_model = model (статика).
     pub fn new(model: Mat4, color: [f32; 4]) -> Self {
         Self::new_with_uv(model, color, [1.0, 1.0])
     }
 
-    /// То же, с UV-масштабом. prev_model = model → только camera motion.
     pub fn new_with_uv(model: Mat4, color: [f32; 4], uv_scale: [f32; 2]) -> Self {
         Self::new_full(model, model, color, uv_scale)
     }
 
-    /// Полный конструктор: явный prev_model для per-object motion vectors.
     pub fn new_full(
         model: Mat4,
         prev_model: Mat4,
@@ -127,29 +119,24 @@ pub struct Mesh {
     pub aabb_max: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
 
-    /// BVH для raycast — строится **лениво** при первом обращении
-    /// через `bvh()`. Раньше строился eager в `Mesh::new`, что
-    /// заметно замедляло загрузку больших FBX/glTF моделей, хотя
-    /// BVH нужен только для picking / projectile-хиттеста.
+    /// BVH — строится лениво при первом `bvh()`.
     bvh: OnceLock<Bvh>,
 
-    // CPU-копии для экспорта (FBX и т.п.).
+    /// CPU-копии для экспорта и редактирования.
     pub cpu_vertices: Vec<Vertex3D>,
     pub cpu_indices: Vec<u32>,
 
-    /// Автоматически сгенерированные LOD-уровни (не считая LOD0).
-    /// Пустой, если меш слишком простой.
+    /// LOD-уровни.
     pub lods: Vec<LodLevel>,
 }
 
 impl Mesh {
-    /// Ленивое построение BVH. При первом вызове строит из
-    /// `self.triangles`, дальше возвращает закэшированное значение.
+    /// Ленивое построение BVH.
     pub fn bvh(&self) -> &Bvh {
         self.bvh.get_or_init(|| Bvh::build(&self.triangles))
     }
 
-    /// Публичный конструктор: строит меш + генерирует LOD.
+    /// Публичный конструктор с LOD.
     pub fn new(
         device: &wgpu::Device,
         vertices: &[Vertex3D],
@@ -159,8 +146,7 @@ impl Mesh {
         Self::from_raw_parts(device, vertices, indices, label, true)
     }
 
-    /// Конструктор без генерации LOD. Для внутреннего использования
-    /// (`Renderer::add_mesh` при регистрации LOD-версий).
+    /// Конструктор без LOD.
     pub fn from_raw_parts(
         device: &wgpu::Device,
         vertices: &[Vertex3D],
@@ -171,7 +157,7 @@ impl Mesh {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{label}_vb")),
             contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{label}_ib")),
@@ -186,6 +172,8 @@ impl Mesh {
             min = min.min(p);
             max = max.max(p);
         }
+        if !min.is_finite() { min = Vec3::ZERO; }
+        if !max.is_finite() { max = Vec3::ZERO; }
         let center = (min + max) * 0.5;
         let mut radius = 0.0f32;
         for v in vertices {
@@ -223,6 +211,44 @@ impl Mesh {
             cpu_indices: indices.to_vec(),
             lods,
         }
+    }
+
+    /// Сбросить закэшированный BVH. Вызывать после изменения
+    /// `cpu_vertices` / `cpu_indices` (например, terrain sculpt).
+    pub fn invalidate_bvh(&mut self) {
+        self.bvh = std::sync::OnceLock::new();
+    }
+
+    /// Пересобрать `triangles`, `aabb_min/max`, `bounds_*` из
+    /// CPU-данных. Нужно после terrain sculpt, чтобы BVH и frustum
+    /// culling работали на новых данных.
+    pub fn rebuild_triangles_from_cpu(&mut self) {
+        self.triangles.clear();
+        self.triangles.reserve(self.cpu_indices.len() / 3);
+        for tri in self.cpu_indices.chunks_exact(3) {
+            let a = Vec3::from(self.cpu_vertices[tri[0] as usize].position);
+            let b = Vec3::from(self.cpu_vertices[tri[1] as usize].position);
+            let c = Vec3::from(self.cpu_vertices[tri[2] as usize].position);
+            self.triangles.push([a, b, c]);
+        }
+        let mut mn = Vec3::splat(f32::INFINITY);
+        let mut mx = Vec3::splat(f32::NEG_INFINITY);
+        for v in &self.cpu_vertices {
+            let p = Vec3::from(v.position);
+            mn = mn.min(p);
+            mx = mx.max(p);
+        }
+        if !mn.is_finite() { mn = Vec3::ZERO; }
+        if !mx.is_finite() { mx = Vec3::ZERO; }
+        self.aabb_min = mn;
+        self.aabb_max = mx;
+        self.bounds_center = (mn + mx) * 0.5;
+        let mut r = 0.0f32;
+        for v in &self.cpu_vertices {
+            let p = Vec3::from(v.position);
+            r = r.max((p - self.bounds_center).length());
+        }
+        self.bounds_radius = r;
     }
 
     pub fn world_bounds(&self, model: &Mat4) -> (Vec3, f32) {
@@ -326,9 +352,6 @@ impl Mesh {
             for seg in 0..segments {
                 let a = ring * stride + seg;
                 let b = a + stride;
-                // ИСПРАВЛЕНО (winding): ∂ring × ∂θ даёт внутреннюю
-                // нормаль (спирографический крест). Меняем порядок
-                // обхода на CCW относительно внешней поверхности.
                 indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
@@ -391,8 +414,6 @@ impl Mesh {
             for x in 0..n {
                 let a = y * stride + x;
                 let b = a + stride;
-                // ИСПРАВЛЕНО (winding): ∂row(+Y) × ∂col(+X) = -Z,
-                // а ожидается +Z. Инвертируем обход.
                 indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
@@ -537,7 +558,6 @@ impl Mesh {
             for s in 0..segs {
                 let a = ring * stride + s;
                 let b = a + stride;
-                // ИСПРАВЛЕНО (winding): см. комментарий к sphere.
                 indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
