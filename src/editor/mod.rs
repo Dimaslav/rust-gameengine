@@ -12,6 +12,7 @@ pub mod settings;
 pub mod ui;
 pub mod undo;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use egui_wgpu::Renderer as EguiRenderer;
@@ -20,7 +21,7 @@ use winit::window::Window;
 
 use crate::ecs::{Entity, World};
 use crate::game::audio::AudioBus;
-use crate::game::components::Transform;
+use crate::game::components::{Parent, Transform};
 use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
 
@@ -46,6 +47,24 @@ pub struct BoxSelect {
 
 pub struct EditorState {
     pub selected: Vec<Entity>,
+
+    // === ИЗМЕНЕНО (editor sprint-1): дерево иерархии ===
+    /// Раскрытые узлы в дереве иерархии. Если entity нет в этом set,
+    /// его дети не показываются. Пустой set = все свёрнуты.
+    pub hierarchy_expanded: HashSet<Entity>,
+
+    // === ИЗМЕНЕНО (editor sprint-2): Lock / Solo ===
+    /// Entity, которые «залочены» — их нельзя выбрать кликом,
+    /// двигать мышью или менять через drag&drop в дереве.
+    pub locked: HashSet<Entity>,
+    /// Если `Some(e)` — Solo-режим: в viewport отображается только
+    /// `e` и его потомки, остальное скрывается.
+    pub solo: Option<Entity>,
+
+    /// Всплывающее сообщение редактора (например, «entity is locked»).
+    /// Хранится как (текст, ttl секунд).
+    pub hint: Option<(String, f32)>,
+
     pub save_path: String,
     pub pending_action: Option<EditorAction>,
     pub gizmo: GizmoState,
@@ -132,6 +151,13 @@ impl EditorState {
     pub fn new() -> Self {
         let mut s = Self {
             selected: Vec::new(),
+
+            // ИЗМЕНЕНО (editor sprint-1/2): новые поля.
+            hierarchy_expanded: HashSet::new(),
+            locked: HashSet::new(),
+            solo: None,
+            hint: None,
+
             save_path: "scene.ron".to_string(),
             pending_action: None,
             gizmo: GizmoState::default(),
@@ -240,6 +266,51 @@ impl EditorState {
 
     pub fn prune_selection(&mut self, world: &World) {
         self.selected.retain(|&e| world.entities().contains(&e));
+        // ИЗМЕНЕНО (editor sprint-1): чистим также вспомогательные
+        // множества, иначе они протекают после DeleteSelected.
+        self.hierarchy_expanded.retain(|&e| world.entities().contains(&e));
+        self.locked.retain(|&e| world.entities().contains(&e));
+        if let Some(s) = self.solo {
+            if !world.entities().contains(&s) {
+                self.solo = None;
+            }
+        }
+    }
+
+    /// Проверить, залочена ли entity (её или любой из её родителей).
+    /// Lock родителя блокирует и всех детей — чтобы нельзя было
+    /// случайно сдвинуть дочерний объект, если родитель зафиксирован.
+    ///
+    /// ИЗМЕНЕНО (editor sprint-2).
+    pub fn is_locked(&self, world: &World, mut e: Entity) -> bool {
+        for _ in 0..64 {
+            if self.locked.contains(&e) {
+                return true;
+            }
+            match world.get::<Parent>(e).copied() {
+                Some(Parent(p)) => e = p,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Показать краткое всплывающее сообщение в редакторе.
+    ///
+    /// ИЗМЕНЕНО (editor sprint-1): нужно для обратной связи при
+    /// клике на locked-entity. Хранится как (текст, ttl секунд).
+    pub fn hud_hint(&mut self, text: impl Into<String>) {
+        self.hint = Some((text.into(), 2.0));
+    }
+
+    /// Тикнуть таймер hint'а. Вызывается движком раз в кадр.
+    pub fn tick_hint(&mut self, dt: f32) {
+        if let Some((_, t)) = &mut self.hint {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.hint = None;
+            }
+        }
     }
 }
 

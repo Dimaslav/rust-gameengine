@@ -1,5 +1,7 @@
 //! Панели редактора.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::ecs::{Entity, World};
 use crate::editor::camera_bookmarks::CameraBookmark;
 use crate::editor::gizmo::GizmoMode;
@@ -14,7 +16,7 @@ use crate::game::components::{
 };
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
-use crate::render::{AlphaMode, Material, PostFx};
+use crate::render::{AlphaMode, Material, PostFx, Tonemapper};
 use glam::Vec3;
 
 // ============================================================
@@ -70,7 +72,6 @@ pub struct UiAssets<'a> {
     pub selected_material: Option<(String, Material)>,
 }
 
-/// ИЗМЕНЕНО (Фаза 4.5): добавлено `selected_source_entity`.
 #[derive(Default)]
 pub struct AudioSnapshot {
     pub bus_volumes: Vec<(AudioBus, f32)>,
@@ -105,16 +106,40 @@ pub fn draw(
     }
     crate::editor::inspector_audio::draw_window(ctx, editor, world, audio, &mut action);
 
-    // Content Browser — новая панель.
     crate::editor::content_browser::draw_window(
         ctx,
         &mut state.show_content_browser,
         asset_db,
     );
 
-    if editor.play.active && editor.play.paused {
-        draw_pause_overlay(ctx, editor, &mut action);
+    if editor.play.active {
+        if editor.play.paused {
+            draw_pause_overlay(ctx, editor, &mut action);
+        }
     }
+
+    // === editor sprint-1: hint overlay ===
+    if let Some((text, ttl)) = &editor.hint {
+        let alpha = ttl.min(1.0).max(0.0);
+        egui::Area::new(egui::Id::new("editor_hint"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(egui::Color32::from_rgba_unmultiplied(
+                        20, 20, 30, (220.0 * alpha) as u8,
+                    ))
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(text).color(
+                            egui::Color32::from_rgba_unmultiplied(
+                                255, 230, 180, (255.0 * alpha) as u8,
+                            ),
+                        ));
+                    });
+            });
+    }
+
     action
 }
 
@@ -578,14 +603,8 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
 
     ui.label("Selection");
     ui.label(format!("Entities: {}", stats.sel_entities));
-    ui.label(format!("Triangles (LOD0): {}", stats.sel_triangles))
-        .on_hover_text(
-            "Triangles in the source mesh (LOD0), not what's currently drawn.\n\
-             LOD selection happens per-frame in `collect_draws` (distance-based);\n\
-             use the LOD counters below to see what's actually rendered.",
-        );
-    ui.label(format!("Vertices (LOD0): {}", stats.sel_vertices))
-        .on_hover_text("Vertices in the source mesh (LOD0).");
+    ui.label(format!("Triangles (LOD0): {}", stats.sel_triangles));
+    ui.label(format!("Vertices (LOD0): {}", stats.sel_vertices));
     ui.separator();
     ui.label("LOD");
     ui.label(format!("LOD0: {} · LOD1: {} · LOD2: {} · LOD3: {}",
@@ -597,9 +616,148 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
     }
 }
 
+// ============================================================
+// Дерево иерархии (editor sprint-1)
+// ============================================================
+
+struct HierarchySnapshot {
+    children_of: HashMap<Entity, Vec<Entity>>,
+    roots: Vec<Entity>,
+    visible: HashSet<Entity>,
+    names: HashMap<Entity, String>,
+    filter_active: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HierarchyRow {
+    entity: Entity,
+    depth: usize,
+}
+
+impl HierarchySnapshot {
+    fn build(world: &World, filter: &str) -> Self {
+        let all: Vec<Entity> = world.entities().to_vec();
+        let all_set: HashSet<Entity> = all.iter().copied().collect();
+
+        let filter_active = !filter.trim().is_empty();
+        let filter_lower = filter.to_lowercase();
+
+        let mut names: HashMap<Entity, String> = HashMap::with_capacity(all.len());
+        let mut visible: HashSet<Entity> = HashSet::with_capacity(all.len());
+
+        for &e in &all {
+            let name = world
+                .get::<Name>(e)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|| {
+                    let mesh = world
+                        .get::<MeshHandle>(e)
+                        .map(|m| m.0.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!("#{} {}", e, mesh)
+                });
+
+            if !filter_active || name.to_lowercase().contains(&filter_lower) {
+                visible.insert(e);
+            }
+            names.insert(e, name);
+        }
+
+        let mut children_of: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        let mut has_parent: HashSet<Entity> = HashSet::new();
+
+        for &e in &all {
+            if let Some(Parent(p)) = world.get::<Parent>(e).copied() {
+                if all_set.contains(&p) && p != e {
+                    children_of.entry(p).or_default().push(e);
+                    has_parent.insert(e);
+                }
+            }
+        }
+
+        let mut roots: Vec<Entity> = all
+            .iter()
+            .copied()
+            .filter(|e| !has_parent.contains(e))
+            .collect();
+        roots.sort();
+
+        for kids in children_of.values_mut() {
+            kids.sort_by(|a, b| {
+                let na = names.get(a).cloned().unwrap_or_default();
+                let nb = names.get(b).cloned().unwrap_or_default();
+                na.cmp(&nb)
+            });
+        }
+
+        if filter_active {
+            let snapshot: Vec<Entity> = visible.iter().copied().collect();
+            for mut e in snapshot {
+                for _ in 0..64 {
+                    match world.get::<Parent>(e).copied() {
+                        Some(Parent(p)) if all_set.contains(&p) => {
+                            visible.insert(p);
+                            e = p;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+
+        Self { children_of, roots, visible, names, filter_active }
+    }
+
+    fn children_of(&self, e: Entity) -> &[Entity] {
+        self.children_of.get(&e).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    fn is_visible(&self, e: Entity) -> bool {
+        !self.filter_active || self.visible.contains(&e)
+    }
+
+    fn visible_count(&self) -> usize {
+        self.flatten(|_| true).len()
+    }
+
+    fn flatten(&self, is_expanded: impl Fn(Entity) -> bool) -> Vec<HierarchyRow> {
+        let mut out = Vec::new();
+        for &root in &self.roots {
+            if !self.is_visible(root) {
+                continue;
+            }
+            self.flatten_rec(root, 0, &is_expanded, &mut out);
+        }
+        out
+    }
+
+    fn flatten_rec(
+        &self,
+        e: Entity,
+        depth: usize,
+        is_expanded: &impl Fn(Entity) -> bool,
+        out: &mut Vec<HierarchyRow>,
+    ) {
+        out.push(HierarchyRow { entity: e, depth });
+        if !is_expanded(e) {
+            return;
+        }
+        for &c in self.children_of(e) {
+            if self.is_visible(c) {
+                self.flatten_rec(c, depth + 1, is_expanded, out);
+            }
+        }
+    }
+
+    fn flat_order(&self) -> Vec<Entity> {
+        self.flatten(|_| true).into_iter().map(|r| r.entity).collect()
+    }
+}
+
 fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
     world: &mut World, action: &mut Option<EditorAction>) {
     ui.heading("Hierarchy"); ui.separator();
+
     ui.horizontal(|ui| {
         if ui.button("+ Cube").clicked() { *action = Some(EditorAction::AddCube); }
         if ui.button("+ Sphere").clicked() { *action = Some(EditorAction::AddSphere); }
@@ -612,6 +770,33 @@ fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
             *action = Some(EditorAction::DeleteSelected);
         }
     });
+
+    ui.horizontal(|ui| {
+        if ui.small_button("⤢ Expand").on_hover_text("Раскрыть всё дерево").clicked() {
+            for &e in world.entities() {
+                editor.hierarchy_expanded.insert(e);
+            }
+        }
+        if ui.small_button("⤡ Collapse").on_hover_text("Свернуть всё дерево").clicked() {
+            editor.hierarchy_expanded.clear();
+        }
+        if !editor.selected.is_empty() {
+            if ui.small_button("→ Selected").on_hover_text("Развернуть родителей выбранного").clicked() {
+                let selected: Vec<Entity> = editor.selected.clone();
+                for e in selected {
+                    let mut cur = e;
+                    for _ in 0..64 {
+                        editor.hierarchy_expanded.insert(cur);
+                        match world.get::<Parent>(cur).copied() {
+                            Some(Parent(p)) => cur = p,
+                            None => break,
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("🔍");
@@ -619,65 +804,166 @@ fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
         if !editor.search_filter.is_empty() && ui.small_button("✖").clicked() { editor.search_filter.clear(); }
     });
 
-    let filter_lower = editor.search_filter.to_lowercase();
-    let all_entities: Vec<Entity> = world.entities().to_vec();
-    let filtered: Vec<Entity> = all_entities.into_iter().filter(|&e| {
-        if !filter_lower.is_empty() {
-            let name = entity_display_name(world, e).to_lowercase();
-            if !name.contains(&filter_lower) { return false; }
-        }
-        true
-    }).collect();
+    let snapshot = HierarchySnapshot::build(world, &editor.search_filter);
 
-    let total = filtered.len();
+    let total = snapshot.visible_count();
     let sel_count = editor.selected.len();
     if sel_count > 1 { ui.label(format!("{} shown · {} selected", total, sel_count)); }
     else { ui.label(format!("{} shown", total)); }
 
     let anchor = editor.primary();
-    let row_height = 22.0;
-    egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(300.0)
-        .show_rows(ui, row_height, total, |ui, row_range| {
-            for i in row_range {
-                let e = filtered[i];
-                draw_hierarchy_row(ui, editor, world, e, &filtered, anchor, action);
+
+    egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(340.0)
+        .show(ui, |ui| {
+            let rows = snapshot.flatten(
+                |e| editor.hierarchy_expanded.contains(&e),
+            );
+            for row in rows {
+                draw_hierarchy_row(
+                    ui, editor, world, row.entity, &snapshot, anchor, action, row.depth,
+                );
             }
         });
 }
 
 fn draw_hierarchy_row(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut World,
-    e: Entity, filtered: &[Entity], anchor: Option<Entity>, action: &mut Option<EditorAction>) {
+    e: Entity, snapshot: &HierarchySnapshot, anchor: Option<Entity>,
+    action: &mut Option<EditorAction>, depth: usize) {
     let is_selected = editor.is_selected(e);
+    let is_locked = editor.is_locked(world, e);
+    let has_children = !snapshot.children_of(e).is_empty();
+    let is_expanded = editor.hierarchy_expanded.contains(&e);
+
     ui.horizontal(|ui| {
+        if depth > 0 {
+            ui.add_space(depth as f32 * 14.0);
+        }
+
+        if has_children {
+            let label = if is_expanded { "▼" } else { "▶" };
+            if ui.add(egui::Button::new(label).frame(false).small()).clicked() {
+                if is_expanded {
+                    editor.hierarchy_expanded.remove(&e);
+                } else {
+                    editor.hierarchy_expanded.insert(e);
+                }
+            }
+        } else {
+            ui.add_space(16.0);
+        }
+
+        let solo_active = editor.solo == Some(e);
+        let solo_icon = if solo_active { "◉" } else { "○" };
+        let solo_resp = ui
+            .add(egui::Button::new(solo_icon).frame(false).small())
+            .on_hover_text("Solo: показать только это и потомков");
+        if solo_resp.clicked() {
+            editor.solo = if solo_active { None } else { Some(e) };
+        }
+
+        let lock_icon = if is_locked { "🔒" } else { "🔓" };
+        let lock_resp = ui
+            .add(egui::Button::new(lock_icon).frame(false).small())
+            .on_hover_text("Lock: запретить выбор и перемещение");
+        if lock_resp.clicked() {
+            if is_locked {
+                editor.locked.remove(&e);
+            } else {
+                editor.locked.insert(e);
+            }
+        }
+
         let visible = world.get::<Visible>(e).map(|v| v.0).unwrap_or(true);
         let eye_label = if visible { "👁" } else { "✖" };
-        let eye_resp = ui.add(egui::Button::new(eye_label).frame(false)).on_hover_text("Toggle visibility");
+        let eye_resp = ui.add(egui::Button::new(eye_label).frame(false).small())
+            .on_hover_text("Toggle visibility");
         if eye_resp.clicked() {
             editor.undo_requested = true;
             if visible { world.insert(e, Visible(false)); } else { world.remove::<Visible>(e); }
         }
-        if editor.renaming == Some(e) { draw_hierarchy_rename(ui, editor, world, e); return; }
-        let label = entity_display_name(world, e);
+
+        if editor.renaming == Some(e) {
+            draw_hierarchy_rename(ui, editor, world, e);
+            return;
+        }
+
+        let label = snapshot.names.get(&e).cloned()
+            .unwrap_or_else(|| entity_display_name(world, e));
         let badges = component_badges(world, e);
-        ui.horizontal(|ui| {
-            let resp = ui.selectable_label(is_selected, &label);
-            if !badges.is_empty() {
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(&badges).small().weak().monospace());
+
+        let text_color = if is_locked {
+            ui.visuals().weak_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+
+        let drag_id = egui::Id::new(("hier_drag", e));
+        let drag_inner = ui.dnd_drag_source(
+            drag_id,
+            e,
+            |ui| {
+                let resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&label).color(text_color),
+                    )
+                    .sense(egui::Sense::click_and_drag()),
+                );
+                if !badges.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(&badges).small().weak().monospace());
+                }
+                resp
+            },
+        );
+        let drag_resp = drag_inner.response;
+
+        if let Some(payload) = drag_resp.dnd_release_payload::<Entity>() {
+            let dragged = *payload;
+            if dragged != e && !would_create_cycle(world, dragged, e) {
+                editor.undo_requested = true;
+                world.insert(dragged, Parent(e));
+                editor.hierarchy_expanded.insert(e);
+                log::info!("Reparented #{} → parent #{}", dragged, e);
             }
-            if resp.clicked() {
+        }
+
+        let clicked = drag_resp.clicked();
+        let double_clicked = drag_resp.double_clicked();
+
+        if is_selected {
+            let rect = drag_resp.rect.expand2(egui::vec2(2.0, 1.0));
+            ui.painter().rect_filled(
+                rect,
+                egui::CornerRadius::same(2),
+                ui.visuals().selection.bg_fill.linear_multiply(0.5),
+            );
+        }
+
+        if clicked {
+            if is_locked {
+                editor.hud_hint("Entity is locked (unlock 🔒 to select)");
+            } else {
                 let modifiers = ui.input(|i| i.modifiers);
-                if modifiers.ctrl || modifiers.command { editor.toggle_select(e); }
-                else if modifiers.shift { editor.select_range(filtered, anchor.unwrap_or(e), e); }
-                else { editor.select_single(e); }
+                if modifiers.ctrl || modifiers.command {
+                    editor.toggle_select(e);
+                } else if modifiers.shift {
+                    let flat = snapshot.flat_order();
+                    editor.select_range(&flat, anchor.unwrap_or(e), e);
+                } else {
+                    editor.select_single(e);
+                }
             }
-            if resp.double_clicked() {
-                editor.select_single(e);
-                editor.renaming = Some(e);
-                editor.rename_buffer = world.get::<Name>(e).map(|n| n.0.clone())
-                    .unwrap_or_else(|| entity_display_name(world, e));
-            }
-            resp.context_menu(|ui| { hierarchy_context_menu(ui, editor, world, e, action); });
+        }
+
+        if double_clicked && !is_locked {
+            editor.select_single(e);
+            editor.renaming = Some(e);
+            editor.rename_buffer = snapshot.names.get(&e).cloned()
+                .unwrap_or_else(|| entity_display_name(world, e));
+        }
+
+        drag_resp.context_menu(|ui| {
+            hierarchy_context_menu(ui, editor, world, e, action);
         });
     });
 }
@@ -717,6 +1003,24 @@ fn hierarchy_context_menu(ui: &mut egui::Ui, editor: &mut EditorState, world: &m
     }
     if ui.button("Delete").clicked() {
         editor.select_single(e); *action = Some(EditorAction::DeleteSelected); ui.close();
+    }
+    ui.separator();
+    if ui.button("Lock / Unlock").clicked() {
+        if editor.locked.contains(&e) {
+            editor.locked.remove(&e);
+        } else {
+            editor.locked.insert(e);
+        }
+        ui.close();
+    }
+    if editor.solo == Some(e) {
+        if ui.button("Unsolo").clicked() {
+            editor.solo = None;
+            ui.close();
+        }
+    } else if ui.button("Solo").clicked() {
+        editor.solo = Some(e);
+        ui.close();
     }
     ui.separator();
     if ui.button("Export FBX…").clicked() {
@@ -1735,7 +2039,6 @@ enum ComponentKind {
     Interactable, Trigger, Parent, Tint, Visible, TextureTiling, Elevator, SlidingDoor,
     RigidBody, Collider, PhysicsMaterial, DirectionalLight, PointLight, Decal,
     AudioSource,
-    // === Фаза 6.5: AI ===
     AiAgent, PatrolPath, Enemy, AiTarget,
 }
 
@@ -1824,8 +2127,6 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             }
         });
     }
-
-    // === Фаза 6.5: AI-компоненты ===
     if !world.has::<crate::game::ai::AiAgent>(e) {
         any = true;
         ui.menu_button("🤖 AI Agent", |ui| {
@@ -2097,17 +2398,12 @@ fn preset_ultra() -> PostFx {
     p
 }
 
-/// ИЗМЕНЕНО (Фаза 6.5): добавлен параметр `action`, добавлена
-/// секция `AI / Navmesh` в начале панели.
 fn draw_renderer_panel(
     ui: &mut egui::Ui,
     postfx: &mut PostFx,
     editor: &mut EditorState,
     action: &mut Option<EditorAction>,
 ) {
-    // ИЗМЕНЕНО (Фаза 6.5): AI/Navmesh секция. Рисуется сверху —
-    // самый частый сценарий использования в новой версии: запечь
-    // navmesh и включить визуализацию.
     egui::CollapsingHeader::new("AI / Navmesh").default_open(true).show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui
@@ -2162,6 +2458,274 @@ fn draw_renderer_panel(
         ui.add(egui::Slider::new(&mut postfx.bloom_radius, 0.5..=3.0).text("Bloom radius"));
         ui.add(egui::Slider::new(&mut postfx.exposure, 0.1..=3.0).text("Exposure"));
     });
+
+    // Спринт 1.1 + 1.2: Color grading + Tonemapper
+    ui.separator();
+    egui::CollapsingHeader::new("🎨 Color grading").default_open(true).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Tonemapper:");
+            let tm = &mut postfx.tonemapper;
+            if ui.selectable_label(*tm == Tonemapper::AgX, "AgX")
+                .on_hover_text("Реалистичный (Sobotka 2022). Дефолт.").clicked() { *tm = Tonemapper::AgX; }
+            if ui.selectable_label(*tm == Tonemapper::ACESFilmic, "ACES")
+                .on_hover_text("Кинематографичный (Narkowicz).").clicked() { *tm = Tonemapper::ACESFilmic; }
+            if ui.selectable_label(*tm == Tonemapper::Reinhard, "Reinhard")
+                .on_hover_text("Простейший x/(1+x).").clicked() { *tm = Tonemapper::Reinhard; }
+            if ui.selectable_label(*tm == Tonemapper::Uncharted2, "Uncharted2")
+                .on_hover_text("Naughty Dog, яркая кривая.").clicked() { *tm = Tonemapper::Uncharted2; }
+            if ui.selectable_label(*tm == Tonemapper::None, "None")
+                .on_hover_text("Без тонального маппинга (clamp 0..1).").clicked() { *tm = Tonemapper::None; }
+        });
+        ui.separator();
+        ui.add(egui::Slider::new(&mut postfx.exposure_bias, 0.25..=4.0)
+            .logarithmic(true).text("Exposure bias"));
+        ui.label(egui::RichText::new("Множитель к Exposure выше. 1.0 = нейтрально.")
+            .small().weak().italics());
+        ui.separator();
+        ui.add(egui::Slider::new(&mut postfx.color_temperature, -1.0..=1.0)
+            .text("Temperature (cool ↔ warm)"));
+        ui.add(egui::Slider::new(&mut postfx.color_tint, -1.0..=1.0)
+            .text("Tint (green ↔ magenta)"));
+        ui.add(egui::Slider::new(&mut postfx.color_contrast, 0.5..=2.0)
+            .text("Contrast"));
+        ui.add(egui::Slider::new(&mut postfx.color_saturation, 0.0..=2.0)
+            .text("Saturation"));
+        ui.separator();
+        ui.label(egui::RichText::new("ASC CDL").strong());
+        ui.horizontal(|ui| {
+            ui.label("Lift:");
+            for i in 0..3 {
+                ui.add(egui::DragValue::new(&mut postfx.color_lift[i])
+                    .speed(0.005).range(-0.2..=0.2)
+                    .prefix(["R ", "G ", "B "][i]));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Gain:");
+            for i in 0..3 {
+                ui.add(egui::DragValue::new(&mut postfx.color_gain[i])
+                    .speed(0.005).range(0.0..=2.0)
+                    .prefix(["R ", "G ", "B "][i]));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Gamma:");
+            for i in 0..3 {
+                ui.add(egui::DragValue::new(&mut postfx.color_gamma[i])
+                    .speed(0.005).range(0.1..=3.0)
+                    .prefix(["R ", "G ", "B "][i]));
+            }
+        });
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Reset grading").clicked() {
+                postfx.exposure_bias = 1.0;
+                postfx.color_temperature = 0.0;
+                postfx.color_tint = 0.0;
+                postfx.color_contrast = 1.0;
+                postfx.color_saturation = 1.0;
+                postfx.color_lift = [0.0, 0.0, 0.0];
+                postfx.color_gain = [1.0, 1.0, 1.0];
+                postfx.color_gamma = [1.0, 1.0, 1.0];
+            }
+            if ui.button("Cinematic").on_hover_text("Тёплый контрастный пресет").clicked() {
+                postfx.tonemapper = Tonemapper::ACESFilmic;
+                postfx.exposure_bias = 1.0;
+                postfx.color_temperature = 0.15;
+                postfx.color_tint = 0.0;
+                postfx.color_contrast = 1.15;
+                postfx.color_saturation = 1.05;
+                postfx.color_lift = [0.0, -0.005, 0.01];
+                postfx.color_gain = [1.03, 1.0, 0.97];
+                postfx.color_gamma = [1.0, 1.0, 1.02];
+            }
+            if ui.button("Cold horror").on_hover_text("Холодный, десатурированный").clicked() {
+                postfx.tonemapper = Tonemapper::AgX;
+                postfx.exposure_bias = 0.9;
+                postfx.color_temperature = -0.25;
+                postfx.color_tint = -0.05;
+                postfx.color_contrast = 1.1;
+                postfx.color_saturation = 0.75;
+                postfx.color_lift = [-0.01, -0.005, 0.01];
+                postfx.color_gain = [0.97, 1.0, 1.05];
+                postfx.color_gamma = [1.02, 1.0, 0.98];
+            }
+            if ui.button("Sunny warm").clicked() {
+                postfx.tonemapper = Tonemapper::Uncharted2;
+                postfx.exposure_bias = 1.1;
+                postfx.color_temperature = 0.25;
+                postfx.color_tint = 0.0;
+                postfx.color_contrast = 1.05;
+                postfx.color_saturation = 1.2;
+                postfx.color_lift = [0.01, 0.005, 0.0];
+                postfx.color_gain = [1.05, 1.0, 0.95];
+                postfx.color_gamma = [1.0, 1.0, 1.0];
+            }
+        });
+    });
+
+    // Спринт 1.4: Lens flare
+    ui.separator();
+    egui::CollapsingHeader::new("✨ Lens flare").default_open(false).show(ui, |ui| {
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_intensity, 0.0..=1.5)
+            .text("Intensity"));
+        ui.label(egui::RichText::new("0 = выключено. 0.3..0.8 — заметный flares.")
+            .small().weak().italics());
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_threshold, 0.5..=8.0)
+            .logarithmic(true).text("Brightness threshold"));
+        ui.label(egui::RichText::new("Реагирует только на HDR-пиксели ярче порога.")
+            .small().weak().italics());
+
+        let mut ghosts = postfx.lens_flare_ghosts as i32;
+        if ui.add(egui::Slider::new(&mut ghosts, 0..=12)
+            .text("Ghost count")).changed() {
+            postfx.lens_flare_ghosts = ghosts.max(0) as u32;
+        }
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_streak, 0.0..=0.5)
+            .text("Streak length"));
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Reset").clicked() {
+                postfx.lens_flare_intensity = 0.0;
+                postfx.lens_flare_threshold = 1.5;
+                postfx.lens_flare_ghosts = 6;
+                postfx.lens_flare_streak = 0.15;
+            }
+            if ui.button("Cinematic").on_hover_text("Мягкий flare").clicked() {
+                postfx.lens_flare_intensity = 0.4;
+                postfx.lens_flare_threshold = 2.0;
+                postfx.lens_flare_ghosts = 4;
+                postfx.lens_flare_streak = 0.12;
+            }
+            if ui.button("J.J. Abrams").on_hover_text("Много flare").clicked() {
+                postfx.lens_flare_intensity = 1.0;
+                postfx.lens_flare_threshold = 1.0;
+                postfx.lens_flare_ghosts = 10;
+                postfx.lens_flare_streak = 0.35;
+            }
+            if ui.button("Subtle").clicked() {
+                postfx.lens_flare_intensity = 0.15;
+                postfx.lens_flare_threshold = 3.0;
+                postfx.lens_flare_ghosts = 3;
+                postfx.lens_flare_streak = 0.08;
+            }
+        });
+    });
+
+    // Спринт 2.1: Depth of Field
+    ui.separator();
+    egui::CollapsingHeader::new("🎥 Depth of Field").default_open(false).show(ui, |ui| {
+        let mut enabled = postfx.dof_enabled > 0.5;
+        if ui.checkbox(&mut enabled, "Enable DOF").changed() {
+            postfx.dof_enabled = if enabled { 1.0 } else { 0.0 };
+        }
+
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.add(egui::Slider::new(&mut postfx.dof_focus_distance, 0.5..=100.0)
+                .logarithmic(true).text("Focus distance (m)"));
+            ui.label(egui::RichText::new("Дистанция фокуса от камеры.")
+                .small().weak().italics());
+
+            ui.add(egui::Slider::new(&mut postfx.dof_focus_range, 0.0..=30.0)
+                .text("Focus range (m)"));
+            ui.label(egui::RichText::new("Зона резкости вокруг фокуса.")
+                .small().weak().italics());
+
+            ui.add(egui::Slider::new(&mut postfx.dof_max_blur, 0.0..=32.0)
+                .text("Max blur (px)"));
+            ui.label(egui::RichText::new("Максимальный радиус CoC.")
+                .small().weak().italics());
+
+            ui.add(egui::Slider::new(&mut postfx.dof_blur_falloff, 0.5..=20.0)
+                .logarithmic(true).text("Blur falloff (m/px)"));
+            ui.label(egui::RichText::new("Меньше = размытие растёт быстрее.")
+                .small().weak().italics());
+        });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Auto (from camera)").on_hover_text("Фокус на цель камеры").clicked() {
+                postfx.dof_focus_distance = postfx.dof_focus_distance.clamp(0.5, 100.0);
+                postfx.dof_enabled = 1.0;
+            }
+            if ui.button("Cinematic").on_hover_text("Портрет: резкий центр, мягкий фон").clicked() {
+                postfx.dof_enabled = 1.0;
+                postfx.dof_focus_distance = 6.0;
+                postfx.dof_focus_range = 1.5;
+                postfx.dof_max_blur = 12.0;
+                postfx.dof_blur_falloff = 3.0;
+            }
+            if ui.button("Macro").on_hover_text("Очень близкий фокус").clicked() {
+                postfx.dof_enabled = 1.0;
+                postfx.dof_focus_distance = 1.5;
+                postfx.dof_focus_range = 0.3;
+                postfx.dof_max_blur = 16.0;
+                postfx.dof_blur_falloff = 1.5;
+            }
+            if ui.button("Landscape").on_hover_text("Всё резкое, размыт только дальний план").clicked() {
+                postfx.dof_enabled = 1.0;
+                postfx.dof_focus_distance = 40.0;
+                postfx.dof_focus_range = 30.0;
+                postfx.dof_max_blur = 6.0;
+                postfx.dof_blur_falloff = 8.0;
+            }
+            if ui.button("Disable").clicked() {
+                postfx.dof_enabled = 0.0;
+            }
+        });
+    });
+
+    // Спринт 2.2: Motion Blur
+    ui.separator();
+    egui::CollapsingHeader::new("💨 Motion Blur").default_open(false).show(ui, |ui| {
+        let mut enabled = postfx.motion_blur_enabled > 0.5;
+        if ui.checkbox(&mut enabled, "Enable motion blur").changed() {
+            postfx.motion_blur_enabled = if enabled { 1.0 } else { 0.0 };
+        }
+
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.add(egui::Slider::new(&mut postfx.motion_blur_intensity, 0.0..=2.0)
+                .text("Intensity"));
+            ui.label(egui::RichText::new("Множитель скорости в пиксели. 1.0 = как в motion buffer.")
+                .small().weak().italics());
+
+            ui.add(egui::Slider::new(&mut postfx.motion_blur_max_px, 4.0..=120.0)
+                .logarithmic(true).text("Max blur length (px)"));
+
+            let mut samples = postfx.motion_blur_samples as i32;
+            if ui.add(egui::Slider::new(&mut samples, 2..=24)
+                .text("Samples")).changed() {
+                postfx.motion_blur_samples = samples.max(2) as u32;
+            }
+        });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Subtle").clicked() {
+                postfx.motion_blur_enabled = 1.0;
+                postfx.motion_blur_intensity = 0.3;
+                postfx.motion_blur_max_px = 16.0;
+                postfx.motion_blur_samples = 8;
+            }
+            if ui.button("Cinematic").on_hover_text("Заметный blur при быстром движении").clicked() {
+                postfx.motion_blur_enabled = 1.0;
+                postfx.motion_blur_intensity = 0.8;
+                postfx.motion_blur_max_px = 48.0;
+                postfx.motion_blur_samples = 14;
+            }
+            if ui.button("Speed").on_hover_text("Драматичный blur (racing, dash)").clicked() {
+                postfx.motion_blur_enabled = 1.0;
+                postfx.motion_blur_intensity = 1.5;
+                postfx.motion_blur_max_px = 100.0;
+                postfx.motion_blur_samples = 20;
+            }
+            if ui.button("Disable").clicked() {
+                postfx.motion_blur_enabled = 0.0;
+            }
+        });
+    });
+
     ui.separator();
     egui::CollapsingHeader::new("SSAO").default_open(true).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0).text("Strength"));
@@ -2424,120 +2988,9 @@ fn common_vec3<I: Iterator<Item = Vec3>>(mut it: I) -> Option<Vec3> {
     Some(first)
 }
 
-fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
-    let fps = stats.fps;
-
-    if play.show_crosshair {
-        let screen = ctx.screen_rect();
-        let center = screen.center();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("crosshair_layer")));
-        let (color, len, thick) = if play.highlight.is_some() {
-            (egui::Color32::from_rgba_unmultiplied(255, 220, 90, 240), 10.0_f32, 1.5_f32)
-        } else {
-            (egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200), 8.0_f32, 1.0_f32)
-        };
-        painter.line_segment([egui::pos2(center.x - len, center.y), egui::pos2(center.x + len, center.y)],
-            egui::Stroke::new(thick, color));
-        painter.line_segment([egui::pos2(center.x, center.y - len), egui::pos2(center.x, center.y + len)],
-            egui::Stroke::new(thick, color));
-    }
-
-    if play.highlight.is_some() {
-        let screen = ctx.screen_rect();
-        let center = screen.center();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hint_layer")));
-        painter.text(
-            egui::pos2(center.x + 14.0, center.y + 14.0),
-            egui::Align2::LEFT_TOP, "[E] interact",
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_rgba_unmultiplied(255, 220, 90, 230),
-        );
-    }
-
-    if play.show_hud {
-        egui::Area::new(egui::Id::new("play_hud_area"))
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -16.0))
-            .interactable(false).show(ctx, |ui| {
-                egui::Frame::NONE.fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140))
-                    .inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                        ui.label(egui::RichText::new(format!("FPS: {:.0}", fps)).monospace()
-                            .color(egui::Color32::from_rgb(230, 230, 230)));
-                        let p = play.saved_position;
-                        ui.label(egui::RichText::new(format!("Pos: {:.1}, {:.1}, {:.1}", p.x, p.y, p.z))
-                            .monospace().color(egui::Color32::from_rgb(200, 200, 200)));
-                        let state_str = if play.crouching { "crouching" }
-                            else if play.on_ground { "on ground" } else { "airborne" };
-                        ui.label(egui::RichText::new(state_str).monospace()
-                            .color(egui::Color32::from_rgb(180, 200, 180)));
-                        if play.coyote_timer > 0.0 && !play.on_ground {
-                            ui.label(egui::RichText::new(
-                                format!("coyote: {:.2}s", play.coyote_timer)
-                            ).monospace().small()
-                                .color(egui::Color32::from_rgb(255, 220, 120)));
-                        }
-                        if play.jump_buffer_timer > 0.0 {
-                            ui.label(egui::RichText::new(
-                                format!("jump buffered: {:.2}s", play.jump_buffer_timer)
-                            ).monospace().small()
-                                .color(egui::Color32::from_rgb(200, 240, 160)));
-                        }
-                    });
-            });
-    }
-
-    if play.show_health || play.show_ammo {
-        egui::Area::new(egui::Id::new("play_bars_area"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
-            .interactable(false).show(ctx, |ui| {
-                egui::Frame::NONE.fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140))
-                    .inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
-                        ui.set_min_width(180.0);
-                        if play.show_health {
-                            let frac = if play.max_health > 0.0 { (play.health / play.max_health).clamp(0.0, 1.0) } else { 0.0 };
-                            ui.label(egui::RichText::new(format!("HP   {:>3.0} / {:<3.0}", play.health, play.max_health))
-                                .monospace().color(egui::Color32::from_rgb(230, 230, 230)));
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
-                            let painter = ui.painter();
-                            painter.rect_filled(rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(40, 40, 40));
-                            let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac, rect.height()));
-                            let col = if frac > 0.5 { egui::Color32::from_rgb(80, 200, 80) }
-                                else if frac > 0.25 { egui::Color32::from_rgb(220, 180, 60) }
-                                else { egui::Color32::from_rgb(220, 70, 70) };
-                            painter.rect_filled(fill_rect, egui::CornerRadius::same(2), col);
-                        }
-                        if play.show_ammo {
-                            if play.show_health { ui.add_space(4.0); }
-                            ui.label(egui::RichText::new(format!("AMMO {:>3} / {:<3}", play.ammo, play.max_ammo))
-                                .monospace().color(egui::Color32::from_rgb(230, 230, 230)));
-                            let frac = if play.max_ammo > 0 { play.ammo as f32 / play.max_ammo as f32 } else { 0.0 };
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
-                            let painter = ui.painter();
-                            painter.rect_filled(rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(40, 40, 40));
-                            let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac, rect.height()));
-                            painter.rect_filled(fill_rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(220, 190, 90));
-                        }
-                    });
-            });
-    }
-
-    if !stats.extra_lines.is_empty() {
-        egui::Area::new(egui::Id::new("rpg_hud_area"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
-            .interactable(false).show(ctx, |ui| {
-                egui::Frame::NONE.fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160))
-                    .inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                        ui.set_min_width(220.0);
-                        for (label, value) in &stats.extra_lines {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(label).monospace().strong()
-                                    .color(egui::Color32::from_rgb(230, 220, 180)));
-                                ui.label(egui::RichText::new(value).monospace()
-                                    .color(egui::Color32::from_rgb(220, 220, 220)));
-                            });
-                        }
-                    });
-            });
-    }
+#[allow(dead_code)]
+fn draw_play_hud(_ctx: &egui::Context, _play: &PlayState, _stats: &Stats) {
+    // Отключено: runtime UI из Game::collect_ui рисует crosshair/health/ammo.
 }
 
 fn component_badges(world: &World, e: Entity) -> String {

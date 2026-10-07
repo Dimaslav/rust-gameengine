@@ -400,8 +400,6 @@ impl<G: Game> App<G> {
         let floor_y = self.editor.state.play.floor_y;
         let bob_enabled = self.editor.state.play.bob_enabled;
         let bob_amp = self.editor.state.play.bob_amplitude;
-        let gun_range = self.editor.state.play.gun_range;
-        let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
         let _push_strength = self.editor.state.play.push_strength;
         let step_down_max = self.editor.state.play.step_down_max;

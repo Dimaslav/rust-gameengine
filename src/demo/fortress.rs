@@ -281,6 +281,7 @@ impl FortressDemo {
                 volumetric_density: 0.006,
                 volumetric_scattering: 0.45,
                 volumetric_phase_g: 0.6,
+                ..Default::default()
             },
             built: false,
             dragging: false,
