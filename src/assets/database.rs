@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hasher;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -17,6 +18,8 @@ pub struct AssetDatabase {
     /// Счётчик изменений с последнего скана.
     pub revision: u64,
 }
+
+const HASH_CHUNK: usize = 4096;
 
 impl AssetDatabase {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
@@ -36,11 +39,8 @@ impl AssetDatabase {
         Ok(db)
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
+    pub fn root(&self) -> &Path { &self.root }
 
-    /// Полное сканирование. Вызывается при старте и по кнопке в UI.
     pub fn rescan(&mut self) {
         self.by_id.clear();
         self.by_path.clear();
@@ -57,9 +57,7 @@ impl AssetDatabase {
     }
 
     fn scan_dir(&mut self, dir: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -69,14 +67,9 @@ impl AssetDatabase {
                 continue;
             }
 
-            // Игнорируем `.meta`-файлы.
-            if path.to_string_lossy().ends_with(".meta") {
-                continue;
-            }
+            if path.to_string_lossy().ends_with(".meta") { continue; }
 
-            let Some(kind) = Self::kind_of(&path) else {
-                continue;
-            };
+            let Some(kind) = Self::kind_of(&path) else { continue; };
             self.register(&path, kind);
         }
     }
@@ -195,18 +188,33 @@ impl AssetDatabase {
         path.with_file_name(format!("{}.meta", name))
     }
 
+    /// Быстрая свёртка: первые 4KB + последние 4KB + размер.
+    ///
+    /// ИЗМЕНЕНО (bugfix #3): раньше использовался `std::fs::read`,
+    /// который грузил **весь** файл в RAM — для 500-МБ `.exr` или
+    /// `.glb` это дорого, а `detect_changes` проходит по всем
+    /// ассетам раз в 0.75 с. Теперь читаем только два куска через
+    /// `File::seek`, память O(1) от размера файла.
     fn hash_file(path: &Path) -> std::io::Result<u64> {
-        let bytes = std::fs::read(path)?;
+        let mut f = std::fs::File::open(path)?;
+        let len = f.metadata()?.len();
+
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        h.write_u64(bytes.len() as u64);
-        // Быстрая свёртка: первые 4KB + последние 4KB + размер.
-        // Для детекта изменений этого хватает и не читает весь файл
-        // для больших ассетов.
-        let head_len = bytes.len().min(4096);
-        h.write(&bytes[..head_len]);
-        if bytes.len() > 8192 {
-            let tail_start = bytes.len() - 4096;
-            h.write(&bytes[tail_start..]);
+        h.write_u64(len);
+
+        if len <= (HASH_CHUNK as u64) * 2 {
+            let mut buf = Vec::with_capacity(len as usize);
+            f.read_to_end(&mut buf)?;
+            h.write(&buf);
+        } else {
+            let mut head = [0u8; HASH_CHUNK];
+            f.read_exact(&mut head)?;
+            h.write(&head);
+
+            f.seek(SeekFrom::End(-(HASH_CHUNK as i64)))?;
+            let mut tail = [0u8; HASH_CHUNK];
+            f.read_exact(&mut tail)?;
+            h.write(&tail);
         }
         Ok(h.finish())
     }
@@ -247,26 +255,15 @@ impl AssetDatabase {
         self.by_id.values().filter(move |m| m.kind == kind)
     }
 
-    pub fn len(&self) -> usize {
-        self.by_id.len()
-    }
+    pub fn len(&self) -> usize { self.by_id.len() }
+    pub fn is_empty(&self) -> bool { self.by_id.is_empty() }
 
-    pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
-    }
-
-    /// Все имена текстур (stem файлов) — для ComboBox в инспекторе.
     pub fn texture_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.of_kind(AssetKind::Texture).map(|m| m.stem()).collect();
         v.sort();
         v
     }
 
-    // ============================================================
-    // Hot-reload
-    // ============================================================
-
-    /// Проверить изменения. Возвращает ID ассетов, чьи файлы изменились.
     pub fn detect_changes(&mut self) -> Vec<AssetId> {
         let mut changed = Vec::new();
 
@@ -277,12 +274,8 @@ impl AssetDatabase {
             .collect();
 
         for (id, path, old_hash) in paths {
-            if !path.exists() {
-                continue;
-            }
-            let Ok(new_hash) = Self::hash_file(&path) else {
-                continue;
-            };
+            if !path.exists() { continue; }
+            let Ok(new_hash) = Self::hash_file(&path) else { continue; };
             if new_hash != old_hash {
                 if let Some(meta) = self.by_id.get_mut(&id) {
                     meta.content_hash = new_hash;
@@ -299,7 +292,6 @@ impl AssetDatabase {
         changed
     }
 
-    /// Обновить настройки импорта (сохраняет `.meta`).
     pub fn update_import_settings(
         &mut self,
         id: AssetId,
@@ -324,7 +316,6 @@ impl AssetDatabase {
         Ok(())
     }
 
-    /// Записать зависимости ассета.
     pub fn set_dependencies(&mut self, id: AssetId, deps: Vec<AssetId>) -> Result<()> {
         let Some(meta) = self.by_id.get_mut(&id) else {
             anyhow::bail!("asset {} not found", id);

@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ecs::{Entity, World};
+use crate::game::ai::{AiAgent, AiState, PatrolPath};
+use crate::game::audio::AudioSource;
 use crate::game::components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
@@ -12,9 +14,14 @@ use crate::game::components::{
 use crate::game::decals::Decal;
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
+use crate::game::timers::{Timer, TimerMode};
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
 use glam::Vec3;
+
+// ============================================================
+// SceneFile
+// ============================================================
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct SceneFile {
@@ -27,24 +34,18 @@ pub struct SceneFile {
     #[serde(default)]
     pub materials: HashMap<String, Material>,
 
-    /// Пути к файлам текстур для материалов. Ключ — имя текстуры,
-    /// значение — путь на диске. Процедурные текстуры (`checker`)
-    /// здесь отсутствуют — они создаются при старте движка.
+    /// Пути к файлам текстур для материалов.
     #[serde(default)]
     pub texture_paths: HashMap<String, String>,
 
     /// Произвольное game-specific состояние (RON-строка).
-    ///
-    /// Движок его не парсит — это «непрозрачный blob» для игры.
-    /// Нужен, чтобы, например, `RpgState` (золото, ключи, квесты)
-    /// переживал Save/Load.
-    ///
-    /// Раньше такого поля не было, и вся RPG-прогрессия терялась
-    /// при сохранении сцены, хотя сами RPG-сущности (`Npc`, `Chest`,
-    /// `GoldValue`) уже сериализовались.
     #[serde(default)]
     pub game_state_ron: Option<String>,
 }
+
+// ============================================================
+// EntitySnapshot
+// ============================================================
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
@@ -75,7 +76,6 @@ pub struct EntitySnapshot {
     #[serde(default)] pub dir_light: Option<DirectionalLightSnapshot>,
     #[serde(default)] pub point_light: Option<PointLightSnapshot>,
 
-    // === Ранее не сохранялись — критический фикс ===
     #[serde(default)] pub decal: Option<DecalSnapshot>,
     #[serde(default)] pub gold_value: Option<u32>,
     #[serde(default)] pub key_item: Option<u32>,
@@ -83,7 +83,20 @@ pub struct EntitySnapshot {
     #[serde(default)] pub door: Option<DoorSnapshot>,
     #[serde(default)] pub npc: Option<NpcSnapshot>,
     #[serde(default)] pub quest_target: Option<u32>,
+
+    // === Фаза bugfix #7: AI / Audio / Timer ===
+    #[serde(default)] pub ai_agent: Option<AiAgentSnapshot>,
+    #[serde(default)] pub patrol_path: Option<PatrolPathSnapshot>,
+    #[serde(default)] pub audio_source: Option<AudioSource>,
+    #[serde(default)] pub timer: Option<TimerSnapshot>,
+    #[serde(default)] pub ai_target: Option<bool>,
+    #[serde(default)] pub enemy: Option<bool>,
+    #[serde(default)] pub debug_path: Option<bool>,
 }
+
+// ============================================================
+// Простые snapshot-структуры
+// ============================================================
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct TransformSnapshot {
@@ -275,6 +288,116 @@ pub struct NpcSnapshot {
 }
 
 // ============================================================
+// AI / Timer snapshots (bugfix #7)
+// ============================================================
+
+/// Снимок `AiAgent` с персистентной частью.
+///
+/// Runtime (path, yaw, timers) не сохраняется — при загрузке
+/// агент стартует в `state` без пути.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AiAgentSnapshot {
+    pub state: AiState,
+    pub speed: f32,
+    pub turn_speed: f32,
+    pub vision_range: f32,
+    pub vision_angle_cos: f32,
+    pub hearing_range: f32,
+    pub attack_range: f32,
+    pub damage: f32,
+    pub attack_cooldown: f32,
+    pub lose_target_time: f32,
+    #[serde(default)] pub emits_noise: bool,
+}
+
+impl AiAgentSnapshot {
+    pub fn from_agent(a: &AiAgent) -> Self {
+        Self {
+            state: a.state,
+            speed: a.speed,
+            turn_speed: a.turn_speed,
+            vision_range: a.vision_range,
+            vision_angle_cos: a.vision_angle_cos,
+            hearing_range: a.hearing_range,
+            attack_range: a.attack_range,
+            damage: a.damage,
+            attack_cooldown: a.attack_cooldown,
+            lose_target_time: a.lose_target_time,
+            emits_noise: a.emits_noise,
+        }
+    }
+
+    pub fn to_agent(&self) -> AiAgent {
+        AiAgent {
+            state: self.state,
+            speed: self.speed,
+            turn_speed: self.turn_speed,
+            vision_range: self.vision_range,
+            vision_angle_cos: self.vision_angle_cos,
+            hearing_range: self.hearing_range,
+            attack_range: self.attack_range,
+            damage: self.damage,
+            attack_cooldown: self.attack_cooldown,
+            lose_target_time: self.lose_target_time,
+
+            // Runtime — старт с нуля.
+            path: Vec::new(),
+            path_index: 0,
+            repath_timer: 0.0,
+            attack_timer: 0.0,
+            last_seen_pos: None,
+            time_since_seen: 999.0,
+            yaw: 0.0,
+            state_timer: 0.0,
+            emits_noise: self.emits_noise,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PatrolPathSnapshot {
+    pub points: Vec<[f32; 3]>,
+    #[serde(default)] pub current: usize,
+    #[serde(default = "default_patrol_wait")] pub wait_time: f32,
+}
+
+fn default_patrol_wait() -> f32 { 0.5 }
+
+impl PatrolPathSnapshot {
+    pub fn from_path(p: &PatrolPath) -> Self {
+        Self {
+            points: p.points.iter().map(|v| v.to_array()).collect(),
+            current: p.current,
+            wait_time: p.wait_time,
+        }
+    }
+
+    pub fn to_path(&self) -> PatrolPath {
+        PatrolPath {
+            points: self.points.iter().map(|a| Vec3::from_array(*a)).collect(),
+            current: self.current,
+            wait_time: self.wait_time,
+            wait_timer: 0.0,
+            waiting: false,
+        }
+    }
+}
+
+/// Снимок `Timer`. Поле `mode` — строковое представление
+/// `TimerMode` (`"once"` / `"repeating"`).
+///
+/// **Примечание:** `Copy` намеренно не реализован — поле `mode: String`
+/// не реализует `Copy`. Используется через `clone()` / move.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimerSnapshot {
+    pub duration: f32,
+    pub elapsed: f32,
+    pub mode: String,
+    #[serde(default)] pub paused: bool,
+    #[serde(default)] pub finished: bool,
+}
+
+// ============================================================
 // Save (World only, без материалов)
 // ============================================================
 
@@ -365,10 +488,6 @@ pub fn save_scene_with_assets_to_file(
 }
 
 /// Как `save_scene_with_assets_to_string`, но с game-specific состоянием.
-///
-/// `game_state_ron` — готовая RON-строка от игры (например,
-/// `ron::ser::to_string(&rpg_state)`). Если `None` — эквивалентно
-/// базовой версии.
 pub fn save_scene_with_game_state_to_string(
     world: &World,
     renderer: &Renderer,
@@ -410,6 +529,10 @@ pub fn save_scene_with_game_state_to_file(
         .with_context(|| format!("write scene to {}", path.as_ref().display()))?;
     Ok(())
 }
+
+// ============================================================
+// Snapshot
+// ============================================================
 
 pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     let mut s = EntitySnapshot::default();
@@ -553,6 +676,45 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
 
+    // === Фаза bugfix #7: AI / Audio / Timer ===
+    if let Some(a) = world.get::<AiAgent>(e) {
+        s.ai_agent = Some(AiAgentSnapshot::from_agent(a));
+        any = true;
+    }
+    if let Some(p) = world.get::<PatrolPath>(e) {
+        s.patrol_path = Some(PatrolPathSnapshot::from_path(p));
+        any = true;
+    }
+    if let Some(src) = world.get::<AudioSource>(e) {
+        s.audio_source = Some(src.clone());
+        any = true;
+    }
+    if let Some(t) = world.get::<Timer>(e) {
+        s.timer = Some(TimerSnapshot {
+            duration: t.duration,
+            elapsed: t.elapsed,
+            mode: match t.mode {
+                TimerMode::Once => "once".into(),
+                TimerMode::Repeating => "repeating".into(),
+            },
+            paused: t.is_paused(),
+            finished: t.is_finished(),
+        });
+        any = true;
+    }
+    if world.has::<crate::game::ai::AiTarget>(e) {
+        s.ai_target = Some(true);
+        any = true;
+    }
+    if world.has::<crate::game::ai::Enemy>(e) {
+        s.enemy = Some(true);
+        any = true;
+    }
+    if world.has::<crate::game::ai::DebugPath>(e) {
+        s.debug_path = Some(true);
+        any = true;
+    }
+
     if any { Some(s) } else { None }
 }
 
@@ -589,15 +751,6 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
 // ============================================================
 
 /// Загружает сцену и возвращает `(world, player_spawn, game_state_ron)`.
-///
-/// Третий элемент — то, что было сохранено в `SceneFile::game_state_ron`
-/// (для игры; движок его не парсит).
-///
-/// ИЗМЕНЕНО (#14): теперь это тонкая обёртка над
-/// `load_scene_with_assets_from_str_full_with_ids`. Раньше функция
-/// **не возвращала `id_map`**, из-за чего вызывающий код (например,
-/// `App::restore_play_snapshot`) не мог перемапить выделение на новые
-/// entity после load. Теперь полный вариант доступен — `_with_ids`.
 pub fn load_scene_with_assets_from_str_full(
     text: &str,
     renderer: &mut Renderer,
@@ -606,21 +759,8 @@ pub fn load_scene_with_assets_from_str_full(
     Ok((w, spawn, gs))
 }
 
-/// ИЗМЕНЕНО (#14): полная версия `load_scene_with_assets_from_str_full`,
-/// дополнительно возвращающая `id_map` — отображение `old_entity_id →
-/// new_entity`.
-///
-/// `id_map` строится в `spawn_all_entities` и нужен вызывающему коду
-/// для remap сохранённого выделения (Play-in-Editor: `PlaySnapshot`
-/// хранит старые id, при restore они должны указывать на новые entity
-/// того же объекта, а не на произвольные).
-///
-/// `SceneFile::game_state_ron` возвращается как есть — движок его не
-/// парсит, это «непрозрачный blob» для игры.
-///
-/// Порядок в кортеже:
-///   `(World, Option<Vec3> player_spawn, Option<String> game_state_ron,
-///     HashMap<u32, Entity> id_map)`.
+/// Полная версия `load_scene_with_assets_from_str_full`, дополнительно
+/// возвращающая `id_map` — отображение `old_entity_id → new_entity`.
 pub fn load_scene_with_assets_from_str_full_with_ids(
     text: &str,
     renderer: &mut Renderer,
@@ -823,12 +963,8 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     if let Some(d) = snap.decal {
         world.insert(e, Decal { texture: d.texture, tint: d.tint });
     }
-    if let Some(g) = snap.gold_value {
-        world.insert(e, GoldValue(g));
-    }
-    if let Some(k) = snap.key_item {
-        world.insert(e, KeyItem(k));
-    }
+    if let Some(g) = snap.gold_value { world.insert(e, GoldValue(g)); }
+    if let Some(k) = snap.key_item { world.insert(e, KeyItem(k)); }
     if let Some(c) = snap.chest {
         world.insert(e, Chest { gold: c.gold, opened: c.opened });
     }
@@ -845,6 +981,39 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     }
     if let Some(q) = snap.quest_target {
         world.insert(e, QuestTarget { quest_id: q });
+    }
+
+    // === Фаза bugfix #7: AI / Audio / Timer ===
+    if let Some(a) = snap.ai_agent {
+        world.insert(e, a.to_agent());
+    }
+    if let Some(p) = snap.patrol_path {
+        world.insert(e, p.to_path());
+    }
+    if let Some(src) = snap.audio_source {
+        world.insert(e, src);
+    }
+    if let Some(t) = snap.timer {
+        let mode = match t.mode.as_str() {
+            "repeating" => TimerMode::Repeating,
+            _ => TimerMode::Once,
+        };
+        let mut timer = Timer::with_mode(t.duration, mode);
+        timer.elapsed = t.elapsed;
+        if t.paused { timer.pause(); }
+        if t.finished && mode == TimerMode::Once {
+            timer.elapsed = timer.duration;
+        }
+        world.insert(e, timer);
+    }
+    if snap.ai_target == Some(true) {
+        world.insert(e, crate::game::ai::AiTarget);
+    }
+    if snap.enemy == Some(true) {
+        world.insert(e, crate::game::ai::Enemy);
+    }
+    if snap.debug_path == Some(true) {
+        world.insert(e, crate::game::ai::DebugPath);
     }
 
     e

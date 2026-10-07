@@ -112,12 +112,8 @@ pub fn draw(
         asset_db,
     );
 
-    if editor.play.active {
-        if editor.play.paused {
-            draw_pause_overlay(ctx, editor, &mut action);
-        } else {
-            draw_play_hud(ctx, &editor.play, stats);
-        }
+    if editor.play.active && editor.play.paused {
+        draw_pause_overlay(ctx, editor, &mut action);
     }
     action
 }

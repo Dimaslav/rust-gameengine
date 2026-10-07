@@ -10,7 +10,7 @@ pub mod particles;
 pub mod time;
 
 pub use ai_system::{AiSystem, AiTuning};
-pub use app::{run, Game};
+pub use app::{run, Game, ShotFired, WorldLoadRequest};
 pub use audio::AudioSystem;
 pub use character::{apply_radial_impulse, push_dynamic_bodies};
 pub use collision::PlayerCapsule;

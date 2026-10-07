@@ -1,17 +1,13 @@
 //! Высокоуровневые HUD-хелперы: health bar, ammo, notifications, crosshair.
-//! Игровой код вызывает эти функции из `Game::collect_ui`, чтобы не
-//! собирать HUD из примитивов вручную.
 
 use super::layer::UiLayer;
 
-/// Уведомление в углу экрана.
 pub struct Notification {
     pub text: String,
     pub ttl: f32,
     pub max_ttl: f32,
 }
 
-/// HUD-состояние: живёт в DemoGame/MyGame, не в движке.
 pub struct Hud {
     pub notifications: Vec<Notification>,
 }
@@ -36,16 +32,11 @@ impl Hud {
         self.notifications.retain(|n| n.ttl > 0.0);
     }
 
-    /// Рисует health bar в левом нижнем углу.
-    pub fn health_bar(
-        &self,
-        ui: &mut UiLayer,
-        current: f32,
-        max: f32,
-    ) {
+    /// Health bar в **ЛЕВОМ** нижнем углу. `x = 24.0`.
+    pub fn health_bar(&self, ui: &mut UiLayer, current: f32, max: f32) {
         let w = 220.0;
         let h = 22.0;
-        let x = 24.0;
+        let x = 24.0;                              // ← ЛЕВЫЙ КРАЙ
         let y = ui.screen_h() - 24.0 - h;
 
         let frac = if max > 0.0 { (current / max).clamp(0.0, 1.0) } else { 0.0 };
@@ -53,17 +44,15 @@ impl Hud {
                     else if frac > 0.25 { [0.95, 0.8, 0.2, 1.0] }
                     else { [0.9, 0.25, 0.2, 1.0] };
 
-        // Background тёмный, чтобы HUD был виден на любой сцене.
         ui.rect(x - 6.0, y - 6.0, w + 12.0, h + 12.0, [0.0, 0.0, 0.0, 0.55]);
-
         ui.bar(x, y, w, h, frac, color, [0.1, 0.1, 0.1, 0.9]);
 
-        // Текст поверх бара.
         let label = format!("HP  {:.0} / {:.0}", current, max);
         ui.text_centered(x + w * 0.5, y + h * 0.5, &label, 16.0, [1.0, 1.0, 1.0, 1.0]);
     }
 
-    /// Ammo counter справа снизу.
+    /// Legacy метод. **Не вызывать** в FortressDemo — он рисует
+    /// старую ammo-панель без резерва. Оставлен для совместимости.
     pub fn ammo(&self, ui: &mut UiLayer, current: u32, max: u32) {
         let text = format!("AMMO {:>3} / {:<3}", current, max);
         let size = 22.0;
@@ -78,20 +67,15 @@ impl Hud {
         ui.text(x + padding, y + (box_h - size) * 0.5, &text, size, [1.0, 1.0, 0.85, 1.0]);
     }
 
-    /// Crosshair в центре.
     pub fn crosshair(&self, ui: &mut UiLayer, highlight: bool) {
         let cx = ui.screen_w() * 0.5;
         let cy = ui.screen_h() * 0.5;
-        let color = if highlight {
-            [1.0, 0.85, 0.3, 0.9]
-        } else {
-            [1.0, 1.0, 1.0, 0.85]
-        };
+        let color = if highlight { [1.0, 0.85, 0.3, 0.9] }
+                    else { [1.0, 1.0, 1.0, 0.85] };
         let size = if highlight { 10.0 } else { 8.0 };
         ui.crosshair(cx, cy, size, 1.5, color);
     }
 
-    /// Notifications в правом верхнем углу.
     pub fn notifications(&self, ui: &mut UiLayer) {
         let size = 16.0;
         let padding = 8.0;
@@ -106,20 +90,15 @@ impl Hud {
             let x = ui.screen_w() - 24.0 - box_w;
 
             ui.rect(x, y, box_w, box_h, [0.0, 0.0, 0.0, 0.6 * alpha]);
-            ui.text(
-                x + padding,
-                y + (box_h - size) * 0.5,
-                &n.text,
-                size,
-                [1.0, 1.0, 0.9, alpha],
-            );
+            ui.text(x + padding, y + (box_h - size) * 0.5,
+                &n.text, size, [1.0, 1.0, 0.9, alpha]);
 
             y += box_h + spacing;
         }
     }
 
-    /// HUD в debug-режиме: FPS, entity count, позиция камеры.
-    pub fn debug_overlay(&self, ui: &mut UiLayer, fps: f32, entities: usize, camera_pos: glam::Vec3) {
+    pub fn debug_overlay(&self, ui: &mut UiLayer, fps: f32, entities: usize,
+                         camera_pos: glam::Vec3) {
         let size = 14.0;
         let mut y = 24.0;
         let x = 24.0;

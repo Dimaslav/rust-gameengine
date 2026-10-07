@@ -1,7 +1,7 @@
 //! Аудио-компоненты.
 //!
 //! `AudioSource` — звук, привязанный к entity. Позиция берётся из
-//! `Transform` (через `world_position`, то есть с учётом Parent-цепочки).
+//! `Transform` **через `world_position`** (с учётом Parent-цепочки).
 //!
 //! `AudioBus` (Фаза 4.2) — маршрутизация звука на шину. Громкость
 //! шины применяется поверх spatial attenuation, давая пользователю
@@ -11,6 +11,11 @@
 //! `occlusion_volume`. При включённом флаге `AudioSystem::update`
 //! делает raycast между слушателем и источником, и при блокировке
 //! громкость умножается на `occlusion_volume` (по умолчанию 0.3).
+//!
+//! ИЗМЕНЕНО (bugfix #4): `source_position` теперь корректно
+//! применяет Parent-цепочку. Раньше возвращалась локальная
+//! позиция `Transform.position`, из-за чего звук дочернего
+//! объекта играл не там, где он находится визуально.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -77,7 +82,7 @@ impl Default for AudioBus {
 ///
 /// Итоговая громкость = `volume * attenuation(distance) * bus_volume(bus)
 /// * bus_volume(Master) * occlusion_factor`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioSource {
     pub sound: String,
 
@@ -103,27 +108,10 @@ pub struct AudioSource {
     /// и звук доиграл до конца, система сбросит флаг в `false`.
     pub playing: bool,
 
-    /// ИЗМЕНЕНО (audio occlusion): включить проверку препятствий
-    /// между источником и слушателем.
-    ///
-    /// Если `true`, `AudioSystem::update` делает raycast по
-    /// статическим коллайдерам (`physics::navmesh::segment_clear`).
-    /// При блокировке итоговая громкость умножается на
-    /// `occlusion_volume`.
-    ///
-    /// Стоимость: один raycast на активный spatial-звук в кадр
-    /// (обычно <20). При 20 звуках × 1000 коллайдеров = 20k
-    /// AABB-тестов в кадр. Приемлемо, но если станет дорого —
-    /// кэшировать результат на 5-10 кадров.
+    /// Включить проверку препятствий между источником и слушателем.
     pub occlusion: bool,
 
     /// Множитель громкости при заблокированном сегменте.
-    ///
-    /// * `1.0` — эффект отключён (громкость не меняется).
-    /// * `0.3` — «приглушено за стеной» (дефолт).
-    /// * `0.0` — полностью тихо за препятствием.
-    ///
-    /// Клампится в `[0, 1]`.
     pub occlusion_volume: f32,
 }
 
@@ -143,48 +131,22 @@ impl AudioSource {
         }
     }
 
-    /// Non-spatial звук. Полезно для UI, глобальных эффектов.
     pub fn non_spatial(sound: impl Into<String>) -> Self {
-        Self {
-            max_distance: 0.0,
-            ..Self::new(sound)
-        }
+        Self { max_distance: 0.0, ..Self::new(sound) }
     }
 
-    /// Зацикленный (например, вентилятор, огонь).
     pub fn looping(sound: impl Into<String>) -> Self {
-        Self {
-            looping: true,
-            ..Self::new(sound)
-        }
+        Self { looping: true, ..Self::new(sound) }
     }
 
-    pub fn with_bus(mut self, bus: AudioBus) -> Self {
-        self.bus = bus;
-        self
-    }
-
-    pub fn with_volume(mut self, v: f32) -> Self {
-        self.volume = v;
-        self
-    }
-
-    pub fn with_pitch(mut self, p: f32) -> Self {
-        self.pitch = p.max(0.01);
-        self
-    }
-
+    pub fn with_bus(mut self, bus: AudioBus) -> Self { self.bus = bus; self }
+    pub fn with_volume(mut self, v: f32) -> Self { self.volume = v; self }
+    pub fn with_pitch(mut self, p: f32) -> Self { self.pitch = p.max(0.01); self }
     pub fn with_range(mut self, min: f32, max: f32) -> Self {
         self.min_distance = min.max(0.0);
         self.max_distance = max.max(self.min_distance);
         self
     }
-
-    /// ИЗМЕНЕНО (audio occlusion): включить/настроить occlusion.
-    ///
-    /// `enabled == false` — raycast не делается, громкость не меняется.
-    /// `volume_when_blocked` — множитель при блокировке. `1.0` эквивалентно
-    /// выключению эффекта.
     pub fn with_occlusion(mut self, enabled: bool, volume_when_blocked: f32) -> Self {
         self.occlusion = enabled;
         self.occlusion_volume = volume_when_blocked.clamp(0.0, 1.0);
@@ -193,9 +155,7 @@ impl AudioSource {
 }
 
 impl Default for AudioSource {
-    fn default() -> Self {
-        Self::new("pickup")
-    }
+    fn default() -> Self { Self::new("pickup") }
 }
 
 // ============================================================
@@ -203,31 +163,24 @@ impl Default for AudioSource {
 // ============================================================
 
 /// Квадратичное затухание: 1.0 внутри `min_dist`, 0.0 за `max_dist`.
-///
-/// Кривая — `(1 - t)^2`, где `t` — нормированное расстояние.
-///
-/// `max_dist <= min_dist` → без пространственного затухания (1.0).
 pub fn attenuation(dist: f32, min_dist: f32, max_dist: f32) -> f32 {
     if max_dist <= min_dist || max_dist <= 0.0 {
         return 1.0;
     }
-    if dist <= min_dist {
-        return 1.0;
-    }
-    if dist >= max_dist {
-        return 0.0;
-    }
+    if dist <= min_dist { return 1.0; }
+    if dist >= max_dist { return 0.0; }
     let t = (dist - min_dist) / (max_dist - min_dist);
     (1.0 - t) * (1.0 - t)
 }
 
-/// Позиция entity в мире для целей audio. Возвращает `Vec3::ZERO`,
-/// если у entity нет `Transform`.
+/// Позиция entity в мире для целей audio.
+///
+/// ИЗМЕНЕНО (bugfix #4): теперь учитывает Parent-цепочку через
+/// `world_position`. До этого возвращалась локальная
+/// `Transform.position`, и звук дочерней сущности звучал из
+/// родительского origin-а, а не из фактической позиции.
 pub fn source_position(world: &crate::ecs::World, entity: crate::ecs::Entity) -> Vec3 {
-    world
-        .get::<crate::game::components::Transform>(entity)
-        .map(|t| t.position)
-        .unwrap_or(Vec3::ZERO)
+    crate::game::world_position(world, entity).unwrap_or(Vec3::ZERO)
 }
 
 #[cfg(test)]
@@ -248,7 +201,6 @@ mod tests {
 
     #[test]
     fn attenuation_midpoint() {
-        // На середине (5.5 при 1..10) t=0.5, (1-0.5)^2 = 0.25.
         let a = attenuation(5.5, 1.0, 10.0);
         assert!((a - 0.25).abs() < 1e-4, "expected 0.25, got {}", a);
     }

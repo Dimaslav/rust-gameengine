@@ -44,9 +44,6 @@ use super::time::Time;
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
 
-    /// Расширенная инициализация с доступом к `AssetDatabase`.
-    /// По умолчанию просто вызывает `init`, так что существующий
-    /// код продолжает работать без изменений.
     fn init_with_assets(
         &mut self,
         world: &mut World,
@@ -58,9 +55,6 @@ pub trait Game: 'static {
 
     fn configure_input(&mut self, _map: &mut crate::engine::InputMap) {}
 
-    /// ИЗМЕНЕНО (Фаза 6): движок вызывает этот метод каждый кадр
-    /// (после `game.update`). Если игра вернула `true` — движок
-    /// делает бейк navmesh.
     fn wants_navmesh_bake(&mut self) -> bool { false }
 
     fn update(&mut self, _world: &mut World, _input: &Input, _renderer: &mut Renderer, _dt: f32) -> bool { true }
@@ -77,8 +71,6 @@ pub trait Game: 'static {
     fn rpg_hud(&self) -> Vec<(String, String)> { Vec::new() }
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
 
-    /// Собрать runtime UI (HUD, меню) для этого кадра.
-    /// Вызывается до рендера. По умолчанию — пусто.
     fn collect_ui(
         &mut self,
         _world: &mut World,
@@ -87,9 +79,23 @@ pub trait Game: 'static {
     ) {}
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
-
     fn save_game_state(&self) -> Option<String> { None }
     fn load_game_state(&mut self, _ron: &str) {}
+    fn on_pause_changed(&mut self, _paused: bool) {}
+    fn load_world_request(&mut self) -> Option<WorldLoadRequest> {
+        None
+    }
+}
+
+pub struct WorldLoadRequest {
+    pub scene_ron: String,
+    pub game_state_ron: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ShotFired {
+    pub origin: Vec3,
+    pub direction: Vec3,
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +134,7 @@ pub struct App<G: Game> {
     physics: PhysicsWorld,
     play_snapshot: Option<PlaySnapshot>,
     elevator_prev_state: HashMap<Entity, ElevatorState>,
+    was_paused: bool,
 
     pickable: Option<PickableSet>,
 
@@ -186,7 +193,6 @@ impl<G: Game> App<G> {
         let mut world = World::new();
         game.camera_mut().set_viewport(renderer.size.width, renderer.size.height);
 
-        // AssetDatabase открываем ДО init — чтобы Game мог её использовать.
         let asset_db = crate::assets::AssetDatabase::open("assets")
             .expect("failed to open assets directory");
 
@@ -212,6 +218,7 @@ impl<G: Game> App<G> {
             physics: PhysicsWorld::default(),
             play_snapshot: None,
             elevator_prev_state: HashMap::new(),
+            was_paused: false,
             pickable: None,
             navmesh: None,
             ai_system: AiSystem::new(),
@@ -354,9 +361,6 @@ impl<G: Game> App<G> {
         self.navmesh = Some(nm);
     }
 
-    /// ИЗМЕНЕНО (Фаза 5): платформерный контроллер.
-    /// ИЗМЕНЕНО (bugfix jump): фикс отмены прыжка в первом кадре.
-    /// ИЗМЕНЕНО (sound perception): emit noise on shot / footsteps.
     fn update_player(&mut self, dt: f32) {
         // ------------------------------------------------------------------
         // 1. Look
@@ -389,9 +393,6 @@ impl<G: Game> App<G> {
             self.editor.state.play.player_height
         };
 
-        // ------------------------------------------------------------------
-        // 3. Input → target horizontal direction
-        // ------------------------------------------------------------------
         let walk_speed = self.editor.state.play.walk_speed;
         let run_speed = self.editor.state.play.run_speed;
         let jump_speed = self.editor.state.play.jump_speed;
@@ -426,9 +427,6 @@ impl<G: Game> App<G> {
 
         let target_velocity = input_dir * target_speed;
 
-        // ------------------------------------------------------------------
-        // 4. Coyote + jump buffer timers
-        // ------------------------------------------------------------------
         let was_on_ground = self.editor.state.play.on_ground;
 
         {
@@ -450,9 +448,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // ------------------------------------------------------------------
-        // 5. Horizontal velocity — exponential smoothing
-        // ------------------------------------------------------------------
         {
             let play = &mut self.editor.state.play;
             let tau = if was_on_ground { ground_accel_tau } else { air_accel_tau };
@@ -461,9 +456,6 @@ impl<G: Game> App<G> {
                 (target_velocity - play.horizontal_velocity) * alpha;
         }
 
-        // ------------------------------------------------------------------
-        // 6. Jump (coyote + buffer)
-        // ------------------------------------------------------------------
         let mut vvel = self.editor.state.play.vertical_velocity;
         let mut on_ground = self.editor.state.play.on_ground;
         let mut did_jump = false;
@@ -486,9 +478,6 @@ impl<G: Game> App<G> {
         vvel -= gravity * dt;
         let dy = vvel * dt;
 
-        // ------------------------------------------------------------------
-        // 7. Character controller step
-        // ------------------------------------------------------------------
         let eye_pos = self.game.camera().first_person_pos;
         let feet = eye_pos - Vec3::Y * eye_height;
         let pcap = PlayerCapsule { radius: player_radius, height: player_height };
@@ -540,7 +529,7 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 9. Landed / air state (bugfix jump)
+        // 9. Landed / air state
         // ------------------------------------------------------------------
         if did_jump {
             on_ground = false;
@@ -587,11 +576,8 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 11b. Footstep noise (sound perception)
+        // 11b. Footstep noise
         // ------------------------------------------------------------------
-        //
-        // Эмитим шум шага каждые ~0.4с при движении по земле.
-        // Скорость шага выше при беге — шаги чаще.
         if on_ground && horizontal_moved > 0.001 {
             self.footstep_timer -= dt;
             if self.footstep_timer <= 0.0 {
@@ -608,7 +594,7 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 12. Firing
+        // 12. Aim / interact highlight
         // ------------------------------------------------------------------
         let origin = self.game.camera().position();
         let dir = self.game.camera().forward();
@@ -622,53 +608,6 @@ impl<G: Game> App<G> {
         self.editor.state.play.highlight = aim_hit.as_ref().and_then(|(e, d)| {
             if *d <= interact_dist { Some(*e) } else { None }
         });
-
-        let lmb = self.input.mouse_down(MouseButton::Left);
-        let can_fire = lmb
-            && self.editor.state.play.fire_cooldown <= 0.0
-            && self.editor.state.play.ammo > 0;
-        if can_fire {
-            if let Some(audio) = &mut self.audio { audio.play("shot"); }
-
-            // ИЗМЕНЕНО (sound perception): выстрел привлекает AI.
-            self.world.send(NoiseEvent {
-                position: origin,
-                radius: NoiseKind::Gunshot.default_radius(),
-                kind: NoiseKind::Gunshot,
-            });
-
-            let muzzle = origin + dir * 0.5;
-            self.spawn_burst(muzzle, &particles::sparks(dir));
-            let damage = self.editor.state.play.damage_per_shot;
-            self.projectiles.push(Projectile {
-                position: muzzle, velocity: dir * bullet_speed.max(1.0),
-                age: 0.0, max_age: 3.0, damage,
-            });
-            if bullet_speed < 0.5 {
-                if let Some((target, d)) = aim_hit {
-                    if d <= gun_range {
-                        let hit_point = origin + dir * d;
-                        self.spawn_burst(hit_point, &particles::sparks(-dir));
-                        let mut killed = false;
-                        if let Some(h) = self.world.get_mut::<Health>(target) {
-                            h.current -= damage;
-                            if h.current <= 0.0 { killed = true; }
-                        }
-                        if killed {
-                            let pos = self.world.get::<Transform>(target)
-                                .map(|t| t.position).unwrap_or(Vec3::ZERO);
-                            self.spawn_burst(pos, &particles::explosion());
-                            if let Some(audio) = &mut self.audio { audio.play("explosion"); }
-                            self.game.on_kill(&mut self.world, target);
-                            self.world.despawn(target);
-                        }
-                    }
-                }
-            }
-            let play = &mut self.editor.state.play;
-            play.fire_cooldown = play.fire_cooldown_max;
-            if play.ammo > 0 { play.ammo -= 1; }
-        }
 
         // ------------------------------------------------------------------
         // 13. Triggers
@@ -713,7 +652,7 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 14. Legacy Chase NPCs (без AiAgent)
+        // 14. Legacy Chase NPCs
         // ------------------------------------------------------------------
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
@@ -756,6 +695,71 @@ impl<G: Game> App<G> {
             let fs = &mut self.editor.state.fly_speed;
             *fs = (*fs * (1.0 + self.input.scroll_delta * 0.1)).clamp(0.5, 200.0);
         }
+    }
+
+    fn handle_shot_fired(&mut self, shot: ShotFired) {
+        let dir = shot.direction.normalize_or_zero();
+        if dir.length_squared() < 1e-8 {
+            return;
+        }
+        let origin = shot.origin;
+
+        // 1. Звук.
+        if let Some(audio) = &mut self.audio {
+            audio.play("shot");
+        }
+
+        // 2. Шум для AI (в текущем кадре, AI-система увидит его
+        //    ниже — `read_events_current`).
+        self.world.send(NoiseEvent {
+            position: origin,
+            radius: NoiseKind::Gunshot.default_radius(),
+            kind: NoiseKind::Gunshot,
+        });
+
+        // 3. Дульная вспышка.
+        let muzzle = origin + dir * 0.5;
+        self.spawn_burst(muzzle, &particles::sparks(dir));
+
+        // 4. Hitscan: мгновенный raycast, урон, эффекты попадания.
+        let gun_range = self.editor.state.play.gun_range;
+        let damage = self.editor.state.play.damage_per_shot;
+
+        let hit = {
+            let cache = Self::ensure_pickable(&self.world, &self.renderer, &mut self.pickable);
+            crate::editor::picking::pick_ray_cached(&self.renderer, cache, origin, dir)
+        };
+
+        if let Some((target, dist)) = hit {
+            if dist <= gun_range {
+                let hit_point = origin + dir * dist;
+                self.spawn_burst(hit_point, &particles::sparks(-dir));
+
+                let mut killed = false;
+                if let Some(h) = self.world.get_mut::<Health>(target) {
+                    h.current -= damage;
+                    if h.current <= 0.0 {
+                        killed = true;
+                    }
+                }
+                if killed {
+                    let pos = self.world.get::<Transform>(target)
+                        .map(|t| t.position)
+                        .unwrap_or(Vec3::ZERO);
+                    self.spawn_burst(pos, &particles::explosion());
+                    if let Some(audio) = &mut self.audio {
+                        audio.play("explosion");
+                    }
+                    self.game.on_kill(&mut self.world, target);
+                    self.world.despawn(target);
+                }
+            }
+        }
+
+        log::debug!(
+            "[SHOT] origin ({:.1},{:.1},{:.1}) dir ({:.2},{:.2},{:.2})",
+            origin.x, origin.y, origin.z, dir.x, dir.y, dir.z
+        );
     }
 
     fn spawn_burst(&mut self, origin: Vec3, params: &particles::BurstParams) {
@@ -983,13 +987,10 @@ impl<G: Game> App<G> {
         self.time.tick();
         self.input.tick_begin_frame();
 
-        // Hot-reload ассетов. Дёшево — проверка раз в ~0.75 сек.
         let reloaded = self.hot_reload.tick(&mut self.asset_db, &mut self.renderer);
         if !reloaded.is_empty() {
-            // Инвалидируем pickable-кэш: если изменились меши — он устарел.
             self.pickable = None;
         }
-
         self.pickable = None;
 
         let dt = self.time.delta;
@@ -999,6 +1000,11 @@ impl<G: Game> App<G> {
         self.process_state_input(elwt);
 
         let paused = self.editor.state.play.active && self.editor.state.play.paused;
+
+        if paused != self.was_paused {
+            self.was_paused = paused;
+            self.game.on_pause_changed(paused);
+        }
 
         let rmb = self.input.mouse_down(MouseButton::Right);
         let want_fly = rmb && self.rmb_dragged && !self.editor.state.play.active;
@@ -1024,6 +1030,38 @@ impl<G: Game> App<G> {
         if !paused {
             let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt);
             if !continue_running { elwt.exit(); return; }
+
+            let shots: Vec<ShotFired> = self.world
+                .read_events_current::<ShotFired>()
+                .copied()
+                .collect();
+            for shot in shots {
+                self.handle_shot_fired(shot);
+            }
+
+            if let Some(req) = self.game.load_world_request() {
+                match crate::scene::load_scene_with_assets_from_str_full(
+                    &req.scene_ron,
+                    &mut self.renderer,
+                ) {
+                    Ok((mut new_world, _spawn, _embedded_gs)) => {
+                        new_world.sync_next_id();
+                        self.world = new_world;
+                        self.navmesh = None;
+                        self.pickable = None;
+                        self.editor.state.selected.clear();
+                        self.editor.state.undo.clear();
+                        log::info!(
+                            "World replaced from load_world_request: {} entities",
+                            self.world.len()
+                        );
+                        if let Some(gs) = req.game_state_ron {
+                            self.game.load_game_state(&gs);
+                        }
+                    }
+                    Err(e) => log::error!("Failed to load world: {}", e),
+                }
+            }
 
             if self.game.wants_navmesh_bake() {
                 self.bake_navmesh();
@@ -1348,7 +1386,6 @@ impl<G: Game> App<G> {
         let ambient = self.game.ambient();
         let postfx = self.game.postfx();
 
-        // Runtime UI: собрать quads с экшеном игры.
         let mouse_clicked = self.input.mouse_pressed(winit::event::MouseButton::Left);
         let mouse_down = self.input.mouse_down(winit::event::MouseButton::Left);
         let mut ui_layer = crate::ui::UiLayer::new(
@@ -1508,6 +1545,10 @@ impl<G: Game> App<G> {
                 self.world.insert(new_e, s);
             }
 
+            // === ИЗМЕНЕНО (bugfix #9): Timer и AI больше не теряются ===
+            if let Some(t) = self.world.get::<crate::game::timers::Timer>(e).cloned() {
+                self.world.insert(new_e, t);
+            }
             if let Some(agent) = self.world.get::<crate::game::ai::AiAgent>(e).cloned() {
                 let mut a = agent;
                 a.path.clear();
@@ -1528,6 +1569,9 @@ impl<G: Game> App<G> {
             }
             if self.world.has::<crate::game::ai::Enemy>(e) {
                 self.world.insert(new_e, crate::game::ai::Enemy);
+            }
+            if self.world.has::<crate::game::ai::DebugPath>(e) {
+                self.world.insert(new_e, crate::game::ai::DebugPath);
             }
 
             if let Some(mut t) = self.world.get::<Trigger>(e).cloned() {

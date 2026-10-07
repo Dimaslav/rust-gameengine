@@ -1,6 +1,13 @@
 //! AI-компоненты: агент, состояние FSM, зрение, патруль, слух.
 //!
 //! Логика самого FSM — в `engine::ai_system`. Здесь только данные.
+//!
+//! ИЗМЕНЕНО (bugfix #7): `AiAgent` и `PatrolPath` теперь реализуют
+//! `Serialize`/`Deserialize`. Runtime-поля (path, timers, yaw,
+//! last_seen_pos) помечены `#[serde(skip, default)]` и при загрузке
+//! стартуют с нуля. Без этого Save/Load сцены терял AI полностью,
+//! а автосейв в кампании «The Fallen Citadel» не восстанавливал
+//! поведение врагов.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -26,8 +33,7 @@ pub enum AiState {
     Idle,
     /// Ходит по точкам маршрута.
     Patrol,
-    /// ИЗМЕНЕНО (sound perception): расследует шум или последнюю
-    /// известную позицию цели.
+    /// Расследует шум или последнюю известную позицию цели.
     Investigate,
     /// Видит игрока, бежит за ним.
     Chase,
@@ -42,7 +48,12 @@ impl Default for AiState {
 }
 
 /// Агент с FSM.
-#[derive(Debug, Clone)]
+///
+/// ИЗМЕНЕНО (bugfix #7): добавлены `Serialize`/`Deserialize`.
+/// Персистентная часть (state, speed, vision, attack) сохраняется
+/// в сцену. Runtime-поля (path, timers, yaw, last_seen_pos)
+/// сбрасываются при загрузке — агент стартует в Idle без пути.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAgent {
     pub state: AiState,
 
@@ -56,11 +67,7 @@ pub struct AiAgent {
     /// Косинус половины угла обзора. cos(60°) = 0.5.
     pub vision_angle_cos: f32,
 
-    /// ИЗМЕНЕНО (sound perception): радиус слышимости.
-    ///
-    /// Если источник шума (`NoiseEvent`) в этом радиусе — агент
-    /// переходит в `Investigate` (или `Chase`, если видит цель).
-    /// 0.0 = глухой.
+    /// Радиус слышимости. 0.0 = глухой.
     pub hearing_range: f32,
 
     /// Дистанция атаки.
@@ -74,27 +81,38 @@ pub struct AiAgent {
     pub lose_target_time: f32,
 
     // === Runtime (не сериализуется) ===
+
     /// Текущий путь (пересчитывается через A*).
+    #[serde(skip, default)]
     pub path: Vec<Vec3>,
     /// Индекс текущей цели в `path`.
+    #[serde(skip, default)]
     pub path_index: usize,
     /// Таймер до следующего перерасчёта пути.
+    #[serde(skip, default)]
     pub repath_timer: f32,
     /// Кулдаун атаки (тикает).
+    #[serde(skip, default)]
     pub attack_timer: f32,
     /// Последняя известная позиция цели (или точки шума).
+    #[serde(skip, default)]
     pub last_seen_pos: Option<Vec3>,
     /// Сколько секунд цель не видна.
+    #[serde(skip, default = "default_time_since_seen")]
     pub time_since_seen: f32,
     /// Куда агент смотрит (yaw, radians).
+    #[serde(skip, default)]
     pub yaw: f32,
     /// Время в текущем состоянии (для timeouts).
+    #[serde(skip, default)]
     pub state_timer: f32,
 
-    /// ИЗМЕНЕНО: агент — источник шума при атаке?
     /// Зарезервировано на будущее (групповое поведение).
+    #[serde(default)]
     pub emits_noise: bool,
 }
+
+fn default_time_since_seen() -> f32 { 999.0 }
 
 impl Default for AiAgent {
     fn default() -> Self {
@@ -103,7 +121,7 @@ impl Default for AiAgent {
             speed: 3.0,
             turn_speed: 8.0,
             vision_range: 20.0,
-            vision_angle_cos: 0.5, // 60° half-angle
+            vision_angle_cos: 0.5,
             hearing_range: 25.0,
             attack_range: 1.5,
             damage: 10.0,
@@ -132,7 +150,6 @@ impl AiAgent {
         self.vision_angle_cos = half_angle_rad.cos();
         self
     }
-    /// ИЗМЕНЕНО (sound perception): настроить радиус слышимости.
     pub fn with_hearing(mut self, range: f32) -> Self {
         self.hearing_range = range;
         self
@@ -148,18 +165,26 @@ impl AiAgent {
 }
 
 /// Цикл патруля.
-#[derive(Debug, Clone)]
+///
+/// ИЗМЕНЕНО (bugfix #7): добавлены `Serialize`/`Deserialize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatrolPath {
     pub points: Vec<Vec3>,
     /// Индекс текущей цели.
+    #[serde(default)]
     pub current: usize,
     /// Пауза в каждой точке.
+    #[serde(default = "default_patrol_wait")]
     pub wait_time: f32,
     /// Текущая пауза.
+    #[serde(skip, default)]
     pub wait_timer: f32,
     /// Идёт ли пауза сейчас.
+    #[serde(skip, default)]
     pub waiting: bool,
 }
+
+fn default_patrol_wait() -> f32 { 0.5 }
 
 impl PatrolPath {
     pub fn new(points: Vec<Vec3>) -> Self {
@@ -219,7 +244,7 @@ pub struct Enemy;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DebugPath;
 
-/// ИЗМЕНЕНО (sound perception): источник шума в мире.
+/// Источник шума в мире.
 ///
 /// Отправляется через `world.send(NoiseEvent { ... })`. Читается
 /// `AiSystem::update` (по `read_events_current`) в тот же кадр.
