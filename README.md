@@ -77,3 +77,42 @@ PBR-рендером и полным asset pipeline. Готов как фунд�
 git clone <repo> rust-engine
 cd rust-engine
 cargo run --release
+
+Архитектура:
+┌─────────────────────────────────────────────────────────┐
+│                       Game (твоя игра)                   │
+│  impl Game for MyGame { ... }                           │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────┐
+│                   Engine / App (движок)                  │
+│  • run<G: Game>(game) — точка входа                     │
+│  • App<G> — главный цикл, окно, input, время            │
+│  • Hot-reload ассетов                                    │
+└──────────┬───────────┬──────────┬───────────┬───────────┘
+           │           │          │           │
+    ┌──────▼───┐ ┌─────▼────┐ ┌───▼─────┐ ┌───▼────────┐
+    │   ECS    │ │  Render  │ │ Physics │ │  Editor    │
+    │ World    │ │ Renderer │ │ Bodies  │ │ Gizmo      │
+    │ Entity   │ │ Material │ │ Collider│ │ Inspector  │
+    │ System   │ │ Mesh     │ │ Navmesh │ │ Palette    │
+    │ Events   │ │ Camera   │ │ Raycast │ │ Undo       │
+    │ for_each │ │ PostFx   │ │ AI      │ │ Play       │
+    └──────┬───┘ └─────┬────┘ └───┬─────┘ └───┬────────┘
+           │           │          │           │
+    ┌──────▼───────────▼──────────▼───────────▼────────┐
+    │                 Game (данные движка)              │
+    │  Transform, MeshHandle, MaterialHandle, Health,  │
+    │  AiAgent, AudioSource, RigidBody, Collider, ...  │
+    └─────────────────────────┬────────────────────────┘
+                              │
+    ┌─────────────────────────▼────────────────────────┐
+    │                    Assets                         │
+    │  AssetDatabase, AssetId, AssetMeta, HotReload    │
+    │  Content Browser                                  │
+    └─────────────────────────┬────────────────────────┘
+                              │
+    ┌─────────────────────────▼────────────────────────┐
+    │                       UI                          │
+    │  UiLayer (immediate-mode), Hud, Font, Quad        │
+    └──────────────────────────────────────────────────┘
