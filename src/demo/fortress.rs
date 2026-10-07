@@ -1,25 +1,3 @@
-//! "The Fallen Citadel" — сюжетная кампания из 5 актов.
-//!
-//! Демонстрирует: физику, AI, триггеры, диалоги, стадии, победу,
-//! аптечки, ключи, ворота, save/load, перезарядку оружия.
-//!
-//! ## История фиксов
-//!
-//! * bugfix #2  — ворота останавливаются на `open_y` через `GateMotion`.
-//! * bugfix #5  — события анимаций обрабатываются (`on_animation_event`).
-//! * bugfix #6  — HUD тикается реальным `dt` (`last_dt`).
-//! * bugfix #7  — AI / Audio / Timer сохраняются в сцену.
-//! * bugfix #8  — `demo_ammo_reserve` восстанавливается без эвристики.
-//! * bugfix #10 — Play стартует из сохранённой позиции, но с fallback
-//!                на Act 1 при дефолтном `saved_position`.
-//! * bugfix #R  — нет второго `Escape`-toggle, пауза синхронизируется
-//!                с engine через `Game::on_pause_changed`. R даёт
-//!                обратную связь во всех edge-случаях.
-//! * bugfix hud-dup — стрельба на ЛКМ (не Space), авто-огонь через
-//!                `mouse_down`, `ShotFired`-событие для эффектов.
-//! * bugfix bridge — визуальные мосты между актами, счётчик убийств
-//!                скрыт, когда акт не требует убийств.
-
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
@@ -222,6 +200,10 @@ pub struct FortressDemo {
     demo_show_debug: bool,
     last_target_hp: f32,
 
+    /// Последнее значение `input.play_mode`. Для UI: в редакторе
+    /// игровой HUD не рисуем.
+    last_play_mode: bool,
+
     hud: Hud,
 
     campaign: CampaignState,
@@ -235,12 +217,17 @@ pub struct FortressDemo {
     pending_autosave: bool,
     pending_save_slot: Option<u32>,
 
+    /// Флаг «выйти в главное меню». Устанавливается кнопкой в pause
+    /// menu. `App::redraw` читает через `Game::take_quit_to_menu`.
+    pending_quit_to_menu: bool,
+
     prev_world_matrices: HashMap<Entity, glam::Mat4>,
 
     was_in_play_mode: bool,
-
-    /// Реальный dt последнего кадра — для HUD-уведомлений (bugfix #6).
     last_dt: f32,
+    weapon_recoil: f32,
+    pending_hit_stop: Option<(f32, f32)>,
+    auto_fire_accumulator: f32,
 }
 
 impl FortressDemo {
@@ -317,6 +304,8 @@ impl FortressDemo {
             demo_show_debug: true,
             last_target_hp: 100.0,
 
+            last_play_mode: false,
+
             hud: Hud::new(),
             campaign: CampaignState::new(),
 
@@ -327,11 +316,16 @@ impl FortressDemo {
             save_slots_cache_dirty: true,
             pending_autosave: false,
             pending_save_slot: None,
+            pending_quit_to_menu: false,
 
             prev_world_matrices: HashMap::new(),
             was_in_play_mode: false,
 
             last_dt: 1.0 / 60.0,
+
+            weapon_recoil: 0.0,
+            pending_hit_stop: None,
+            auto_fire_accumulator: 0.0,
         }
     }
 
@@ -403,6 +397,44 @@ impl FortressDemo {
         self.save_slots_cache = self.save_manager.list();
         self.save_slots_cache_dirty = false;
     }
+
+    // ============================================================
+    // Gate helpers (fix gate-stale)
+    // ============================================================
+
+    /// Найти entity по имени в текущем `World`. Для устойчивых ссылок
+    /// на двери/босса — `self.gate_2` может устареть после Save/Load.
+    fn find_by_name(world: &World, name: &str) -> Option<Entity> {
+        world.query::<Name>()
+            .find_map(|(e, n)| if n.0 == name { Some(e) } else { None })
+    }
+
+    /// Устойчивый `open_gate`: если `entity` устарел (нет в World),
+    /// ищем по имени `fallback_name`.
+    fn open_gate_by_name(
+        &self,
+        world: &mut World,
+        entity: Option<Entity>,
+        fallback_name: &str,
+    ) {
+        let g = match entity {
+            Some(e) if world.entities().contains(&e) => e,
+            _ => match Self::find_by_name(world, fallback_name) {
+                Some(e) => {
+                    log::warn!(
+                        "Gate '{}': stored entity stale, resolved by name → #{}",
+                        fallback_name, e
+                    );
+                    e
+                }
+                None => {
+                    log::error!("Gate '{}' not found in world", fallback_name);
+                    return;
+                }
+            },
+        };
+        self.open_gate(world, Some(g));
+    }
 }
 
 // ============================================================
@@ -411,18 +443,32 @@ impl FortressDemo {
 
 impl FortressDemo {
     fn build(&mut self, world: &mut World) {
+        // === Terrain entity ===
+        //
+        // ВАЖНО: terrain-entity НЕ получает Collider. Раньше здесь
+        // висел AABB (1000, 0.5, 1000) с верхней гранью на y = +0.5;
+        // капсула игрока начинается на y = feet + radius = 0.35 и
+        // пересекала terrain-AABB — игрок не мог сдвинуться.
+        //
+        // Роль физического пола:
+        //   * для игрока — heightmap через
+        //     `collision::resolve_movement_ex`;
+        //   * для dynamic-тел — `physics::PhysicsWorld::step`.
+        let terrain_e = world.spawn();
+        world.insert(terrain_e, Name("Terrain".into()));
+        world.insert(terrain_e, Transform::at(Vec3::ZERO));
+        world.insert(terrain_e, MeshHandle("terrain".into()));
+        world.insert(terrain_e, MaterialHandle("terrain_mat".into()));
+
         self.build_act1(world);
         self.build_act2(world);
         self.build_act3(world);
         self.build_act4(world);
         self.build_act5(world);
-        // ИЗМЕНЕНО (bugfix bridge): добавляем визуальные мосты
-        // между актами. Раньше между краями полов были дыры
-        // (Act1 заканчивается на X=-50, Act2 начинается на X=-30;
-        // Act2 заканчивается на X=30, Act3 начинается на X=40).
         self.build_bridges(world);
         self.build_global_lighting(world);
         self.build_ai_target(world);
+        self.build_decorations(world);
         self.bell_entity = Some(self.build_bell(world));
 
         log::info!(
@@ -433,12 +479,148 @@ impl FortressDemo {
         self.navmesh_bake_requested = true;
     }
 
-    /// Мосты между актами. Устраняют «дыры», через которые игрок
-    /// раньше шёл по невидимой плоскости Y=0.
+    /// Детализированные декорации.
+    fn build_decorations(&mut self, world: &mut World) {
+        // === Act 1 ===
+        crate_box(world, "Act1_Crate_1", Vec3::new(-66.0, 0.5, -6.0), 1.0);
+        crate_box(world, "Act1_Crate_2", Vec3::new(-66.0, 1.5, -6.0), 1.0);
+        crate_box(world, "Act1_Crate_3", Vec3::new(-65.0, 0.5, -7.0), 1.0);
+
+        barrel(world, "Act1_Barrel_1", Vec3::new(-65.0, 0.6, 6.0));
+        barrel(world, "Act1_Barrel_2", Vec3::new(-64.5, 0.6, 6.5));
+        barrel(world, "Act1_Barrel_3", Vec3::new(-65.5, 0.6, 7.0));
+
+        static_mesh(world, "Act1_Rock_1", "rock_cluster_a", "arena_column",
+            Vec3::new(-68.0, 0.0, 8.0), Quat::IDENTITY, Vec3::ONE, None);
+        static_mesh(world, "Act1_Rock_2", "rock_cluster_b", "arena_column",
+            Vec3::new(-54.0, 0.0, -8.0), Quat::IDENTITY, Vec3::ONE, None);
+
+        for i in 0..4 {
+            let x = -68.0 + i as f32 * 1.2;
+            static_mesh(world, format!("Act1_Grave_{}", i), "gravestone", "arena_column",
+                Vec3::new(x, 0.0, 8.5), Quat::IDENTITY, Vec3::ONE, None);
+        }
+
+        static_mesh(world, "Act1_Skull_1", "skull", "arena_column",
+            Vec3::new(-63.0, 0.1, 3.0), Quat::from_axis_angle(Vec3::Y, 0.7), Vec3::ONE, None);
+        static_mesh(world, "Act1_Skull_2", "skull", "arena_column",
+            Vec3::new(-64.0, 0.1, -4.0), Quat::from_axis_angle(Vec3::Y, 1.9), Vec3::ONE, None);
+
+        static_mesh(world, "Act1_Rack", "weapon_rack", "arena_column",
+            Vec3::new(-69.0, 0.0, 0.0), Quat::from_axis_angle(Vec3::Y, 1.57), Vec3::ONE, None);
+
+        // === Act 2 ===
+        let trees = [
+            (Vec3::new(-40.0, 0.0, -40.0), "tree_pine_a"),
+            (Vec3::new( 40.0, 0.0, -40.0), "tree_pine_b"),
+            (Vec3::new(-40.0, 0.0,  40.0), "tree_oak_a"),
+            (Vec3::new( 40.0, 0.0,  40.0), "tree_oak_b"),
+            (Vec3::new(-45.0, 0.0,   0.0), "tree_pine_c"),
+            (Vec3::new( 45.0, 0.0,   0.0), "tree_pine_a"),
+            (Vec3::new(  0.0, 0.0, -45.0), "tree_oak_a"),
+            (Vec3::new(  0.0, 0.0,  45.0), "tree_pine_b"),
+        ];
+        for (i, (pos, mesh_name)) in trees.iter().enumerate() {
+            static_mesh(world, format!("Act2_Tree_{}", i), mesh_name, "foliage",
+                *pos, Quat::from_axis_angle(Vec3::Y, i as f32 * 0.9), Vec3::ONE, None);
+        }
+
+        static_mesh(world, "Act2_Table_1", "table", "arena_crate",
+            Vec3::new(-20.0, 0.0, -20.0), Quat::from_axis_angle(Vec3::Y, 0.3), Vec3::ONE, None);
+        static_mesh(world, "Act2_Bench_1", "bench", "arena_crate",
+            Vec3::new(-20.0, 0.0, -21.5), Quat::from_axis_angle(Vec3::Y, 0.3), Vec3::ONE, None);
+        static_mesh(world, "Act2_Bench_2", "bench", "arena_crate",
+            Vec3::new(-20.0, 0.0, -18.5),
+            Quat::from_axis_angle(Vec3::Y, 0.3 + std::f32::consts::PI), Vec3::ONE, None);
+        static_mesh(world, "Act2_Table_2", "table", "arena_crate",
+            Vec3::new( 22.0, 0.0,  18.0), Quat::from_axis_angle(Vec3::Y, -1.1), Vec3::ONE, None);
+
+        for i in 0..6 {
+            let x = -26.0 + i as f32 * 1.2;
+            crate_box(world, format!("Act2_Crate_{}", i), Vec3::new(x, 0.5, -26.0), 1.0);
+        }
+        for i in 0..5 {
+            let x = 24.0 + (i % 2) as f32 * 1.2;
+            let y = 0.6 + (i / 2) as f32 * 0.9;
+            barrel(world, format!("Act2_Barrel_{}", i), Vec3::new(x, y, 26.0));
+        }
+
+        static_mesh(world, "Act2_Rock_1", "rock_cluster_c", "arena_column",
+            Vec3::new(-28.0, 0.0, -28.0), Quat::IDENTITY, Vec3::ONE, None);
+        static_mesh(world, "Act2_Rock_2", "rock_cluster_a", "arena_column",
+            Vec3::new( 28.0, 0.0,  28.0), Quat::IDENTITY, Vec3::ONE, None);
+
+        for i in 0..12 {
+            let a = i as f32 / 12.0 * std::f32::consts::TAU;
+            let r = 8.0;
+            static_mesh(world, format!("Act2_Fence_{}", i), "fence_post", "arena_column",
+                Vec3::new(a.cos() * r, 0.0, a.sin() * r),
+                Quat::from_axis_angle(Vec3::Y, -a),
+                Vec3::ONE, None);
+        }
+
+        // === Act 3 ===
+        for i in 0..4 {
+            let x = -10.0 + i as f32 * 6.0;
+            static_mesh(world, format!("Act3_Bench_{}", i), "bench", "arena_crate",
+                Vec3::new(x, 0.0, -6.0), Quat::IDENTITY, Vec3::ONE, None);
+        }
+
+        for i in 0..5 {
+            let x = -12.0 + i as f32 * 6.0;
+            static_mesh(world, format!("Act3_Col_{}", i), "column_fluted", "arena_column",
+                Vec3::new(x, 2.5, -9.0), Quat::IDENTITY, Vec3::new(0.6, 5.0, 0.6), None);
+        }
+
+        crate_box(world, "Act3_Crate_1", Vec3::new(-12.0, 0.5, 6.0), 1.0);
+        crate_box(world, "Act3_Crate_2", Vec3::new(-11.0, 0.5, 6.5), 1.0);
+
+        // === Act 4 ===
+        let pillars = [
+            (Vec3::new(-8.0, 0.0, 0.0), "pillar_ruined_a"),
+            (Vec3::new( 8.0, 0.0, 0.0), "pillar_ruined_b"),
+            (Vec3::new( 0.0, 0.0, -8.0), "pillar_ruined_c"),
+            (Vec3::new(-8.0, 0.0, 8.0), "pillar_ruined_a"),
+            (Vec3::new( 8.0, 0.0, 8.0), "pillar_ruined_b"),
+        ];
+        for (i, (pos, mesh_name)) in pillars.iter().enumerate() {
+            static_mesh(world, format!("Act4_Pillar_{}", i), mesh_name, "rpg_dungeon",
+                *pos + Vec3::new(ACT4_CENTER.x, ACT4_CENTER.y, ACT4_CENTER.z),
+                Quat::from_axis_angle(Vec3::Y, i as f32 * 0.7),
+                Vec3::new(1.0, 6.0, 1.0), None);
+        }
+
+        for i in 0..6 {
+            let a = i as f32 / 6.0 * std::f32::consts::TAU;
+            let x = ACT4_CENTER.x + a.cos() * 12.0;
+            let z = ACT4_CENTER.z + a.sin() * 12.0;
+            static_mesh(world, format!("Act4_Skull_{}", i), "skull", "arena_column",
+                Vec3::new(x, ACT4_CENTER.y + 0.05, z),
+                Quat::from_axis_angle(Vec3::Y, a), Vec3::new(1.2, 1.2, 1.2), None);
+        }
+
+        crate_box(world, "Act4_Crate_1", ACT4_CENTER + Vec3::new(-15.0, 0.5, -15.0), 1.0);
+        crate_box(world, "Act4_Crate_2", ACT4_CENTER + Vec3::new(-15.0, 1.5, -15.0), 1.0);
+
+        for i in 0..3 {
+            barrel(world, format!("Act4_Barrel_{}", i),
+                ACT4_CENTER + Vec3::new(15.0 + i as f32 * 0.7, 0.6, -15.0));
+        }
+
+        // === Act 5 ===
+        for i in 0..3 {
+            crate_box(world, format!("Act5_Crate_{}", i),
+                ACT5_CENTER + Vec3::new(-8.0 + i as f32 * 1.2, 0.5, 5.0), 1.0);
+        }
+
+        // === Мосты ===
+        torch(world, "Bridge_A1A2_TorchMid", Vec3::new(-40.0, 0.0, 3.5));
+        torch(world, "Bridge_A2A3_TorchMid", Vec3::new(35.0, 0.0, 3.5));
+
+        log::info!("Decorations: detailed props scattered across all acts");
+    }
+
     fn build_bridges(&mut self, world: &mut World) {
-        // --- Act1 → Act2 ---
-        // Act1 floor: X ∈ [-70, -50]. Act2 floor: X ∈ [-30, 30].
-        // Разрыв: X ∈ [-50, -30], длина 20.
         static_box(world, "Bridge_Act1_Act2", "arena_floor",
             Vec3::new(-40.0, 0.0, 0.0),
             Vec3::new(20.0, 0.5, 8.0),
@@ -455,9 +637,6 @@ impl FortressDemo {
         torch(world, "Bridge_A1A2_Torch1", Vec3::new(-45.0, 3.0, 0.0));
         torch(world, "Bridge_A1A2_Torch2", Vec3::new(-35.0, 3.0, 0.0));
 
-        // --- Act2 → Act3 ---
-        // Act2 floor: X ∈ [-30, 30]. Act3 floor: X ∈ [40, 70].
-        // Разрыв: X ∈ [30, 40], длина 10.
         static_box(world, "Bridge_Act2_Act3", "arena_floor",
             Vec3::new(35.0, 0.0, 0.0),
             Vec3::new(10.0, 0.5, 8.0),
@@ -576,10 +755,10 @@ impl FortressDemo {
             let a = i as f32 / 8.0 * std::f32::consts::TAU;
             let x = a.cos() * col_r;
             let z = a.sin() * col_r;
-            static_mesh(world, format!("Act2_Col_{}", i), "cylinder", "arena_column",
+            static_mesh(world, format!("Act2_Col_{}", i), "column_fluted", "arena_column",
                 c + Vec3::new(x, 2.5, z), Quat::IDENTITY,
-                Vec3::new(0.9, 5.0, 0.9),
-                Some(Collider::aabb(Vec3::splat(0.5))));
+                Vec3::new(1.0, 5.0, 1.0),
+                Some(Collider::aabb(Vec3::splat(0.4))));
         }
 
         for i in 0..3u32 {
@@ -939,8 +1118,6 @@ impl FortressDemo {
 
     fn open_gate(&self, world: &mut World, gate: Option<Entity>) {
         let Some(g) = gate else { return };
-        // Скорость берём из GateMotion, чтобы `stop_gate_if_reached`
-        // знал, где останавливаться (bugfix #2).
         let speed = world.get::<GateMotion>(g).map(|m| m.speed).unwrap_or(4.0);
         if let Some(v) = world.get_mut::<Velocity>(g) {
             v.value = Vec3::new(0.0, speed, 0.0);
@@ -951,12 +1128,10 @@ impl FortressDemo {
         log::info!("Gate opened: entity #{}", g);
     }
 
-    /// Останавливает ворота, доехавшие до `GateMotion::open_y`
-    /// (bugfix #2). Раньше MovementSystem двигал их бесконечно.
     fn tick_gates(&mut self, world: &mut World) {
         for gate in [self.gate_1, self.gate_2, self.gate_4, self.gate_boss] {
             if let Some(g) = gate {
-                if stop_gate_if_reached(world, g) {
+                if world.entities().contains(&g) && stop_gate_if_reached(world, g) {
                     log::info!("Gate #{} stopped at open_y", g);
                 }
             }
@@ -988,6 +1163,7 @@ impl FortressDemo {
                 t.position.y = -500.0;
             }
             self.hide_objective(world, "objective_key");
+            log::info!("Campaign: key_red collected, has_key_red = true");
             return;
         }
 
@@ -1098,28 +1274,37 @@ impl FortressDemo {
         );
     }
 
+    /// Проверка переходов между актами. Обновляет `self.gate_*` и
+    /// `self.boss_entity` по имени, если они устарели (после Save/Load
+    /// / Undo/Redo World заменяется целиком, id становятся stale).
     fn check_stage_transitions(&mut self, world: &mut World) {
         match self.campaign.stage {
             Stage::Act1 => {
-                if self.campaign.kills_in_stage >= self.campaign.kills_required {
-                    self.open_gate(world, self.gate_1);
+                if self.campaign.kills_required > 0
+                    && self.campaign.kills_in_stage >= self.campaign.kills_required
+                {
+                    self.open_gate_by_name(world, self.gate_1, "gate_east_1");
                     self.hide_objective(world, "objective_gate1");
                     self.campaign.stage = Stage::Act2;
                     self.campaign.kills_in_stage = 0;
-                    // В Act2 прогресс через ключ, а не через убийства.
                     self.campaign.kills_required = 0;
-                    self.campaign.objective = "Найди красный ключ в сокровищнице".to_string();
-                    self.campaign.show_dialog("Ворота открыты. Впереди — двор.", 4.0);
+                    self.campaign.objective =
+                        "Найди красный ключ в сокровищнице".to_string();
+                    self.campaign.show_dialog(
+                        "Ворота открыты. Впереди — двор.", 4.0,
+                    );
+                    log::info!("Stage: Act1 → Act2");
                 }
             }
             Stage::Act2 => {
                 if self.campaign.has_key_red {
-                    self.open_gate(world, self.gate_2);
+                    self.open_gate_by_name(world, self.gate_2, "gate_east_2");
                     self.campaign.stage = Stage::Act3;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
                     self.campaign.objective = "Войди в портал лобби".to_string();
                     self.campaign.show_dialog("Ключ открыл путь в лобби.", 4.0);
+                    log::info!("Stage: Act2 → Act3");
                 }
             }
             Stage::Act3 => {
@@ -1128,30 +1313,57 @@ impl FortressDemo {
                     self.campaign.stage = Stage::Act4;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
-                    self.campaign.objective = "Убей Владыку Цитадели".to_string();
+                    self.campaign.objective =
+                        "Убей Владыку Цитадели".to_string();
                     self.hide_objective(world, "objective_portal");
+                    log::info!("Stage: Act3 → Act4");
                 }
             }
             Stage::Act4 => {
-                let boss_dead = self.boss_entity
-                    .map(|b| !world.entities().contains(&b))
-                    .unwrap_or(true);
+                // Босс мёртв, если:
+                //   * stored entity был и его больше нет в World, ИЛИ
+                //   * stored entity устарел (его вообще нет), и нет
+                //     никого с именем "Boss_Dungeon".
+                let stored_alive = self.boss_entity
+                    .map(|b| world.entities().contains(&b))
+                    .unwrap_or(false);
+                let name_alive = Self::find_by_name(world, "Boss_Dungeon").is_some();
+                let boss_dead = !stored_alive && !name_alive;
+
                 if boss_dead {
-                    self.open_gate(world, self.gate_4);
+                    self.open_gate_by_name(world, self.gate_4, "gate_north_4");
                     self.campaign.stage = Stage::Act5;
                     self.campaign.objective = "Покинь цитадель".to_string();
-                    self.campaign.show_dialog("Владыка пал. Свобода ждёт!", 5.0);
+                    self.campaign.show_dialog(
+                        "Владыка пал. Свобода ждёт!", 5.0,
+                    );
+                    log::info!("Stage: Act4 → Act5");
                 }
             }
             Stage::Act5 | Stage::Victory => {}
         }
+
+        // === Обновляем сохранённые ссылки, если World заменили ===
+        // (Save/Load/Undo/Redo). Это ключевой фикс для «дверь после
+        // Act2 не открывается».
+        if self.gate_1.map_or(true, |e| !world.entities().contains(&e)) {
+            self.gate_1 = Self::find_by_name(world, "gate_east_1");
+        }
+        if self.gate_2.map_or(true, |e| !world.entities().contains(&e)) {
+            self.gate_2 = Self::find_by_name(world, "gate_east_2");
+        }
+        if self.gate_4.map_or(true, |e| !world.entities().contains(&e)) {
+            self.gate_4 = Self::find_by_name(world, "gate_north_4");
+        }
+        if self.gate_boss.map_or(true, |e| !world.entities().contains(&e)) {
+            self.gate_boss = Self::find_by_name(world, "gate_boss");
+        }
+        if self.boss_entity.map_or(true, |e| !world.entities().contains(&e)) {
+            self.boss_entity = Self::find_by_name(world, "Boss_Dungeon");
+        }
     }
 
     /// Обработчик анимационных событий (bugfix #5).
-    ///
-    /// Раньше результат `animation_runtime.advance_all` шёл в
-    /// `let _ = ...`, и все маркеры (footstep, hit, spawn_vfx)
-    /// молча терялись.
     fn on_animation_event(&mut self, world: &World, ev: AnimationEventTriggered) {
         let pos = crate::game::world_position(world, ev.entity)
             .unwrap_or(glam::Vec3::ZERO);
@@ -1201,6 +1413,9 @@ impl Game for FortressDemo {
     ) {
         log::info!("FortressDemo: AssetDatabase {} assets", assets.len());
 
+        // ============================================================
+        // Примитивы
+        // ============================================================
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
@@ -1210,6 +1425,37 @@ impl Game for FortressDemo {
         renderer.add_mesh("cone", Mesh::cone(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("capsule", Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
+        // ============================================================
+        // Детализированные пропсы
+        // ============================================================
+        use crate::render::props;
+        renderer.add_mesh("crate_detail",    props::crate_detail(&renderer.device));
+        renderer.add_mesh("barrel_detail",   props::barrel_detail(&renderer.device));
+        renderer.add_mesh("column_fluted",   props::column_fluted(&renderer.device));
+        renderer.add_mesh("pillar_ruined_a", props::pillar_ruined(&renderer.device, 1));
+        renderer.add_mesh("pillar_ruined_b", props::pillar_ruined(&renderer.device, 2));
+        renderer.add_mesh("pillar_ruined_c", props::pillar_ruined(&renderer.device, 3));
+        renderer.add_mesh("chest_detail",    props::chest_detail(&renderer.device));
+        renderer.add_mesh("torch_stand",     props::torch_stand(&renderer.device));
+        renderer.add_mesh("brazier_detail",  props::brazier_detail(&renderer.device));
+        renderer.add_mesh("tree_pine_a",     props::tree_pine(&renderer.device, 8.0));
+        renderer.add_mesh("tree_pine_b",     props::tree_pine(&renderer.device, 6.0));
+        renderer.add_mesh("tree_pine_c",     props::tree_pine(&renderer.device, 10.0));
+        renderer.add_mesh("tree_oak_a",      props::tree_oak(&renderer.device, 7.0, 42));
+        renderer.add_mesh("tree_oak_b",      props::tree_oak(&renderer.device, 6.0, 99));
+        renderer.add_mesh("rock_cluster_a",  props::rock_cluster(&renderer.device, 0.8, 11));
+        renderer.add_mesh("rock_cluster_b",  props::rock_cluster(&renderer.device, 0.5, 22));
+        renderer.add_mesh("rock_cluster_c",  props::rock_cluster(&renderer.device, 1.2, 33));
+        renderer.add_mesh("bench",           props::bench(&renderer.device));
+        renderer.add_mesh("table",           props::table(&renderer.device));
+        renderer.add_mesh("fence_post",      props::fence_post(&renderer.device));
+        renderer.add_mesh("gravestone",      props::gravestone(&renderer.device));
+        renderer.add_mesh("weapon_rack",     props::weapon_rack(&renderer.device));
+        renderer.add_mesh("skull",           props::skull(&renderer.device));
+
+        // ============================================================
+        // Процедурные текстуры
+        // ============================================================
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
             for x in 0..64 {
@@ -1240,6 +1486,45 @@ impl Game for FortressDemo {
 
         add_materials(renderer);
 
+        // ============================================================
+        // Terrain
+        // ============================================================
+        let heightmap = crate::render::terrain::Heightmap::new_procedural(
+            256,
+            2000.0,
+            /* seed */ 42,
+        );
+
+        let terrain_mesh = crate::render::terrain::generate_terrain_mesh(
+            &renderer.device,
+            &heightmap,
+        );
+        renderer.add_mesh("terrain", terrain_mesh);
+
+        let tex_data = crate::render::terrain::generate_terrain_texture(
+            &heightmap,
+            2048,
+        );
+        renderer
+            .load_texture_rgba("terrain_tex", &tex_data, 2048, 2048)
+            .expect("terrain texture");
+
+        renderer.add_material(
+            "terrain_mat",
+            Material::new([1.0, 1.0, 1.0, 1.0])
+                .with_metallic_roughness(0.0, 0.92)
+                .with_texture("terrain_tex"),
+        );
+
+        renderer.terrain = Some(heightmap);
+
+        log::info!(
+            "Terrain: 256×256 heightmap (2000×2000 m), baked texture 2048×2048, ~131k tris",
+        );
+
+        // ============================================================
+        // Анимированный glTF (опционально)
+        // ============================================================
         if let Ok(loaded) = crate::render::load_gltf_into(
             renderer, "assets/animated.glb", "anim"
         ) {
@@ -1272,8 +1557,24 @@ impl Game for FortressDemo {
         renderer: &mut Renderer,
         dt: f32,
     ) -> bool {
-        // bugfix #6: сохраняем dt для HUD.
+        // === Режим: Play или редактор ===
+        // `in_play == true` — всё игровое (стрельба, перезарядка,
+        // триггеры, кампания, playtime) разрешено.
+        // `in_play == false` — редактор: игровая логика не трогается,
+        // но spinner'ы, анимации, лифты продолжают жить.
+        let in_play = input.play_mode;
+        self.last_play_mode = in_play;
+
         self.last_dt = dt;
+        if self.weapon_recoil > 0.0 {
+            let tau = 0.12_f32;
+            let alpha = 1.0 - (-dt / tau).exp();
+            self.weapon_recoil = (self.weapon_recoil - self.weapon_recoil * alpha).max(0.0);
+            if self.weapon_recoil < 1e-4 {
+                self.weapon_recoil = 0.0;
+            }
+        }
+        self.auto_fire_accumulator = (self.auto_fire_accumulator - dt * 2.0).max(0.0);
 
         // === Build (один раз) ===
         if !self.built {
@@ -1288,10 +1589,6 @@ impl Game for FortressDemo {
 
         // === Play mode enter ===
         if input.play_mode && !self.was_in_play_mode {
-            // bugfix #10: PlayState::default() даёт saved_position =
-            // (0.0, 1.7, 45.0) — пустая точка в стороне от сцены.
-            // Если позиция выглядит как дефолтная, переопределяем на
-            // ACT1_CENTER. Если игрок явно сохранил позицию — оставляем.
             let p = self.camera.first_person_pos;
             let looks_default = p.x.abs() < 1.0 && (p.z - 45.0).abs() < 1.0;
             if looks_default {
@@ -1306,6 +1603,16 @@ impl Game for FortressDemo {
                 self.camera.first_person_pos.x,
                 self.camera.first_person_pos.y,
                 self.camera.first_person_pos.z,
+            );
+            log::info!(
+                "Campaign state: stage={:?}, kills={}/{}, key={}, \
+                 gates: g1={:?} g2={:?} g4={:?} boss_gate={:?}, boss={:?}",
+                self.campaign.stage,
+                self.campaign.kills_in_stage,
+                self.campaign.kills_required,
+                self.campaign.has_key_red,
+                self.gate_1, self.gate_2, self.gate_4, self.gate_boss,
+                self.boss_entity,
             );
         }
         self.was_in_play_mode = input.play_mode;
@@ -1334,17 +1641,16 @@ impl Game for FortressDemo {
         if input.key_pressed(KeyCode::F1) {
             self.demo_show_debug = !self.demo_show_debug;
         }
-        // bugfix #R: убран toggle demo_paused по Escape. Engine сам
-        // обрабатывает Escape и вызывает Game::on_pause_changed.
 
         self.demo_fire_cooldown = (self.demo_fire_cooldown - dt).max(0.0);
 
         // ============================================================
-        // Ammo & reload
+        // Ammo & reload — ТОЛЬКО в Play
         // ============================================================
 
         // (1) AUTO-START.
-        if !self.demo_reloading
+        if in_play
+            && !self.demo_reloading
             && self.demo_ammo == 0
             && self.demo_ammo_reserve > 0
             && !self.demo_paused
@@ -1360,7 +1666,7 @@ impl Game for FortressDemo {
         }
 
         // (2) TICK.
-        if self.demo_reloading {
+        if self.demo_reloading && in_play {
             self.demo_reload_timer -= dt;
             if self.demo_reload_timer <= 0.0 {
                 self.demo_reloading = false;
@@ -1388,9 +1694,8 @@ impl Game for FortressDemo {
         }
 
         // (3) MANUAL R.
-        //
-        // bugfix #R: обратная связь во всех edge-случаях.
-        if !self.demo_paused
+        if in_play
+            && !self.demo_paused
             && input.key_pressed(KeyCode::KeyR)
             && !self.demo_reloading
             && self.campaign.stage != Stage::Victory
@@ -1415,13 +1720,12 @@ impl Game for FortressDemo {
             }
         }
 
-        // (4) FIRE.
-        //
-        // bugfix hud-dup: триггер — ЛКМ, авто-огонь через mouse_down.
-        // Урон/эффекты — через ShotFired-событие, потому что у
-        // FortressDemo нет доступа к AudioSystem и particle-системе App.
+        // ============================================================
+        // Стрельба — ТОЛЬКО в Play
+        // ============================================================
         let lmb = input.mouse_down(MouseButton::Left);
-        if !self.demo_paused
+        if in_play
+            && !self.demo_paused
             && lmb
             && !self.demo_reloading
             && self.demo_fire_cooldown <= 0.0
@@ -1441,6 +1745,23 @@ impl Game for FortressDemo {
                 origin,
                 direction: dir,
             });
+
+            // === Weapon feedback (без тряски экрана) ===
+            //
+            // Раньше здесь были `camera.add_shake(0.015, 0.06)` и
+            // боковой `yaw += kick_side` — они превращали стрельбу
+            // в «дрожь». Оставлен только вертикальный recoil
+            // (ствол уводит вверх) — кинематографично и не трясёт.
+            //
+            // `pending_hit_stop` при выстреле тоже убран: микро-фриз
+            // времени ощущался как рывок. Остаётся только на kill
+            // (см. `on_kill`).
+            self.auto_fire_accumulator =
+                (self.auto_fire_accumulator + 0.6).min(1.5);
+            self.weapon_recoil = (self.weapon_recoil + 0.35).min(1.0);
+
+            let kick_up = 0.008 + self.auto_fire_accumulator * 0.006;
+            self.camera.add_recoil(kick_up);
         }
 
         // === Camera (editor) ===
@@ -1465,8 +1786,8 @@ impl Game for FortressDemo {
             if pan != (0.0, 0.0) { self.camera.pan(pan.0, pan.1); }
         }
 
-        // === Campaign ===
-        if !self.demo_paused && self.campaign.stage != Stage::Victory {
+        // === Campaign: playtime — только в Play ===
+        if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
             self.campaign.playtime += dt;
         }
         self.campaign.tick_dialog(dt);
@@ -1499,8 +1820,11 @@ impl Game for FortressDemo {
             }
         }
 
-        self.process_triggers(world);
-        self.check_stage_transitions(world);
+        // === Triggers и стадии — только в Play ===
+        if in_play {
+            self.process_triggers(world);
+            self.check_stage_transitions(world);
+        }
 
         // === Bell ===
         let finished: Vec<Entity> = world
@@ -1541,15 +1865,15 @@ impl Game for FortressDemo {
 
     fn apply_postfx(&mut self, postfx: PostFx) { self.postfx = postfx; }
 
+    fn take_hit_stop(&mut self) -> Option<(f32, f32)> {
+        self.pending_hit_stop.take()
+    }
+
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
         Some(Box::new(()))
     }
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 
-    /// bugfix #R: синхронизация pause-flag с engine. Раньше
-    /// FortressDemo имел собственный demo_paused, который
-    /// рассинхронизировался с editor.state.play.paused (двойной
-    /// Escape оставлял demo_paused = true после снятия паузы).
     fn on_pause_changed(&mut self, paused: bool) {
         if self.demo_paused != paused {
             self.demo_paused = paused;
@@ -1619,7 +1943,6 @@ impl Game for FortressDemo {
                 self.camera.pitch = snap.camera_pitch;
                 self.demo_health = snap.hp;
                 self.demo_ammo = snap.ammo;
-                // bugfix #8: 0 = «патронов нет» (не «не сериализовано»).
                 self.demo_ammo_reserve = snap.ammo_reserve;
                 self.demo_reloading = false;
                 self.demo_reload_timer = 0.0;
@@ -1642,6 +1965,10 @@ impl Game for FortressDemo {
         self.pending_world_request.take()
     }
 
+    fn take_quit_to_menu(&mut self) -> bool {
+        std::mem::take(&mut self.pending_quit_to_menu)
+    }
+
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {
         self.campaign.kills_total += 1;
         self.campaign.kills_in_stage += 1;
@@ -1651,6 +1978,12 @@ impl Game for FortressDemo {
             self.campaign.kills_in_stage,
             self.campaign.kills_required
         ));
+
+        // Лёгкий hit-stop без camera shake.
+        let strength = (0.04 + self.auto_fire_accumulator * 0.02).min(0.08);
+        self.pending_hit_stop = Some((strength, 0.12));
+
+        self.auto_fire_accumulator = 0.0;
     }
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
@@ -1842,6 +2175,11 @@ impl Game for FortressDemo {
         // bugfix #6: реальный dt вместо фиксированных 1/60.
         self.hud.tick(self.last_dt);
 
+        // === В редакторе игровой HUD не рисуем ===
+        if !self.last_play_mode {
+            return;
+        }
+
         let is_victory = self.campaign.stage == Stage::Victory;
 
         // === Debug overlay (левый верх) ===
@@ -1940,10 +2278,6 @@ impl Game for FortressDemo {
         }
 
         // === Right top: kills + key ===
-        //
-        // bugfix bridge: счётчик убийств скрыт, когда акт не требует
-        // убийств (kills_required == 0). В Act2+ прогресс идёт через
-        // ключ / портал / босса, и «Kills 0/4» вводил в заблуждение.
         {
             let sw = ui.screen_w();
             let size = 14.0;
@@ -2021,7 +2355,7 @@ impl Game for FortressDemo {
             ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.65]);
 
             let pw = 500.0;
-            let ph = 420.0;
+            let ph = 490.0;
             let px = (sw - pw) * 0.5;
             let py = (sh - ph) * 0.5;
             ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
@@ -2054,10 +2388,14 @@ impl Game for FortressDemo {
                 self.demo_reload_timer = 0.0;
                 self.hud.push("Ammo + reserve refilled");
             }
+            if ui.button(bx, py + 202.0, bw, bh, "🏠 Quit to Main Menu") {
+                self.pending_quit_to_menu = true;
+                self.demo_paused = false;
+            }
 
             ui.text_centered(
                 sw * 0.5,
-                py + 218.0,
+                py + 258.0,
                 "SAVE / LOAD",
                 16.0,
                 [0.8, 0.85, 1.0, 1.0],
@@ -2066,7 +2404,7 @@ impl Game for FortressDemo {
             let slot_w = 420.0;
             let slot_h = 32.0;
             let slot_x = sw * 0.5 - slot_w * 0.5;
-            let mut y = py + 245.0;
+            let mut y = py + 285.0;
 
             let slots = self.save_slots_cache.clone();
             let mut action: Option<(u32, &'static str)> = None;
@@ -2175,4 +2513,11 @@ fn add_materials(renderer: &mut Renderer) {
             .with_alpha_mode(AlphaMode::Blend));
     renderer.add_material("rpg_dungeon",
         Material::new([0.13, 0.11, 0.16, 1.0]).with_metallic_roughness(0.0, 0.95));
+
+    // === Зелень для деревьев (props::tree_*) ===
+    renderer.add_material("foliage",
+        Material::new([0.20, 0.45, 0.15, 1.0]).with_metallic_roughness(0.0, 0.95));
+    // === Кора для стволов ===
+    renderer.add_material("bark",
+        Material::new([0.30, 0.20, 0.12, 1.0]).with_metallic_roughness(0.0, 0.9));
 }

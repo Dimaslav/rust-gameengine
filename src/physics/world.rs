@@ -1,25 +1,10 @@
-//! PhysicsWorld: пошаговая симуляция.
-//!
-//! ИЗМЕНЕНО (rotation): добавлена угловая динамика.
-//!   * `BodyState` теперь хранит `rotation`, `angular_velocity`, `inv_inertia`.
-//!   * Интеграция поворота через кватернионную производную.
-//!   * `Contact` хранит `point` — точку контакта в world-space для
-//!     angular impulse.
-//!   * `resolve_velocity` применяет линейный + угловой импульс.
-//!
-//! Ограничения:
-//!   * Инерция скалярная (изотропная). Для сферы — точная, для AABB —
-//!     усреднённая по осям (приближение, но визуально правдоподобно).
-//!   * Broad-phase по-прежнему AABB без учёта rotation — ящик
-//!     поворачивается визуально, но коллайдер считается AABB-ориентированным.
-//!     Для 90°-переворота это заметно, для лёгких поворотов — нет.
-
 use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
 
 use crate::ecs::{Entity, World};
 use crate::game::components::{Parent, Transform};
+use crate::render::terrain::Heightmap; // === TERRAIN ===
 
 use super::components::{BodyType, Collider, PhysicsMaterial, RigidBody};
 
@@ -60,7 +45,6 @@ struct BodyState {
     body_type: BodyType,
     mass: f32,
     inv_mass: f32,
-    /// Скалярная обратная инерция. Для sphere — точная, для AABB — усреднённая.
     inv_inertia: f32,
     position: Vec3,
     velocity: Vec3,
@@ -81,12 +65,16 @@ struct Contact {
     b: usize,
     normal: Vec3,
     penetration: f32,
-    /// Точка контакта в world-space.
     point: Vec3,
 }
 
 impl PhysicsWorld {
-    pub fn step(&mut self, world: &mut World, dt: f32) {
+    pub fn step(
+        &mut self,
+        world: &mut World,
+        terrain: Option<&Heightmap>, // === TERRAIN ===
+        dt: f32,
+    ) {
         if !self.enabled || dt <= 0.0 { return; }
         let dt = dt.min(MAX_DT);
 
@@ -125,6 +113,31 @@ impl PhysicsWorld {
                     integrate_rotation(s, dt);
                 }
                 _ => {}
+            }
+        }
+
+        // === TERRAIN: вертикальная коллизия с heightmap ===
+        // Простейший heightfield-контакт: по нижней точке AABB тела
+        // берём высоту ground, выталкиваем по +Y, гасим vertical velocity.
+        // Для инди-игр этого достаточно; для точного sliding по склону
+        // нужен contact normal из heightmap (следующий шаг).
+        if let Some(hm) = terrain {
+            for s in states.iter_mut() {
+                if s.body_type != BodyType::Dynamic { continue; }
+                let (mn, _mx) = global_aabb(s);
+                let feet = Vec3::new(s.position.x, mn.y, s.position.z);
+                if !hm.contains(feet.x, feet.z) { continue; }
+                let ground = hm.sample(feet.x, feet.z);
+                if feet.y < ground {
+                    let pen = ground - feet.y;
+                    s.position.y += pen;
+                    if s.velocity.y < 0.0 {
+                        let restitution = s.material.restitution.min(0.5);
+                        s.velocity.y = -s.velocity.y * restitution;
+                    }
+                    s.sleeping = false;
+                    s.sleep_timer = 0.0;
+                }
             }
         }
 
@@ -210,14 +223,9 @@ impl PhysicsWorld {
     }
 }
 
-// ============================================================
-// Rotation integration
-// ============================================================
-
 fn integrate_rotation(s: &mut BodyState, dt: f32) {
     if s.angular_velocity.length_squared() < 1e-10 { return; }
     let w = s.angular_velocity;
-    // q' = q + 0.5 * dt * (ω_quat * q)
     let wq = Quat::from_xyzw(w.x, w.y, w.z, 0.0);
     let dq = wq * s.rotation;
     let new_q = Quat::from_xyzw(
@@ -229,10 +237,6 @@ fn integrate_rotation(s: &mut BodyState, dt: f32) {
     s.rotation = new_q.normalize();
 }
 
-// ============================================================
-// Inertia
-// ============================================================
-
 fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
     if mass < 1e-6 { return 0.0; }
     let i = match col {
@@ -242,7 +246,6 @@ fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
         }
         Collider::Aabb { half_extents } => {
             let h = *half_extents * scale;
-            // Изотропное усреднение диагональных моментов.
             mass * (h.x * h.x + h.y * h.y + h.z * h.z) / 3.0
         }
         Collider::Capsule { radius, height } => {
@@ -253,10 +256,6 @@ fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
     };
     if i > 1e-8 { 1.0 / i } else { 0.0 }
 }
-
-// ============================================================
-// State collection
-// ============================================================
 
 fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
@@ -319,10 +318,6 @@ fn write_back(world: &mut World, states: &[BodyState]) {
     }
 }
 
-// ============================================================
-// Broad-phase
-// ============================================================
-
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
     let n = states.len();
     let aabbs: Vec<(Vec3, Vec3)> = states.iter().map(global_aabb).collect();
@@ -354,10 +349,6 @@ fn aabb_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
         && a.0.y <= b.1.y && a.1.y >= b.0.y
         && a.0.z <= b.1.z && a.1.z >= b.0.z
 }
-
-// ============================================================
-// Narrow-phase
-// ============================================================
 
 fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact> {
     match (a.collider, b.collider) {
@@ -408,7 +399,6 @@ fn sphere_sphere(pa: Vec3, ra: f32, pb: Vec3, rb: f32, ia: usize, ib: usize) -> 
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 { d / dist } else { Vec3::Y };
     let pen = r_sum - dist;
-    // Точка контакта — середина между поверхностями.
     let point = pa + normal * (ra - pen * 0.5);
     Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
@@ -435,7 +425,6 @@ fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize)
         }
     };
     let pen = r - dist;
-    // Точка контакта — на поверхности AABB в сторону сферы.
     let point = closest;
     Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
@@ -453,19 +442,11 @@ fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Op
     } else {
         (oz, Vec3::new(0.0, 0.0, d.z.signum()))
     };
-
-    // Точка контакта: берём точку на A (по нормали наружу),
-    // ближайшую к центру B.
     let point_a = closest_point_on_aabb(pb, pa, ha);
     let point_b = closest_point_on_aabb(pa, pb, hb);
     let point = (point_a + point_b) * 0.5;
-
     Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
-
-// ============================================================
-// Resolve (linear + angular)
-// ============================================================
 
 fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;
@@ -475,18 +456,15 @@ fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_sum = inv_m_a + inv_m_b;
     if inv_sum <= 0.0 && inv_i_a <= 0.0 && inv_i_b <= 0.0 { return; }
 
-    // r-векторы от центра тела к точке контакта.
     let ra = c.point - states[c.a].position;
     let rb = c.point - states[c.b].position;
 
-    // Относительная скорость в точке контакта: v + ω × r.
     let va = states[c.a].velocity + states[c.a].angular_velocity.cross(ra);
     let vb = states[c.b].velocity + states[c.b].angular_velocity.cross(rb);
     let v_rel = vb - va;
     let v_n = v_rel.dot(c.normal);
     if v_n > 0.0 { return; }
 
-    // Эффективная масса по нормали (линейная + угловая).
     let ra_xn = ra.cross(c.normal);
     let rb_xn = rb.cross(c.normal);
     let ang_a = inv_i_a * ra_xn.length_squared();
@@ -498,14 +476,11 @@ fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let j = -(1.0 + e) * v_n / k;
     let impulse = c.normal * j;
 
-    // Линейный отклик.
     states[c.a].velocity -= impulse * inv_m_a;
     states[c.b].velocity += impulse * inv_m_b;
-    // Угловой отклик: Δω = inv_I * (r × J).
     states[c.a].angular_velocity -= ra.cross(impulse) * inv_i_a;
     states[c.b].angular_velocity += rb.cross(impulse) * inv_i_b;
 
-    // Трение (по касательной).
     let va = states[c.a].velocity + states[c.a].angular_velocity.cross(ra);
     let vb = states[c.b].velocity + states[c.b].angular_velocity.cross(rb);
     let v_rel = vb - va;

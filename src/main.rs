@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+mod app_state;
+mod menu;
 mod assets;
 mod demo;
 mod ecs;

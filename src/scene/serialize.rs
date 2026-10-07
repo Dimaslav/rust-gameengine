@@ -30,17 +30,36 @@ pub struct SceneFile {
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
 
-    /// Материалы, на которые ссылаются entity сцены.
     #[serde(default)]
     pub materials: HashMap<String, Material>,
 
-    /// Пути к файлам текстур для материалов.
     #[serde(default)]
     pub texture_paths: HashMap<String, String>,
 
-    /// Произвольное game-specific состояние (RON-строка).
     #[serde(default)]
     pub game_state_ron: Option<String>,
+
+    // === TERRAIN ===
+    #[serde(default)]
+    pub terrain: Option<TerrainRef>,
+}
+
+// ============================================================
+// TerrainRef (base64 snapshot heightmap)
+// ============================================================
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TerrainRef {
+    pub resolution: u32,
+    pub size: f32,
+    pub min_height: f32,
+    pub max_height: f32,
+    /// Base64 от R16 (resolution² × 2 байта).
+    pub heights_b64: String,
+    #[serde(default)]
+    pub splat_b64: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<String>,
 }
 
 // ============================================================
@@ -84,7 +103,6 @@ pub struct EntitySnapshot {
     #[serde(default)] pub npc: Option<NpcSnapshot>,
     #[serde(default)] pub quest_target: Option<u32>,
 
-    // === Фаза bugfix #7: AI / Audio / Timer ===
     #[serde(default)] pub ai_agent: Option<AiAgentSnapshot>,
     #[serde(default)] pub patrol_path: Option<PatrolPathSnapshot>,
     #[serde(default)] pub audio_source: Option<AudioSource>,
@@ -95,7 +113,7 @@ pub struct EntitySnapshot {
 }
 
 // ============================================================
-// Простые snapshot-структуры
+// Simple snapshots
 // ============================================================
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -287,14 +305,6 @@ pub struct NpcSnapshot {
     pub spoken_to: u32,
 }
 
-// ============================================================
-// AI / Timer snapshots (bugfix #7)
-// ============================================================
-
-/// Снимок `AiAgent` с персистентной частью.
-///
-/// Runtime (path, yaw, timers) не сохраняется — при загрузке
-/// агент стартует в `state` без пути.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AiAgentSnapshot {
     pub state: AiState,
@@ -340,7 +350,6 @@ impl AiAgentSnapshot {
             attack_cooldown: self.attack_cooldown,
             lose_target_time: self.lose_target_time,
 
-            // Runtime — старт с нуля.
             path: Vec::new(),
             path_index: 0,
             repath_timer: 0.0,
@@ -383,11 +392,6 @@ impl PatrolPathSnapshot {
     }
 }
 
-/// Снимок `Timer`. Поле `mode` — строковое представление
-/// `TimerMode` (`"once"` / `"repeating"`).
-///
-/// **Примечание:** `Copy` намеренно не реализован — поле `mode: String`
-/// не реализует `Copy`. Используется через `clone()` / move.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimerSnapshot {
     pub duration: f32,
@@ -398,7 +402,7 @@ pub struct TimerSnapshot {
 }
 
 // ============================================================
-// Save (World only, без материалов)
+// Save / load (World only)
 // ============================================================
 
 pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result<String> {
@@ -414,6 +418,7 @@ pub fn save_scene_to_string(world: &World, player_spawn: Option<Vec3>) -> Result
         materials: HashMap::new(),
         texture_paths: HashMap::new(),
         game_state_ron: None,
+        terrain: None,
     };
     let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
         .context("serialize scene")?;
@@ -432,7 +437,7 @@ pub fn save_scene_to_file(
 }
 
 // ============================================================
-// Save (World + материалы + текстуры из Renderer)
+// Save with assets / materials / terrain
 // ============================================================
 
 fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Material> {
@@ -487,7 +492,6 @@ pub fn save_scene_with_assets_to_file(
     save_scene_with_game_state_to_file(world, renderer, path, player_spawn, None)
 }
 
-/// Как `save_scene_with_assets_to_string`, но с game-specific состоянием.
 pub fn save_scene_with_game_state_to_string(
     world: &World,
     renderer: &Renderer,
@@ -503,12 +507,27 @@ pub fn save_scene_with_game_state_to_string(
     let materials = collect_materials(world, renderer);
     let texture_paths = collect_texture_paths(renderer, &materials);
 
+    // === TERRAIN ===
+    let terrain = renderer.terrain.as_ref().map(|hm| {
+        let (mn, mx) = hm.min_max();
+        TerrainRef {
+            resolution: hm.resolution,
+            size: hm.size,
+            min_height: mn,
+            max_height: mx,
+            heights_b64: b64_encode(&hm.to_r16()),
+            splat_b64: Some(b64_encode(&hm.splat)),
+            source_path: None,
+        }
+    });
+
     let file = SceneFile {
         entities,
         player_spawn: player_spawn.map(|p| p.to_array()),
         materials,
         texture_paths,
         game_state_ron,
+        terrain,
     };
     let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
         .context("serialize scene")?;
@@ -676,7 +695,6 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
 
-    // === Фаза bugfix #7: AI / Audio / Timer ===
     if let Some(a) = world.get::<AiAgent>(e) {
         s.ai_agent = Some(AiAgentSnapshot::from_agent(a));
         any = true;
@@ -719,7 +737,7 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
 }
 
 // ============================================================
-// Load (World only)
+// Load
 // ============================================================
 
 pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
@@ -746,11 +764,6 @@ pub fn load_scene_from_file(path: impl AsRef<Path>) -> Result<(World, Option<Vec
     load_scene_from_str(&text)
 }
 
-// ============================================================
-// Load (World + материалы + текстуры в Renderer)
-// ============================================================
-
-/// Загружает сцену и возвращает `(world, player_spawn, game_state_ron)`.
 pub fn load_scene_with_assets_from_str_full(
     text: &str,
     renderer: &mut Renderer,
@@ -759,13 +772,22 @@ pub fn load_scene_with_assets_from_str_full(
     Ok((w, spawn, gs))
 }
 
-/// Полная версия `load_scene_with_assets_from_str_full`, дополнительно
-/// возвращающая `id_map` — отображение `old_entity_id → new_entity`.
 pub fn load_scene_with_assets_from_str_full_with_ids(
     text: &str,
     renderer: &mut Renderer,
 ) -> Result<(World, Option<Vec3>, Option<String>, HashMap<u32, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
+
+    // === TERRAIN: restore before entities ===
+    if let Some(tref) = &file.terrain {
+        match restore_terrain(renderer, tref) {
+            Ok(()) => log::info!(
+                "Scene load: terrain restored ({}×{})",
+                tref.resolution, tref.resolution,
+            ),
+            Err(e) => log::warn!("Scene load: terrain restore failed: {:#}", e),
+        }
+    }
 
     let mut restored_tex = 0usize;
     let mut failed_tex = 0usize;
@@ -831,7 +853,7 @@ pub fn load_scene_with_assets_from_file(
 }
 
 // ============================================================
-// Общие helper'ы
+// Helpers
 // ============================================================
 
 fn spawn_all_entities(
@@ -983,7 +1005,6 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         world.insert(e, QuestTarget { quest_id: q });
     }
 
-    // === Фаза bugfix #7: AI / Audio / Timer ===
     if let Some(a) = snap.ai_agent {
         world.insert(e, a.to_agent());
     }
@@ -1017,4 +1038,120 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     }
 
     e
+}
+
+// ============================================================
+// === TERRAIN: restore + base64 ===
+// ============================================================
+
+fn restore_terrain(
+    renderer: &mut Renderer,
+    tref: &TerrainRef,
+) -> anyhow::Result<()> {
+    use crate::render::terrain::{generate_terrain_mesh, generate_terrain_texture, Heightmap};
+
+    let r16 = b64_decode(&tref.heights_b64)
+        .map_err(|e| anyhow::anyhow!("terrain base64 decode: {}", e))?;
+
+    let mut hm = Heightmap::from_r16(&r16, tref.resolution, tref.size, 1.0)?;
+    let range = (tref.max_height - tref.min_height).max(1e-4);
+    for h in &mut hm.heights {
+        *h = *h * range + tref.min_height;
+    }
+    hm.recompute_min_max();
+
+    if let Some(splat_b64) = &tref.splat_b64 {
+        if let Ok(splat) = b64_decode(splat_b64) {
+            let n = (hm.resolution * hm.resolution * 4) as usize;
+            if splat.len() >= n {
+                hm.splat[..n].copy_from_slice(&splat[..n]);
+            }
+        }
+    }
+
+    let mesh = generate_terrain_mesh(&renderer.device, &hm);
+    renderer.add_mesh("terrain", mesh);
+
+    let tex_data = generate_terrain_texture(&hm, 2048);
+    let _ = renderer.load_texture_rgba("terrain_tex", &tex_data, 2048, 2048);
+
+    if renderer.has_material("terrain_mat") {
+        if let Some(mat) = renderer.materials.get("terrain_mat").cloned() {
+            renderer.update_material("terrain_mat", mat);
+        }
+    } else {
+        renderer.add_material(
+            "terrain_mat",
+            crate::render::Material::new([1.0, 1.0, 1.0, 1.0])
+                .with_metallic_roughness(0.0, 0.92)
+                .with_texture("terrain_tex"),
+        );
+    }
+
+    renderer.terrain = Some(hm);
+    Ok(())
+}
+
+// ---- base64 (без внешних крейтов) ----
+
+const B64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(B64_ALPHABET[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_ALPHABET[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_ALPHABET[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
+    let mut rev = [255u8; 256];
+    for (i, &c) in B64_ALPHABET.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut buf = [0u8; 4];
+    let mut buf_len = 0;
+    for &b in bytes {
+        if b == b'=' || b == b'\n' || b == b'\r' || b == b' ' { continue; }
+        let v = rev[b as usize];
+        if v == 255 { return Err("invalid base64 char"); }
+        buf[buf_len] = v;
+        buf_len += 1;
+        if buf_len == 4 {
+            let n = ((buf[0] as u32) << 18)
+                | ((buf[1] as u32) << 12)
+                | ((buf[2] as u32) << 6)
+                | (buf[3] as u32);
+            out.push(((n >> 16) & 0xFF) as u8);
+            out.push(((n >> 8) & 0xFF) as u8);
+            out.push((n & 0xFF) as u8);
+            buf_len = 0;
+        }
+    }
+    if buf_len >= 2 {
+        let n = ((buf[0] as u32) << 18) | ((buf[1] as u32) << 12);
+        out.push(((n >> 16) & 0xFF) as u8);
+        if buf_len >= 3 {
+            out.push(((n >> 8) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
 }

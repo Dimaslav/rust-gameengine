@@ -1,26 +1,19 @@
 //! Коллизии игрока со сценой.
 //!
-//! **ИЗМЕНЕНО (rotation fix):** теперь корректно учитывается `Transform.rotation`
-//! при вычислении мирового AABB коллайдера. Раньше стены, повёрнутые на 90°
-//! (Wall_W, Wall_E), имели коллизию, перпендикулярную мешу.
-//!
-//! **ИЗМЕНЕНО (step-up fix):** step-up больше не ограничен полом y=0.
-//! Теперь игрок может подниматься на ступени, платформы, ящики.
-//!
-//! **ИЗМЕНЕНО (sub-stepping):** X и Z движения субделятся на шаги ≤0.2м,
-//! чтобы игрок не «протуннелировался» сквозь тонкие стены на высокой
-//! скорости.
+//! **ИЗМЕНЕНО (Sprint B1):** поддержка terrain. `resolve_movement_ex`
+//! принимает `Option<&Heightmap>`. Если задан и содержит XZ-точку —
+//! высота пола берётся из bilinear-сэмпла heightmap вместо плоской
+//! `floor_y`.
 
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
 use crate::game::components::Visible;
 use crate::physics::{BodyType, Collider, RigidBody};
+use crate::render::terrain::Heightmap;
 
 const CAPSULE_SAMPLES: usize = 8;
 const SUPPORT_TOLERANCE: f32 = 0.15;
-/// Максимальный шаг субдиления X/Z. Должен быть меньше минимальной
-/// толщины стен в сцене.
 const SUBSTEP_SIZE: f32 = 0.15;
 
 #[derive(Clone, Copy)]
@@ -75,7 +68,6 @@ fn capsule_hits_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
     false
 }
 
-/// Возвращает (world_pos, world_rotation, world_scale).
 fn world_pos_rot_scale(world: &World, e: Entity) -> Option<(Vec3, glam::Quat, Vec3)> {
     let model = crate::game::world_matrix(world, e);
     let (s, r, t) = model.to_scale_rotation_translation();
@@ -121,11 +113,6 @@ fn capsule_hits_with_dynamic(world: &World, feet_pos: Vec3, cap: &PlayerCapsule)
     capsule_hits_impl(world, feet_pos, cap, true)
 }
 
-/// Нормаль поверхности коллайдера в точке `probe`.
-///
-/// **ИЗМЕНЕНО:** работает в локальном пространстве коллайдера —
-/// probe трансформируется через inverse rotation, и нормаль
-/// возвращается в world space.
 fn surface_normal_at(
     col: &Collider,
     wp: Vec3,
@@ -224,16 +211,15 @@ pub fn resolve_movement_ex(
     cap: &PlayerCapsule,
     floor_y: f32,
     step_down_max: f32,
+    terrain: Option<&Heightmap>,
 ) -> MovementResult {
     let mut pos = start_feet;
     let mut on_ground = false;
 
-    // Step-up доступен всегда. Ограничение `y <= floor_y` убрано —
-    // теперь игрок может подниматься на ступени, платформы, ящики.
     let can_step_up = true;
     let step_heights = [0.15_f32, 0.30, 0.45];
 
-    // === X — субшагами, без dynamic ===
+    // === X — субшагами ===
     if delta.x.abs() > 1e-6 {
         let steps = (delta.x.abs() / SUBSTEP_SIZE).ceil().max(1.0) as i32;
         let step = delta.x / steps as f32;
@@ -258,7 +244,7 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Z — субшагами, без dynamic ===
+    // === Z — субшагами ===
     if delta.z.abs() > 1e-6 {
         let steps = (delta.z.abs() / SUBSTEP_SIZE).ceil().max(1.0) as i32;
         let step = delta.z / steps as f32;
@@ -283,7 +269,7 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Y — субшагами, со всеми телами ===
+    // === Y — субшагами ===
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
         let steps = (delta.y.abs() / max_step).ceil().max(1.0) as i32;
@@ -317,8 +303,13 @@ pub fn resolve_movement_ex(
         }
     }
 
-    if pos.y <= floor_y {
-        pos.y = floor_y;
+    // === Sprint B1: приземление на terrain ===
+    let local_floor = match terrain {
+        Some(t) if t.contains(pos.x, pos.z) => t.sample(pos.x, pos.z).max(floor_y),
+        _ => floor_y,
+    };
+    if pos.y <= local_floor {
+        pos.y = local_floor;
         on_ground = true;
     }
 
@@ -337,6 +328,6 @@ pub fn resolve_movement(
     cap: &PlayerCapsule,
     floor_y: f32,
 ) -> (Vec3, bool, Option<Entity>) {
-    let r = resolve_movement_ex(world, start_feet, delta, cap, floor_y, 0.0);
+    let r = resolve_movement_ex(world, start_feet, delta, cap, floor_y, 0.0, None);
     (r.new_feet, r.landed, r.support.map(|s| s.entity))
 }

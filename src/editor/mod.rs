@@ -9,6 +9,7 @@ pub mod picking;
 pub mod placement;
 pub mod play;
 pub mod settings;
+pub mod terrain_tool;   // === TERRAIN ===
 pub mod ui;
 pub mod undo;
 
@@ -29,6 +30,7 @@ use gizmo::GizmoState;
 use palette::PaletteState;
 use play::PlayState;
 use settings::EditorSettings;
+use terrain_tool::TerrainTool;   // === TERRAIN ===
 use undo::UndoStack;
 
 pub struct Editor {
@@ -47,22 +49,9 @@ pub struct BoxSelect {
 
 pub struct EditorState {
     pub selected: Vec<Entity>,
-
-    // === ИЗМЕНЕНО (editor sprint-1): дерево иерархии ===
-    /// Раскрытые узлы в дереве иерархии. Если entity нет в этом set,
-    /// его дети не показываются. Пустой set = все свёрнуты.
     pub hierarchy_expanded: HashSet<Entity>,
-
-    // === ИЗМЕНЕНО (editor sprint-2): Lock / Solo ===
-    /// Entity, которые «залочены» — их нельзя выбрать кликом,
-    /// двигать мышью или менять через drag&drop в дереве.
     pub locked: HashSet<Entity>,
-    /// Если `Some(e)` — Solo-режим: в viewport отображается только
-    /// `e` и его потомки, остальное скрывается.
     pub solo: Option<Entity>,
-
-    /// Всплывающее сообщение редактора (например, «entity is locked»).
-    /// Хранится как (текст, ttl секунд).
     pub hint: Option<(String, f32)>,
 
     pub save_path: String,
@@ -75,6 +64,9 @@ pub struct EditorState {
     pub clipboard_transform: Option<Transform>,
     pub play: PlayState,
     pub palette: PaletteState,
+
+    /// === TERRAIN ===
+    pub terrain: TerrainTool,
 
     pub box_select: Option<BoxSelect>,
     pub context_menu_pos: Option<(f32, f32)>,
@@ -138,21 +130,23 @@ pub enum EditorAction {
     SelectAll,
     CleanupEmptyEntities,
 
-    // === Фаза 4.4: аудио ===
     SetBusVolume(AudioBus, f32),
     LoadSound,
     PreviewSound(String),
 
-    // === Фаза 6: AI ===
     BakeNavmesh,
+
+    // === TERRAIN ===
+    TerrainRegenerate,
+    TerrainSaveFile,   // .r16
+    TerrainSavePNG,
+    TerrainLoadFile,
 }
 
 impl EditorState {
     pub fn new() -> Self {
         let mut s = Self {
             selected: Vec::new(),
-
-            // ИЗМЕНЕНО (editor sprint-1/2): новые поля.
             hierarchy_expanded: HashSet::new(),
             locked: HashSet::new(),
             solo: None,
@@ -168,6 +162,9 @@ impl EditorState {
             clipboard_transform: None,
             play: PlayState::default(),
             palette: PaletteState::default(),
+
+            terrain: TerrainTool::default(),
+
             box_select: None,
             context_menu_pos: None,
             renaming: None,
@@ -266,8 +263,6 @@ impl EditorState {
 
     pub fn prune_selection(&mut self, world: &World) {
         self.selected.retain(|&e| world.entities().contains(&e));
-        // ИЗМЕНЕНО (editor sprint-1): чистим также вспомогательные
-        // множества, иначе они протекают после DeleteSelected.
         self.hierarchy_expanded.retain(|&e| world.entities().contains(&e));
         self.locked.retain(|&e| world.entities().contains(&e));
         if let Some(s) = self.solo {
@@ -277,11 +272,6 @@ impl EditorState {
         }
     }
 
-    /// Проверить, залочена ли entity (её или любой из её родителей).
-    /// Lock родителя блокирует и всех детей — чтобы нельзя было
-    /// случайно сдвинуть дочерний объект, если родитель зафиксирован.
-    ///
-    /// ИЗМЕНЕНО (editor sprint-2).
     pub fn is_locked(&self, world: &World, mut e: Entity) -> bool {
         for _ in 0..64 {
             if self.locked.contains(&e) {
@@ -295,15 +285,10 @@ impl EditorState {
         true
     }
 
-    /// Показать краткое всплывающее сообщение в редакторе.
-    ///
-    /// ИЗМЕНЕНО (editor sprint-1): нужно для обратной связи при
-    /// клике на locked-entity. Хранится как (текст, ttl секунд).
     pub fn hud_hint(&mut self, text: impl Into<String>) {
         self.hint = Some((text.into(), 2.0));
     }
 
-    /// Тикнуть таймер hint'а. Вызывается движком раз в кадр.
     pub fn tick_hint(&mut self, dt: f32) {
         if let Some((_, t)) = &mut self.hint {
             *t -= dt;

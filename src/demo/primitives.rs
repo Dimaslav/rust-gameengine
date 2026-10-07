@@ -10,23 +10,19 @@ use crate::game::timers::Timer;
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 
 // ============================================================
-// НОВОЕ: GateMotion
+// GateMotion
 // ============================================================
 
 /// Компонент «ворота едут вверх до open_y».
 ///
-/// ИЗМЕНЕНО (bugfix #2): раньше `open_gate` записывал
-/// `Velocity::new(0, 4, 0)`, а `MovementSystem` двигал объект
-/// каждый кадр без остановки — ворота уходили в бесконечность.
-/// Теперь рядом с `Velocity` кладётся `GateMotion`; отдельная
-/// система (`stop_gate_if_reached` в FortressDemo) сбрасывает
-/// velocity при достижении `open_y`.
+/// bugfix #2: раньше `open_gate` записывал `Velocity::new(0, 4, 0)`,
+/// а `MovementSystem` двигал объект каждый кадр без остановки —
+/// ворота уходили в бесконечность. Теперь рядом с `Velocity` кладётся
+/// `GateMotion`; отдельная система (`stop_gate_if_reached` в
+/// FortressDemo) сбрасывает velocity при достижении `open_y`.
 #[derive(Debug, Clone, Copy)]
 pub struct GateMotion {
-    /// Y-координата, на которой ворота должны остановиться.
     pub open_y: f32,
-    /// Текущая скорость движения вверх (м/с). Должна совпадать
-    /// со значением `Velocity.y`, которое ставит игра.
     pub speed: f32,
 }
 
@@ -145,18 +141,30 @@ pub fn floor_tile(
 // ОСВЕЩЕНИЕ И ДЕКОР
 // ============================================================
 
+/// Стойка с факелом. Возвращает entity основания; свет — отдельная
+/// сущность в позиции чаши (pos + Y * 1.55). Игровой код обычно не
+/// трогает свет, но при желании можно найти по имени `<name>_Light`.
 pub fn torch(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
+    let name: String = name.into();
+
     let e = world.spawn();
-    world.insert(e, Name(name.into()));
-    world.insert(e, Transform::at(pos).with_scale(0.15));
-    world.insert(e, MeshHandle("sphere".into()));
-    world.insert(e, MaterialHandle("emissive_warm".into()));
-    world.insert(e, PointLight::new([1.0, 0.55, 0.2], 5.0, 12.0));
-    world.insert(e, Spinner::new(Vec3::Y, 0.6));
-    world.insert(e, AudioSource::looping("ding")
+    world.insert(e, Name(name.clone()));
+    world.insert(e, Transform::at(pos).with_scale(1.0));
+    world.insert(e, MeshHandle("torch_stand".into()));
+    world.insert(e, MaterialHandle("arena_column".into()));
+
+    let light = world.spawn();
+    world.insert(light, Name(format!("{}_Light", name)));
+    world.insert(light, Transform::at(pos + Vec3::Y * 1.55).with_scale(0.20));
+    world.insert(light, MeshHandle("sphere".into()));
+    world.insert(light, MaterialHandle("emissive_warm".into()));
+    world.insert(light, PointLight::new([1.0, 0.55, 0.2], 5.0, 14.0));
+    world.insert(light, Spinner::new(Vec3::Y, 0.6));
+    world.insert(light, AudioSource::looping("ding")
         .with_bus(AudioBus::Music)
         .with_volume(0.15)
         .with_range(1.0, 6.0));
+
     e
 }
 
@@ -175,20 +183,21 @@ pub fn crystal(world: &mut World, name: impl Into<String>, pos: Vec3, color: [f3
 pub fn brazier(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     let name: String = name.into();
 
+    // Детализированная жаровня (3 ножки + чаша) растёт от y = 0 вверх.
     let bowl = world.spawn();
-    world.insert(bowl, Name(format!("{}_Bowl", name)));
-    world.insert(bowl, Transform::at(pos).with_scale_xyz(0.8, 0.4, 0.8));
-    world.insert(bowl, MeshHandle("cylinder".into()));
+    world.insert(bowl, Name(format!("{}_Brazier", name)));
+    world.insert(bowl, Transform::at(pos).with_scale(1.0));
+    world.insert(bowl, MeshHandle("brazier_detail".into()));
     world.insert(bowl, MaterialHandle("arena_barrel".into()));
     world.insert(bowl, RigidBody::static_body());
-    world.insert(bowl, Collider::aabb(Vec3::splat(0.5)));
+    world.insert(bowl, Collider::aabb(Vec3::splat(0.35)));
 
     let fire = world.spawn();
     world.insert(fire, Name(format!("{}_Fire", name)));
-    world.insert(fire, Transform::at(pos + Vec3::Y * 0.6).with_scale(0.3));
+    world.insert(fire, Transform::at(pos + Vec3::Y * 0.75).with_scale(0.35));
     world.insert(fire, MeshHandle("sphere".into()));
     world.insert(fire, MaterialHandle("emissive_warm".into()));
-    world.insert(fire, PointLight::new([1.0, 0.5, 0.15], 8.0, 16.0));
+    world.insert(fire, PointLight::new([1.0, 0.5, 0.15], 8.0, 18.0));
     world.insert(fire, Spinner::new(Vec3::Y, 1.0));
     fire
 }
@@ -246,11 +255,14 @@ pub fn rune_decal(world: &mut World, pos: Vec3, size: f32, color: [f32; 4]) -> E
 // ПРОПСЫ
 // ============================================================
 
+/// Детализированный ящик (доски + угловые стойки + металлические
+/// полосы). Геометрия вписана в [-0.5, 0.5] по всем осям, поэтому
+/// `Transform.scale = size` даёт куб со стороной `size`.
 pub fn crate_box(world: &mut World, name: impl Into<String>, pos: Vec3, size: f32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
     world.insert(e, Transform::at(pos).with_scale(size));
-    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, MeshHandle("crate_detail".into()));
     world.insert(e, MaterialHandle("arena_crate".into()));
     world.insert(e, TextureTiling::new(1.0));
     world.insert(e, RigidBody::static_body());
@@ -263,7 +275,7 @@ pub fn dynamic_crate(world: &mut World, name: impl Into<String>, pos: Vec3, size
     let e = world.spawn();
     world.insert(e, Name(name.into()));
     world.insert(e, Transform::at(pos).with_scale(size));
-    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, MeshHandle("crate_detail".into()));
     world.insert(e, MaterialHandle("arena_barrel".into()));
     world.insert(e, TextureTiling::new(1.0));
     world.insert(e, RigidBody::dynamic(2.0));
@@ -272,11 +284,13 @@ pub fn dynamic_crate(world: &mut World, name: impl Into<String>, pos: Vec3, size
     e
 }
 
+/// Детализированная бочка (пузатая, с 3 обручами). Меш растёт из
+/// центра: [-0.5, +0.5] по Y, радиус ~0.5.
 pub fn barrel(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
     world.insert(e, Transform::at(pos).with_scale_xyz(0.8, 1.2, 0.8));
-    world.insert(e, MeshHandle("cylinder".into()));
+    world.insert(e, MeshHandle("barrel_detail".into()));
     world.insert(e, MaterialHandle("arena_barrel".into()));
     world.insert(e, TextureTiling::new(1.0));
     world.insert(e, RigidBody::static_body());
@@ -285,11 +299,13 @@ pub fn barrel(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     e
 }
 
+/// Детализированный сундук (корпус + крышка + металлические полосы +
+/// замок). Меш растёт от центра: X [-0.5, 0.5], Y [-0.5, 0.3], Z [-0.4, 0.4].
 pub fn chest(world: &mut World, name: impl Into<String>, pos: Vec3, gold: u32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
-    world.insert(e, Transform::at(pos).with_scale_xyz(0.9, 0.5, 0.7));
-    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, Transform::at(pos).with_scale_xyz(0.9, 1.0, 1.0));
+    world.insert(e, MeshHandle("chest_detail".into()));
     world.insert(e, MaterialHandle("arena_crate".into()));
     world.insert(e, RigidBody::static_body());
     world.insert(e, Collider::aabb(Vec3::splat(0.5)));
@@ -467,12 +483,6 @@ pub fn campaign_trigger(
     e
 }
 
-/// Запертые ворота. Открываются fortress-ом по наличию ключа.
-///
-/// ИЗМЕНЕНО (bugfix #2): теперь ворота получают `GateMotion` —
-/// целевая высота, на которой надо остановиться. Само движение
-/// — через `Velocity` (как раньше), но `stop_gate_if_reached`
-/// в FortressDemo::update сбрасывает velocity при достижении.
 pub fn locked_gate(
     world: &mut World,
     name: impl Into<String>,
@@ -501,16 +511,11 @@ pub fn locked_gate(
         src.playing = false;
     }
 
-    // Целевая высота: pos.y + size.y (ворота поднимаются на свою высоту).
     world.insert(e, GateMotion::new(pos.y + size.y, 4.0));
 
     e
 }
 
-/// Остановить ворота, если они достигли `GateMotion::open_y`.
-///
-/// Вызывается каждый кадр из FortressDemo. Возвращает `true`,
-/// если ворота только что остановились (для звука/лога).
 pub fn stop_gate_if_reached(world: &mut World, gate: Entity) -> bool {
     let Some(motion) = world.get::<GateMotion>(gate).copied() else { return false; };
     let Some(transform) = world.get::<Transform>(gate) else { return false; };

@@ -7,6 +7,7 @@ use crate::editor::camera_bookmarks::CameraBookmark;
 use crate::editor::gizmo::GizmoMode;
 use crate::editor::palette::{PaletteItem, PaletteState};
 use crate::editor::play::PlayState;
+use crate::editor::terrain_tool::TerrainBrush;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::{
@@ -16,6 +17,7 @@ use crate::game::components::{
 };
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
+use crate::render::terrain::Falloff;
 use crate::render::{AlphaMode, Material, PostFx, Tonemapper};
 use glam::Vec3;
 
@@ -99,6 +101,7 @@ pub fn draw(
     draw_top_bar(ctx, state, editor, stats, &mut action);
     if !editor.play.active {
         draw_palette_bar(ctx, editor);
+        draw_terrain_bar(ctx, editor, &mut action);
         draw_left_panel(ctx, state, editor, world, assets, stats, &mut action);
         draw_right_panel(ctx, state, editor, world, assets, postfx, &mut action);
         draw_bookmarks_panel(ctx, state, editor, &mut action);
@@ -118,7 +121,6 @@ pub fn draw(
         }
     }
 
-    // === editor sprint-1: hint overlay ===
     if let Some((text, ttl)) = &editor.hint {
         let alpha = ttl.min(1.0).max(0.0);
         egui::Area::new(egui::Id::new("editor_hint"))
@@ -372,6 +374,9 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
             } else if editor.flying {
                 ui.separator();
                 ui.label(egui::RichText::new("✦ FLY").strong().color(egui::Color32::from_rgb(90, 180, 230)));
+            } else if editor.terrain.active {
+                ui.separator();
+                ui.label(egui::RichText::new("🏔 TERRAIN").strong().color(egui::Color32::from_rgb(220, 160, 90)));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.toggle_value(&mut state.show_renderer_panel, "Renderer");
@@ -412,109 +417,51 @@ fn draw_audio_panel(
                         .italics()
                         .color(egui::Color32::from_rgb(230, 130, 130)),
                 );
-                ui.label(
-                    egui::RichText::new(
-                        "Could not open the default output device. \
-                         Check your system audio settings.",
-                    )
-                    .small()
-                    .weak(),
-                );
                 return;
             }
 
             ui.label(egui::RichText::new("Buses").strong());
             ui.label(
                 egui::RichText::new("Master applies on top of the others.")
-                    .small()
-                    .weak()
-                    .italics(),
+                    .small().weak().italics(),
             );
             ui.add_space(2.0);
 
             for (bus, vol) in &audio.bus_volumes {
                 let mut v = *vol;
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{:<6}", bus.name()))
-                            .monospace(),
-                    );
-                    let r = ui.add(
-                        egui::Slider::new(&mut v, 0.0..=1.0)
-                            .show_value(true)
-                            .fixed_decimals(2),
-                    );
+                    ui.label(egui::RichText::new(format!("{:<6}", bus.name())).monospace());
+                    let r = ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(true).fixed_decimals(2));
                     if r.changed() {
                         *action = Some(EditorAction::SetBusVolume(*bus, v));
                     }
-                    if ui
-                        .small_button("↺")
-                        .on_hover_text(format!("Reset to {:.2}", bus.default_volume()))
-                        .clicked()
-                    {
+                    if ui.small_button("↺").on_hover_text(format!("Reset to {:.2}", bus.default_volume())).clicked() {
                         *action = Some(EditorAction::SetBusVolume(*bus, bus.default_volume()));
                     }
                 });
             }
 
             ui.separator();
-
             ui.horizontal(|ui| {
-                if ui
-                    .button("➕ Load sound…")
-                    .on_hover_text("wav / ogg / flac / mp3")
-                    .clicked()
-                {
+                if ui.button("➕ Load sound…").on_hover_text("wav / ogg / flac / mp3").clicked() {
                     *action = Some(EditorAction::LoadSound);
                 }
                 ui.separator();
-                ui.label(
-                    egui::RichText::new(format!("active: {}", audio.active_count))
-                        .small()
-                        .weak(),
-                );
+                ui.label(egui::RichText::new(format!("active: {}", audio.active_count)).small().weak());
             });
 
             ui.separator();
             ui.label(format!("{} sounds loaded", audio.sound_names.len()));
-
-            egui::ScrollArea::vertical()
-                .max_height(220.0)
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    if audio.sound_names.is_empty() {
-                        ui.label(
-                            egui::RichText::new("(no sounds)")
-                                .weak()
-                                .italics(),
-                        );
-                        return;
-                    }
-                    for name in &audio.sound_names {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .small_button("▶")
-                                .on_hover_text("Preview on SFX bus")
-                                .clicked()
-                            {
-                                *action = Some(EditorAction::PreviewSound(name.clone()));
-                            }
-                            ui.label(
-                                egui::RichText::new(name).monospace(),
-                            );
-                        });
-                    }
-                });
-
-            ui.separator();
-            ui.label(
-                egui::RichText::new(
-                    "Hint: select an entity with AudioSource to edit it."
-                )
-                .small()
-                .weak()
-                .italics(),
-            );
+            egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false; 2]).show(ui, |ui| {
+                for name in &audio.sound_names {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("▶").on_hover_text("Preview on SFX bus").clicked() {
+                            *action = Some(EditorAction::PreviewSound(name.clone()));
+                        }
+                        ui.label(egui::RichText::new(name).monospace());
+                    });
+                }
+            });
         });
 
     state.show_audio_panel = open;
@@ -551,13 +498,115 @@ fn draw_palette_bar(ctx: &egui::Context, editor: &mut EditorState) {
                 }
                 ui.checkbox(&mut editor.palette.keep_active, "Keep");
                 if !is_light {
-                    ui.checkbox(&mut editor.palette.snap_to_grid, "Snap").on_hover_text("Ctrl+клик форсирует snap");
+                    ui.checkbox(&mut editor.palette.snap_to_grid, "Snap");
                     ui.add(egui::DragValue::new(&mut editor.palette.grid_step)
                         .speed(0.01).range(0.05..=10.0).prefix("step: "));
                 }
             } else {
                 ui.label(egui::RichText::new("no brush").weak().italics());
-                ui.label(egui::RichText::new("— выбери примитив/свет и кликай по земле").weak().small());
+            }
+        });
+    });
+}
+
+// ============================================================
+// Terrain bar
+// ============================================================
+
+fn draw_terrain_bar(
+    ctx: &egui::Context,
+    editor: &mut EditorState,
+    action: &mut Option<EditorAction>,
+) {
+    egui::TopBottomPanel::top("terrain_bar").show(ctx, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("🏔 Terrain").strong());
+
+            let tool = &mut editor.terrain;
+
+            ui.toggle_value(&mut tool.active, "Enable")
+                .on_hover_text("LMB по вьюпорту — применить кисть");
+
+            if !tool.active {
+                ui.label(egui::RichText::new("(brush disabled)").weak().italics());
+                return;
+            }
+
+            ui.separator();
+            ui.label("Brush:");
+            for brush in [
+                TerrainBrush::Raise,
+                TerrainBrush::Lower,
+                TerrainBrush::Smooth,
+                TerrainBrush::Flatten,
+            ] {
+                if ui.selectable_label(tool.brush == brush, brush.label()).clicked() {
+                    tool.brush = brush;
+                }
+            }
+
+            ui.separator();
+            ui.label("Paint:");
+            for i in 0..4u8 {
+                let b = TerrainBrush::Paint(i);
+                if ui.selectable_label(tool.brush == b, b.label()).clicked() {
+                    tool.brush = b;
+                }
+            }
+
+            ui.separator();
+            ui.add(egui::Slider::new(&mut tool.radius, 0.5..=200.0)
+                .logarithmic(true).text("Radius (m)"));
+            ui.add(egui::Slider::new(&mut tool.strength, 0.01..=1.0).text("Strength"));
+
+            ui.label("Falloff:");
+            let mut idx = match tool.falloff {
+                Falloff::Constant => 0u8,
+                Falloff::Linear => 1,
+                Falloff::Smooth => 2,
+            };
+            ui.selectable_value(&mut idx, 0, "Const");
+            ui.selectable_value(&mut idx, 1, "Linear");
+            ui.selectable_value(&mut idx, 2, "Smooth");
+            tool.falloff = match idx {
+                0 => Falloff::Constant,
+                1 => Falloff::Linear,
+                _ => Falloff::Smooth,
+            };
+
+            if matches!(tool.brush, TerrainBrush::Flatten) {
+                ui.separator();
+                ui.add(egui::Slider::new(&mut tool.flatten_target, -50.0..=200.0).text("Target Y"));
+                if ui.small_button("Use cursor Y").clicked() {
+                    if let Some(p) = tool.cursor_world {
+                        tool.flatten_target = p.y;
+                    }
+                }
+            }
+
+            ui.separator();
+            if ui.button("⟳ Re-generate splat").clicked() {
+                *action = Some(EditorAction::TerrainRegenerate);
+            }
+            if ui.button("💾 Save R16").clicked() {
+                *action = Some(EditorAction::TerrainSaveFile);
+            }
+            if ui.button("🖼 Export PNG").clicked() {
+                *action = Some(EditorAction::TerrainSavePNG);
+            }
+            if ui.button("📂 Load (PNG/R16)").clicked() {
+                *action = Some(EditorAction::TerrainLoadFile);
+            }
+
+            ui.separator();
+            if let Some(p) = tool.cursor_world {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "cursor ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z
+                    )).small().weak().monospace(),
+                );
+            } else {
+                ui.label(egui::RichText::new("cursor —").small().weak().monospace());
             }
         });
     });
@@ -600,7 +649,6 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
     ui.label(format!("Dir lights: {}", stats.dir_lights));
     ui.label(format!("Point lights: {}", stats.point_lights));
     ui.separator();
-
     ui.label("Selection");
     ui.label(format!("Entities: {}", stats.sel_entities));
     ui.label(format!("Triangles (LOD0): {}", stats.sel_triangles));
@@ -609,15 +657,10 @@ fn draw_stats_section(ui: &mut egui::Ui, stats: &Stats) {
     ui.label("LOD");
     ui.label(format!("LOD0: {} · LOD1: {} · LOD2: {} · LOD3: {}",
         stats.lod_counts[0], stats.lod_counts[1], stats.lod_counts[2], stats.lod_counts[3]));
-    if stats.lod_triangles.iter().any(|&t| t > 0) {
-        ui.label(format!("Tris: {} / {} / {} / {}",
-            stats.lod_triangles[0], stats.lod_triangles[1],
-            stats.lod_triangles[2], stats.lod_triangles[3]));
-    }
 }
 
 // ============================================================
-// Дерево иерархии (editor sprint-1)
+// Иерархия (HierarchySnapshot + draw_hierarchy_section + ...)
 // ============================================================
 
 struct HierarchySnapshot {
@@ -675,11 +718,8 @@ impl HierarchySnapshot {
             }
         }
 
-        let mut roots: Vec<Entity> = all
-            .iter()
-            .copied()
-            .filter(|e| !has_parent.contains(e))
-            .collect();
+        let mut roots: Vec<Entity> = all.iter().copied()
+            .filter(|e| !has_parent.contains(e)).collect();
         roots.sort();
 
         for kids in children_of.values_mut() {
@@ -723,9 +763,7 @@ impl HierarchySnapshot {
     fn flatten(&self, is_expanded: impl Fn(Entity) -> bool) -> Vec<HierarchyRow> {
         let mut out = Vec::new();
         for &root in &self.roots {
-            if !self.is_visible(root) {
-                continue;
-            }
+            if !self.is_visible(root) { continue; }
             self.flatten_rec(root, 0, &is_expanded, &mut out);
         }
         out
@@ -739,9 +777,7 @@ impl HierarchySnapshot {
         out: &mut Vec<HierarchyRow>,
     ) {
         out.push(HierarchyRow { entity: e, depth });
-        if !is_expanded(e) {
-            return;
-        }
+        if !is_expanded(e) { return; }
         for &c in self.children_of(e) {
             if self.is_visible(c) {
                 self.flatten_rec(c, depth + 1, is_expanded, out);
@@ -772,16 +808,14 @@ fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
     });
 
     ui.horizontal(|ui| {
-        if ui.small_button("⤢ Expand").on_hover_text("Раскрыть всё дерево").clicked() {
-            for &e in world.entities() {
-                editor.hierarchy_expanded.insert(e);
-            }
+        if ui.small_button("⤢ Expand").clicked() {
+            for &e in world.entities() { editor.hierarchy_expanded.insert(e); }
         }
-        if ui.small_button("⤡ Collapse").on_hover_text("Свернуть всё дерево").clicked() {
+        if ui.small_button("⤡ Collapse").clicked() {
             editor.hierarchy_expanded.clear();
         }
         if !editor.selected.is_empty() {
-            if ui.small_button("→ Selected").on_hover_text("Развернуть родителей выбранного").clicked() {
+            if ui.small_button("→ Selected").clicked() {
                 let selected: Vec<Entity> = editor.selected.clone();
                 for e in selected {
                     let mut cur = e;
@@ -805,7 +839,6 @@ fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
     });
 
     let snapshot = HierarchySnapshot::build(world, &editor.search_filter);
-
     let total = snapshot.visible_count();
     let sel_count = editor.selected.len();
     if sel_count > 1 { ui.label(format!("{} shown · {} selected", total, sel_count)); }
@@ -815,13 +848,9 @@ fn draw_hierarchy_section(ui: &mut egui::Ui, editor: &mut EditorState,
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(340.0)
         .show(ui, |ui| {
-            let rows = snapshot.flatten(
-                |e| editor.hierarchy_expanded.contains(&e),
-            );
+            let rows = snapshot.flatten(|e| editor.hierarchy_expanded.contains(&e));
             for row in rows {
-                draw_hierarchy_row(
-                    ui, editor, world, row.entity, &snapshot, anchor, action, row.depth,
-                );
+                draw_hierarchy_row(ui, editor, world, row.entity, &snapshot, anchor, action, row.depth);
             }
         });
 }
@@ -835,48 +864,34 @@ fn draw_hierarchy_row(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut W
     let is_expanded = editor.hierarchy_expanded.contains(&e);
 
     ui.horizontal(|ui| {
-        if depth > 0 {
-            ui.add_space(depth as f32 * 14.0);
-        }
+        if depth > 0 { ui.add_space(depth as f32 * 14.0); }
 
         if has_children {
             let label = if is_expanded { "▼" } else { "▶" };
             if ui.add(egui::Button::new(label).frame(false).small()).clicked() {
-                if is_expanded {
-                    editor.hierarchy_expanded.remove(&e);
-                } else {
-                    editor.hierarchy_expanded.insert(e);
-                }
+                if is_expanded { editor.hierarchy_expanded.remove(&e); }
+                else { editor.hierarchy_expanded.insert(e); }
             }
-        } else {
-            ui.add_space(16.0);
-        }
+        } else { ui.add_space(16.0); }
 
         let solo_active = editor.solo == Some(e);
         let solo_icon = if solo_active { "◉" } else { "○" };
-        let solo_resp = ui
-            .add(egui::Button::new(solo_icon).frame(false).small())
-            .on_hover_text("Solo: показать только это и потомков");
+        let solo_resp = ui.add(egui::Button::new(solo_icon).frame(false).small())
+            .on_hover_text("Solo");
         if solo_resp.clicked() {
             editor.solo = if solo_active { None } else { Some(e) };
         }
 
         let lock_icon = if is_locked { "🔒" } else { "🔓" };
-        let lock_resp = ui
-            .add(egui::Button::new(lock_icon).frame(false).small())
-            .on_hover_text("Lock: запретить выбор и перемещение");
+        let lock_resp = ui.add(egui::Button::new(lock_icon).frame(false).small())
+            .on_hover_text("Lock");
         if lock_resp.clicked() {
-            if is_locked {
-                editor.locked.remove(&e);
-            } else {
-                editor.locked.insert(e);
-            }
+            if is_locked { editor.locked.remove(&e); } else { editor.locked.insert(e); }
         }
 
         let visible = world.get::<Visible>(e).map(|v| v.0).unwrap_or(true);
         let eye_label = if visible { "👁" } else { "✖" };
-        let eye_resp = ui.add(egui::Button::new(eye_label).frame(false).small())
-            .on_hover_text("Toggle visibility");
+        let eye_resp = ui.add(egui::Button::new(eye_label).frame(false).small());
         if eye_resp.clicked() {
             editor.undo_requested = true;
             if visible { world.insert(e, Visible(false)); } else { world.remove::<Visible>(e); }
@@ -898,23 +913,17 @@ fn draw_hierarchy_row(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut W
         };
 
         let drag_id = egui::Id::new(("hier_drag", e));
-        let drag_inner = ui.dnd_drag_source(
-            drag_id,
-            e,
-            |ui| {
-                let resp = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&label).color(text_color),
-                    )
+        let drag_inner = ui.dnd_drag_source(drag_id, e, |ui| {
+            let resp = ui.add(
+                egui::Label::new(egui::RichText::new(&label).color(text_color))
                     .sense(egui::Sense::click_and_drag()),
-                );
-                if !badges.is_empty() {
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new(&badges).small().weak().monospace());
-                }
-                resp
-            },
-        );
+            );
+            if !badges.is_empty() {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(&badges).small().weak().monospace());
+            }
+            resp
+        });
         let drag_resp = drag_inner.response;
 
         if let Some(payload) = drag_resp.dnd_release_payload::<Entity>() {
@@ -923,7 +932,6 @@ fn draw_hierarchy_row(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut W
                 editor.undo_requested = true;
                 world.insert(dragged, Parent(e));
                 editor.hierarchy_expanded.insert(e);
-                log::info!("Reparented #{} → parent #{}", dragged, e);
             }
         }
 
@@ -941,7 +949,7 @@ fn draw_hierarchy_row(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut W
 
         if clicked {
             if is_locked {
-                editor.hud_hint("Entity is locked (unlock 🔒 to select)");
+                editor.hud_hint("Entity is locked");
             } else {
                 let modifiers = ui.input(|i| i.modifiers);
                 if modifiers.ctrl || modifiers.command {
@@ -1006,21 +1014,13 @@ fn hierarchy_context_menu(ui: &mut egui::Ui, editor: &mut EditorState, world: &m
     }
     ui.separator();
     if ui.button("Lock / Unlock").clicked() {
-        if editor.locked.contains(&e) {
-            editor.locked.remove(&e);
-        } else {
-            editor.locked.insert(e);
-        }
+        if editor.locked.contains(&e) { editor.locked.remove(&e); } else { editor.locked.insert(e); }
         ui.close();
     }
     if editor.solo == Some(e) {
-        if ui.button("Unsolo").clicked() {
-            editor.solo = None;
-            ui.close();
-        }
+        if ui.button("Unsolo").clicked() { editor.solo = None; ui.close(); }
     } else if ui.button("Solo").clicked() {
-        editor.solo = Some(e);
-        ui.close();
+        editor.solo = Some(e); ui.close();
     }
     ui.separator();
     if ui.button("Export FBX…").clicked() {
@@ -1037,13 +1037,13 @@ fn draw_prefabs_section(ui: &mut egui::Ui, editor: &mut EditorState, action: &mu
     ui.horizontal(|ui| {
         ui.label("📁");
         ui.add(egui::TextEdit::singleline(&mut editor.prefabs_dir).desired_width(140.0).hint_text("prefabs"));
-        if ui.small_button("⟳").on_hover_text("Refresh list").clicked() { *action = Some(EditorAction::RefreshPrefabs); }
+        if ui.small_button("⟳").clicked() { *action = Some(EditorAction::RefreshPrefabs); }
     });
     ui.horizontal(|ui| {
         ui.label("Name:");
         ui.add(egui::TextEdit::singleline(&mut editor.prefab_save_name).desired_width(120.0).hint_text("my_prefab"));
         let can_save = !editor.selected.is_empty() && !editor.prefab_save_name.trim().is_empty();
-        if ui.add_enabled(can_save, egui::Button::new("💾 Save Sel")).on_hover_text("Сохранить выделение как .prefab.ron").clicked() {
+        if ui.add_enabled(can_save, egui::Button::new("💾 Save Sel")).clicked() {
             *action = Some(EditorAction::SavePrefab);
         }
     });
@@ -1051,20 +1051,13 @@ fn draw_prefabs_section(ui: &mut egui::Ui, editor: &mut EditorState, action: &mu
     let prefab_count = editor.prefab_list.len();
     if prefab_count == 0 {
         ui.label(egui::RichText::new("no prefabs found").weak().italics());
-        ui.label(egui::RichText::new("Выдели объекты → введи имя → Save Sel").small().weak());
     } else {
         ui.label(format!("{} files", prefab_count));
         egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(200.0).show(ui, |ui| {
             for (idx, path) in editor.prefab_list.iter().enumerate() {
                 let display = crate::scene::prefab::prefab_display_name(path);
-                let resp = ui.button(format!("📦 {}", display)).on_hover_text(format!("Spawn {}", path.display()));
+                let resp = ui.button(format!("📦 {}", display));
                 if resp.clicked() { *action = Some(EditorAction::InstantiatePrefab(idx as u32)); }
-                resp.context_menu(|ui| {
-                    if ui.button("Spawn here").clicked() {
-                        *action = Some(EditorAction::InstantiatePrefab(idx as u32)); ui.close();
-                    }
-                    if ui.button("Show path").clicked() { log::info!("{}", path.display()); ui.close(); }
-                });
             }
         });
     }
@@ -1074,33 +1067,13 @@ fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Op
     ui.heading("Assets"); ui.separator();
 
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .button("➕ Load sRGB (color)…")
-            .on_hover_text(
-                "Albedo / base color / emissive.\n\
-                 GPU decodes the stored sRGB bytes to linear at sample time.",
-            )
-            .clicked()
-        {
+        if ui.button("➕ Load sRGB (color)…").clicked() {
             *action = Some(EditorAction::LoadTextures);
         }
-        if ui
-            .button("➕ Load Linear (data)…")
-            .on_hover_text(
-                "Normal maps, metallic-roughness, AO, height/displacement, masks.\n\
-                 No sRGB decode — bytes are used as-is.",
-            )
-            .clicked()
-        {
+        if ui.button("➕ Load Linear (data)…").clicked() {
             *action = Some(EditorAction::LoadTexturesLinear);
         }
     });
-    ui.label(
-        egui::RichText::new("sRGB for color, Linear for data. Wrong choice = wrong shading.")
-            .small()
-            .weak()
-            .italics(),
-    );
 
     ui.separator();
     let tex_count = assets.texture_list.len();
@@ -1111,40 +1084,20 @@ fn draw_assets_section(ui: &mut egui::Ui, assets: &UiAssets<'_>, action: &mut Op
     ui.label(format!("{} textures", tex_count));
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(180.0).show(ui, |ui| {
-        for (name, w, h, is_srgb) in assets.texture_list {
+        for (name, _w, _h, is_srgb) in assets.texture_list {
             let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
             let tag_color = if *is_srgb {
                 egui::Color32::from_rgb(230, 200, 130)
             } else {
                 egui::Color32::from_rgb(150, 200, 230)
             };
-
-            let resp = ui
-                .horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(tag)
-                            .small()
-                            .monospace()
-                            .color(tag_color),
-                    );
-                    ui.button(format!("🖼 {}", name))
-                })
-                .inner
-                .on_hover_text(format!(
-                    "{} × {} pixels\nLoaded as: {}\nRight-click to remove",
-                    w, h,
-                    if *is_srgb { "sRGB (color)" } else { "Linear (data)" },
-                ));
+            let resp = ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tag).small().monospace().color(tag_color));
+                ui.button(format!("🖼 {}", name))
+            }).inner;
             resp.context_menu(|ui| {
                 if ui.button("Remove texture").clicked() {
                     *action = Some(EditorAction::RemoveTexture(name.clone()));
-                    ui.close();
-                }
-                if ui.button("Copy name").clicked() {
-                    let text = name.clone();
-                    ui.output_mut(|o| {
-                        o.commands.push(egui::OutputCommand::CopyText(text));
-                    });
                     ui.close();
                 }
             });
@@ -1183,7 +1136,6 @@ fn draw_inspector_panel(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut
         if ui.selectable_label(*m == GizmoMode::Scale, "S (3)").clicked() { *m = GizmoMode::Scale; }
         ui.toggle_value(&mut editor.gizmo.snap_enabled, "Snap");
     });
-    ui.label(egui::RichText::new("Alt+drag: duplicate · Ctrl: snap").small().weak());
     ui.separator();
 
     let n = editor.selected.len();
@@ -1194,7 +1146,6 @@ fn draw_inspector_panel(ui: &mut egui::Ui, editor: &mut EditorState, world: &mut
             if ui.button("Focus (F)").clicked() { *action = Some(EditorAction::FocusSelected); }
             if ui.button("Duplicate").clicked() { *action = Some(EditorAction::Duplicate); }
             if ui.button("Delete").clicked() { *action = Some(EditorAction::DeleteSelected); }
-            if ui.button("FBX Sel").clicked() { *action = Some(EditorAction::ExportFbxSelected); }
         });
         ui.separator();
         draw_multi_edit(ui, world, editor);
@@ -1230,11 +1181,11 @@ fn draw_bookmarks_panel(ctx: &egui::Context, state: &mut UiState,
                     ui.label(format!("Slot {}:", i + 1));
                     if editor.settings.camera_bookmarks.is_empty(i) {
                         ui.label(egui::RichText::new("(empty)").weak().italics());
-                    } else if ui.small_button("↺").on_hover_text("Goto").clicked() {
+                    } else if ui.small_button("↺").clicked() {
                         *action = Some(EditorAction::GotoCameraBookmark(i));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("💾").on_hover_text("Save here").clicked() {
+                        if ui.small_button("💾").clicked() {
                             *action = Some(EditorAction::SaveCameraBookmark(i));
                         }
                     });
@@ -1287,6 +1238,10 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { label: "Play · Spawn player here", action: EditorAction::SpawnPlayerHere },
         PaletteCommand { label: "Prefab · Save selection…", action: EditorAction::SavePrefab },
         PaletteCommand { label: "Prefab · Refresh list", action: EditorAction::RefreshPrefabs },
+        PaletteCommand { label: "Terrain · Re-generate splat", action: EditorAction::TerrainRegenerate },
+        PaletteCommand { label: "Terrain · Save R16", action: EditorAction::TerrainSaveFile },
+        PaletteCommand { label: "Terrain · Export PNG", action: EditorAction::TerrainSavePNG },
+        PaletteCommand { label: "Terrain · Load (PNG/R16)", action: EditorAction::TerrainLoadFile },
     ]
 }
 
@@ -1410,9 +1365,6 @@ fn draw_inspector(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut 
 
 fn inspector_directional_light(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("☀ Directional Light").default_open(true).show(ui, |ui| {
-        ui.label(egui::RichText::new(
-            "Направленный свет без затухания. `direction` — вектор ОТ сцены К источнику."
-        ).small().weak());
         let Some(light) = world.get_mut::<DirectionalLight>(e) else { return; };
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Sun").clicked() { *light = DirectionalLight::sun(); editor.undo_requested = true; }
@@ -1443,16 +1395,11 @@ fn inspector_directional_light(ui: &mut egui::Ui, world: &mut World, e: Entity, 
         });
         let r = ui.add(egui::Slider::new(&mut light.intensity, 0.0..=5.0).logarithmic(true).text("Intensity"));
         if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        ui.label(egui::RichText::new(format!(
-            "→ ({:.2}, {:.2}, {:.2}) × {:.2}",
-            light.direction.x, light.direction.y, light.direction.z, light.intensity,
-        )).small().weak().monospace());
     });
 }
 
 fn inspector_point_light(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("💡 Point Light").default_open(true).show(ui, |ui| {
-        ui.label(egui::RichText::new("Точечный источник. Позиция берётся из Transform.").small().weak());
         let Some(light) = world.get_mut::<PointLight>(e) else { return; };
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Warm").clicked() { *light = PointLight::new([1.0, 0.6, 0.3], 4.0, 15.0); editor.undo_requested = true; }
@@ -1470,7 +1417,6 @@ fn inspector_point_light(ui: &mut egui::Ui, world: &mut World, e: Entity, editor
         if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
         let r = ui.add(egui::Slider::new(&mut light.range, 0.5..=100.0).logarithmic(true).text("Range (m)"));
         if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        ui.label(egui::RichText::new("Двигай позицию через Transform (клавиша 1 → Translate).").small().weak());
     });
 }
 
@@ -1483,9 +1429,6 @@ fn inspector_decal(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut
         });
         ui.label("Tint (RGB + Alpha)");
         if ui.color_edit_button_rgba_unmultiplied(&mut dec.tint).changed() { editor.undo_requested = true; }
-        ui.label(egui::RichText::new(
-            "Decal — unit cube поверх поверхности. Масштабируй Transform, чтобы растянуть."
-        ).small().weak());
         ui.horizontal(|ui| {
             if ui.small_button("Small (0.5m)").clicked() {
                 if let Some(t) = world.get_mut::<Transform>(e) { t.scale = Vec3::splat(0.5); }
@@ -1673,26 +1616,19 @@ fn inspector_geometry(ui: &mut egui::Ui, world: &mut World, e: Entity, assets: &
 
 fn inspector_texture_tiling(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Texture Tiling").default_open(true).show(ui, |ui| {
-        ui.label(egui::RichText::new(
-            "Размер одного тайла в мировых единицах. При масштабировании объекта текстура тайлится, а не растягивается."
-        ).small().weak());
         let Some(t) = world.get_mut::<TextureTiling>(e) else { return; };
         let r = ui.add(egui::Slider::new(&mut t.size, 0.05..=50.0).logarithmic(true).text("Tile size"));
         if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
         ui.horizontal(|ui| {
-            if ui.small_button("Fine (0.25)").on_hover_text("Мелкая текстура").clicked() { t.size = 0.25; editor.undo_requested = true; }
-            if ui.small_button("Default (1.0)").on_hover_text("1 unit = 1 tile").clicked() { t.size = 1.0; editor.undo_requested = true; }
-            if ui.small_button("Coarse (4.0)").on_hover_text("Крупная текстура").clicked() { t.size = 4.0; editor.undo_requested = true; }
+            if ui.small_button("Fine (0.25)").clicked() { t.size = 0.25; editor.undo_requested = true; }
+            if ui.small_button("Default (1.0)").clicked() { t.size = 1.0; editor.undo_requested = true; }
+            if ui.small_button("Coarse (4.0)").clicked() { t.size = 4.0; editor.undo_requested = true; }
         });
     });
 }
 
 fn inspector_elevator(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Elevator").default_open(true).show(ui, |ui| {
-        ui.label(egui::RichText::new(
-            "FSM с trapezoid-профилем скорости: Idle → DoorsOpening → DoorsOpen → DoorsClosing → Moving. \
-             Платформа двигается через RigidBody::Kinematic (velocity.y)."
-        ).small().weak());
         let Some(el) = world.get_mut::<Elevator>(e) else { return; };
         let mut floors = el.floors.clone();
         let floor_count = floors.len();
@@ -1719,16 +1655,11 @@ fn inspector_elevator(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             editor.undo_requested = true;
         }
         ui.separator();
-        let r = ui.add(egui::Slider::new(&mut el.speed, 0.1..=8.0).text("Max speed (m/s)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut el.acceleration, 0.5..=15.0).logarithmic(true).text("Acceleration (m/s²)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut el.door_speed, 0.2..=5.0).text("Door speed (1/s)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut el.dwell, 0.0..=10.0).text("Dwell (s)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut el.sensor_radius, 0.5..=5.0).text("Door sensor radius (m)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
+        ui.add(egui::Slider::new(&mut el.speed, 0.1..=8.0).text("Max speed (m/s)"));
+        ui.add(egui::Slider::new(&mut el.acceleration, 0.5..=15.0).logarithmic(true).text("Acceleration"));
+        ui.add(egui::Slider::new(&mut el.door_speed, 0.2..=5.0).text("Door speed"));
+        ui.add(egui::Slider::new(&mut el.dwell, 0.0..=10.0).text("Dwell (s)"));
+        ui.add(egui::Slider::new(&mut el.sensor_radius, 0.5..=5.0).text("Sensor radius"));
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(format!("State: {:?}", el.state));
@@ -1738,13 +1669,8 @@ fn inspector_elevator(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             ui.label(format!("Velocity: {:+.2} m/s", el.current_velocity));
             ui.label(format!("Doors: {:.0}%", el.doors_open * 100.0));
         });
-        if el.player_inside {
-            ui.label(egui::RichText::new("● Player in door sensor").small().color(egui::Color32::from_rgb(120, 220, 120)));
-        }
-        let r = ui.add(egui::Slider::new(&mut el.doors_open, 0.0..=1.0).text("Doors open"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
         ui.separator();
-        ui.label("Вызвать лифт:");
+        ui.label("Call elevator:");
         let floors_snapshot: Vec<f32> = el.floors.clone();
         let mut call_floor: Option<usize> = None;
         ui.horizontal_wrapped(|ui| {
@@ -1759,14 +1685,10 @@ fn inspector_elevator(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
 fn inspector_sliding_door(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Sliding Door").default_open(true).show(ui, |ui| {
         let Some(sd) = world.get_mut::<SlidingDoor>(e) else { return; };
-        let r = ui.add(egui::Slider::new(&mut sd.open_amount, 0.0..=1.0).text("Open amount"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut sd.target, 0.0..=1.0).text("Target"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut sd.speed, 0.1..=5.0).text("Speed (1/s)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        let r = ui.add(egui::Slider::new(&mut sd.slide_distance, 0.1..=5.0).text("Slide distance (local units)"));
-        if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
+        ui.add(egui::Slider::new(&mut sd.open_amount, 0.0..=1.0).text("Open amount"));
+        ui.add(egui::Slider::new(&mut sd.target, 0.0..=1.0).text("Target"));
+        ui.add(egui::Slider::new(&mut sd.speed, 0.1..=5.0).text("Speed"));
+        ui.add(egui::Slider::new(&mut sd.slide_distance, 0.1..=5.0).text("Slide distance"));
         ui.label("Slide axis (local)");
         let mut ax = sd.slide_axis.to_array();
         ui.horizontal(|ui| {
@@ -1811,7 +1733,6 @@ fn inspector_material(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         if ui.color_edit_button_rgb(&mut m.emissive).changed() { changed = true; editor.undo_requested = true; }
         ui.separator();
         ui.label(egui::RichText::new("Textures").strong());
-        ui.label(egui::RichText::new("загрузи через Assets → Load Texture(s)…").small().weak());
         if texture_picker(ui, "mat_base_tex", "Base color:", &mut m.base_color_texture, assets.texture_list) { changed = true; editor.undo_requested = true; }
         if texture_picker(ui, "mat_mr_tex", "Metallic-Rough:", &mut m.metallic_roughness_texture, assets.texture_list) { changed = true; editor.undo_requested = true; }
         if texture_picker(ui, "mat_normal_tex", "Normal map:", &mut m.normal_texture, assets.texture_list) { changed = true; editor.undo_requested = true; }
@@ -1826,8 +1747,7 @@ fn inspector_material(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             if am != m.alpha_mode { m.alpha_mode = am; changed = true; }
         });
         if m.alpha_mode == AlphaMode::Mask {
-            let r = ui.add(egui::Slider::new(&mut m.alpha_cutoff, 0.0..=1.0).text("Alpha cutoff"));
-            if r.changed() { changed = true; }
+            if ui.add(egui::Slider::new(&mut m.alpha_cutoff, 0.0..=1.0).text("Alpha cutoff")).changed() { changed = true; }
         }
         if ui.checkbox(&mut m.double_sided, "Double-sided").changed() { changed = true; }
         if changed { editor.dirty_materials.push((e, name.to_string(), m)); }
@@ -1844,7 +1764,6 @@ fn inspector_tint(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &mut 
             if ui.color_edit_button_rgba_unmultiplied(&mut color).changed() { t.0 = color; editor.undo_requested = true; }
             if ui.small_button("White").clicked() { t.0 = [1.0, 1.0, 1.0, 1.0]; editor.undo_requested = true; }
         });
-        ui.label(egui::RichText::new("Поверх base_color материала (multiply)").small().weak());
     });
 }
 
@@ -1894,32 +1813,11 @@ fn inspector_rigidbody(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: 
         if has_parent {
             if let Some(rb) = world.get::<RigidBody>(e) {
                 if rb.body_type != BodyType::Static {
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgba_unmultiplied(120, 30, 30, 60))
-                        .inner_margin(egui::Margin::symmetric(8, 6))
-                        .corner_radius(egui::CornerRadius::same(4))
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new("⚠ Physics disabled: has Parent")
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(240, 130, 130)),
-                            );
-                            ui.label(
-                                egui::RichText::new(
-                                    "Parent-space dynamics is unsupported: \
-                                     Transform.position is parent-local, and \
-                                     gravity in a rotated parent frame would \
-                                     be wrong. Remove Parent to enable simulation.",
-                                )
-                                .small()
-                                .color(egui::Color32::from_rgb(220, 200, 200)),
-                            );
-                        });
-                    ui.separator();
+                    ui.label(egui::RichText::new("⚠ Physics disabled: has Parent")
+                        .strong().color(egui::Color32::from_rgb(240, 130, 130)));
                 }
             }
         }
-
         let Some(rb) = world.get_mut::<RigidBody>(e) else { return; };
         let mut changed = false;
         ui.horizontal(|ui| {
@@ -1945,22 +1843,16 @@ fn inspector_rigidbody(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: 
             }
             BodyType::Kinematic => {
                 let mut v = rb.velocity.to_array();
-                ui.label("Kinematic velocity (записывается системой лифта)");
+                ui.label("Kinematic velocity");
                 ui.horizontal(|ui| {
                     for i in 0..3 { ui.add(egui::DragValue::new(&mut v[i]).speed(0.1).prefix(["X ", "Y ", "Z "][i])); }
                 });
                 rb.velocity = Vec3::from_array(v);
             }
             BodyType::Static => {
-                ui.label(egui::RichText::new(
-                    "Static: бесконечная масса, не двигается. Масса и velocity игнорируются."
-                ).small().weak());
+                ui.label(egui::RichText::new("Static: infinite mass, not moving.").small().weak());
             }
         }
-        ui.horizontal(|ui| {
-            ui.label(format!("Sleeping: {} ({:.2}s)", rb.sleeping, rb.sleep_timer));
-            if ui.small_button("Wake").clicked() { rb.wake(); }
-        });
         if changed { editor.undo_requested = true; }
     });
 }
@@ -2028,7 +1920,7 @@ fn inspector_physics_material(ui: &mut egui::Ui, world: &mut World, e: Entity, e
         });
         ui.separator();
         let Some(m) = world.get_mut::<PhysicsMaterial>(e) else { return; };
-        ui.add(egui::Slider::new(&mut m.restitution, 0.0..=1.0).text("Restitution (bounce)"));
+        ui.add(egui::Slider::new(&mut m.restitution, 0.0..=1.0).text("Restitution"));
         ui.add(egui::Slider::new(&mut m.friction, 0.0..=2.0).text("Friction"));
     });
 }
@@ -2102,7 +1994,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<TextureTiling>(e) {
         any = true;
-        if ui.button("Texture Tiling").on_hover_text("Size of one tile in world units (1.0 = 1 unit per tile)").clicked() {
+        if ui.button("Texture Tiling").clicked() {
             world.insert(e, TextureTiling::default()); editor.undo_requested = true; ui.close();
         }
     }
@@ -2113,10 +2005,8 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
                 ("pickup (SFX)", AudioSource::new("pickup").with_bus(AudioBus::Sfx).with_range(1.0, 20.0)),
                 ("shot (SFX)",   AudioSource::new("shot").with_bus(AudioBus::Sfx).with_range(1.0, 30.0)),
                 ("ding (Music)", AudioSource::new("ding").with_bus(AudioBus::Music).with_range(0.5, 15.0)),
-                ("pickup (UI, non-spatial)",
-                    AudioSource::non_spatial("pickup").with_bus(AudioBus::Ui)),
-                ("ambient loop (Music)",
-                    AudioSource::looping("ding").with_bus(AudioBus::Music).with_range(2.0, 25.0)),
+                ("pickup (UI, non-spatial)", AudioSource::non_spatial("pickup").with_bus(AudioBus::Ui)),
+                ("ambient loop (Music)", AudioSource::looping("ding").with_bus(AudioBus::Music).with_range(2.0, 25.0)),
             ];
             for (label, src) in presets {
                 if ui.button(label).clicked() {
@@ -2131,18 +2021,9 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         any = true;
         ui.menu_button("🤖 AI Agent", |ui| {
             let presets: [(&str, crate::game::ai::AiAgent); 4] = [
-                ("Melee (fast)", crate::game::ai::AiAgent::new()
-                    .with_speed(4.0)
-                    .with_vision(18.0, 60_f32.to_radians())
-                    .with_attack(1.5, 10.0, 0.8)),
-                ("Brute (slow)", crate::game::ai::AiAgent::new()
-                    .with_speed(2.0)
-                    .with_vision(12.0, 45_f32.to_radians())
-                    .with_attack(2.0, 25.0, 1.5)),
-                ("Sniper (range)", crate::game::ai::AiAgent::new()
-                    .with_speed(3.0)
-                    .with_vision(30.0, 30_f32.to_radians())
-                    .with_attack(8.0, 15.0, 2.0)),
+                ("Melee (fast)", crate::game::ai::AiAgent::new().with_speed(4.0).with_vision(18.0, 60_f32.to_radians()).with_attack(1.5, 10.0, 0.8)),
+                ("Brute (slow)", crate::game::ai::AiAgent::new().with_speed(2.0).with_vision(12.0, 45_f32.to_radians()).with_attack(2.0, 25.0, 1.5)),
+                ("Sniper (range)", crate::game::ai::AiAgent::new().with_speed(3.0).with_vision(30.0, 30_f32.to_radians()).with_attack(8.0, 15.0, 2.0)),
                 ("Default", crate::game::ai::AiAgent::new()),
             ];
             for (label, agent) in presets {
@@ -2156,7 +2037,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<crate::game::ai::Enemy>(e) {
         any = true;
-        if ui.button("👹 Enemy marker").on_hover_text("Помечает entity как 'врага' (для систем и UI)").clicked() {
+        if ui.button("👹 Enemy marker").clicked() {
             world.insert(e, crate::game::ai::Enemy);
             editor.undo_requested = true;
             ui.close();
@@ -2164,7 +2045,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<crate::game::ai::AiTarget>(e) {
         any = true;
-        if ui.button("🎯 AI Target").on_hover_text("Маркер цели — AI-агенты будут её преследовать").clicked() {
+        if ui.button("🎯 AI Target").clicked() {
             world.insert(e, crate::game::ai::AiTarget);
             editor.undo_requested = true;
             ui.close();
@@ -2172,7 +2053,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<crate::game::ai::PatrolPath>(e) {
         any = true;
-        if ui.button("🚶 Patrol Path (circle)").on_hover_text("Простой круг радиусом 5м вокруг позиции").clicked() {
+        if ui.button("🚶 Patrol Path (circle)").clicked() {
             let origin = world.get::<Transform>(e).map(|t| t.position).unwrap_or(Vec3::ZERO);
             let mut pts = Vec::new();
             for i in 0..4 {
@@ -2187,13 +2068,13 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
 
     if !world.has::<Elevator>(e) {
         any = true;
-        if ui.button("Elevator (2 floors)").on_hover_text("FSM-лифт. Требует RigidBody::Kinematic + Collider::Aabb.").clicked() {
+        if ui.button("Elevator (2 floors)").clicked() {
             world.insert(e, Elevator::new(vec![0.0, 3.0], 2.0)); editor.undo_requested = true; ui.close();
         }
     }
     if !world.has::<SlidingDoor>(e) {
         any = true;
-        if ui.button("Sliding Door").on_hover_text("Створка. Обычно Parent к платформе лифта.").clicked() {
+        if ui.button("Sliding Door").clicked() {
             world.insert(e, SlidingDoor::new(Vec3::new(0.7, 1.0, 1.5), Vec3::X, 1.4)); editor.undo_requested = true; ui.close();
         }
     }
@@ -2210,7 +2091,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<Chase>(e) {
         any = true;
-        if ui.button("Chase (legacy)").on_hover_text("Простой lerp к игроку. Используй AI Agent для полноценного поведения.").clicked() {
+        if ui.button("Chase (legacy)").clicked() {
             world.insert(e, Chase::new(3.0, 1.2)); editor.undo_requested = true; ui.close();
         }
     }
@@ -2248,9 +2129,6 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             if ui.button("Play Sound (pickup)").clicked() {
                 world.insert(e, Trigger::repeatable(2.5, TriggerAction::PlaySound("pickup".to_string()))); editor.undo_requested = true; ui.close();
             }
-            if ui.button("Call Elevator (self, floor 0)").clicked() {
-                world.insert(e, Trigger::repeatable(1.5, TriggerAction::CallElevator { elevator: e, floor_idx: 0 })); editor.undo_requested = true; ui.close();
-            }
         });
     }
     if !world.has::<AnimationPlayer>(e) || !world.has::<SkeletonHandle>(e) {
@@ -2269,33 +2147,17 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
         any = true;
         let has_parent = world.has::<Parent>(e);
         ui.menu_button("RigidBody", |ui| {
-            if has_parent {
-                ui.label(
-                    egui::RichText::new("⚠ Entity has Parent — physics disabled")
-                        .small()
-                        .color(egui::Color32::from_rgb(240, 130, 130)),
-                );
-                ui.separator();
-            }
             if ui.button("Static").clicked() {
                 world.insert(e, RigidBody::static_body());
                 editor.undo_requested = true;
                 ui.close();
             }
-            if ui
-                .add_enabled(!has_parent, egui::Button::new("Dynamic (mass 1)"))
-                .on_disabled_hover_text("Parent-space dynamics is unsupported. Remove Parent first.")
-                .clicked()
-            {
+            if ui.add_enabled(!has_parent, egui::Button::new("Dynamic (mass 1)")).clicked() {
                 world.insert(e, RigidBody::dynamic(1.0));
                 editor.undo_requested = true;
                 ui.close();
             }
-            if ui
-                .add_enabled(!has_parent, egui::Button::new("Kinematic"))
-                .on_disabled_hover_text("Parent-space dynamics is unsupported. Remove Parent first.")
-                .clicked()
-            {
+            if ui.add_enabled(!has_parent, egui::Button::new("Kinematic")).clicked() {
                 world.insert(e, RigidBody::kinematic());
                 editor.undo_requested = true;
                 ui.close();
@@ -2398,6 +2260,133 @@ fn preset_ultra() -> PostFx {
     p
 }
 
+fn preset_rage_cinematic() -> PostFx {
+    let mut p = PostFx::default();
+    p.tonemapper = Tonemapper::ACESFilmic;
+    p.exposure = 0.55;
+    p.exposure_bias = 1.05;
+
+    p.color_temperature = 0.30;
+    p.color_tint = 0.05;
+    p.color_contrast = 1.18;
+    p.color_saturation = 0.88;
+    p.color_lift = [0.005, 0.0, -0.005];
+    p.color_gain = [1.05, 1.0, 0.92];
+    p.color_gamma = [0.98, 1.0, 1.02];
+
+    p.bloom_threshold = 1.1;
+    p.bloom_strength = 0.55;
+    p.bloom_knee = 0.55;
+    p.bloom_radius = 1.2;
+
+    p.fog_color = [0.65, 0.48, 0.35];
+    p.fog_density = 0.010;
+    p.fog_height_base = 0.0;
+    p.fog_height_falloff = 0.08;
+    p.volumetric_density = 0.018;
+    p.volumetric_scattering = 0.45;
+    p.volumetric_phase_g = 0.65;
+
+    p.ssao_strength = 0.85;
+    p.ssao_radius = 0.7;
+    p.ibl_strength = 0.35;
+
+    p.taa_strength = 1.0;
+    p.taa_sharpening = 0.08;
+    p.fxaa_strength = 0.4;
+
+    p.vignette_strength = 0.22;
+    p.film_grain = 0.04;
+    p.chromatic_aberration = 0.02;
+
+    p.dof_enabled = 1.0;
+    p.dof_focus_distance = 12.0;
+    p.dof_focus_range = 4.0;
+    p.dof_max_blur = 6.0;
+    p.dof_blur_falloff = 5.0;
+
+    p.motion_blur_enabled = 1.0;
+    p.motion_blur_intensity = 0.55;
+    p.motion_blur_max_px = 32.0;
+    p.motion_blur_samples = 12;
+
+    p.lens_flare_intensity = 0.35;
+    p.lens_flare_threshold = 2.2;
+    p.lens_flare_ghosts = 5;
+    p.lens_flare_streak = 0.10;
+
+    p.shadow_bias = 0.0016;
+    p.shadow_normal_bias = 3.5;
+    p.shadow_fade_start = 140.0;
+    p.shadow_fade_end = 200.0;
+
+    p
+}
+
+fn preset_desert_storm() -> PostFx {
+    let mut p = preset_rage_cinematic();
+    p.exposure_bias = 0.9;
+    p.color_temperature = 0.20;
+    p.color_tint = -0.15;
+    p.color_contrast = 1.10;
+    p.color_saturation = 0.62;
+    p.fog_density = 0.030;
+    p.fog_color = [0.72, 0.58, 0.42];
+    p.volumetric_density = 0.045;
+    p.volumetric_scattering = 0.55;
+    p.volumetric_phase_g = 0.75;
+    p.vignette_strength = 0.30;
+    p.film_grain = 0.06;
+    p.lens_flare_intensity = 0.20;
+    p.bloom_strength = 0.45;
+    p
+}
+
+fn preset_night_urban() -> PostFx {
+    let mut p = PostFx::default();
+    p.tonemapper = Tonemapper::AgX;
+    p.exposure = 0.75;
+    p.exposure_bias = 1.0;
+    p.color_temperature = -0.35;
+    p.color_tint = 0.05;
+    p.color_contrast = 1.22;
+    p.color_saturation = 0.92;
+    p.color_lift = [-0.01, 0.0, 0.012];
+    p.color_gain = [0.94, 1.0, 1.08];
+    p.bloom_threshold = 0.9;
+    p.bloom_strength = 0.95;
+    p.bloom_knee = 0.4;
+    p.bloom_radius = 1.4;
+    p.fog_color = [0.18, 0.22, 0.35];
+    p.fog_density = 0.015;
+    p.volumetric_density = 0.020;
+    p.volumetric_scattering = 0.5;
+    p.volumetric_phase_g = 0.7;
+    p.ssao_strength = 1.1;
+    p.ssao_radius = 0.8;
+    p.ibl_strength = 0.15;
+    p.taa_strength = 1.0;
+    p.taa_sharpening = 0.12;
+    p.fxaa_strength = 0.5;
+    p.vignette_strength = 0.28;
+    p.film_grain = 0.05;
+    p.chromatic_aberration = 0.04;
+    p.dof_enabled = 1.0;
+    p.dof_focus_distance = 15.0;
+    p.dof_focus_range = 5.0;
+    p.dof_max_blur = 8.0;
+    p.dof_blur_falloff = 6.0;
+    p.motion_blur_enabled = 1.0;
+    p.motion_blur_intensity = 0.6;
+    p.motion_blur_max_px = 36.0;
+    p.motion_blur_samples = 14;
+    p.lens_flare_intensity = 0.55;
+    p.lens_flare_threshold = 1.5;
+    p.lens_flare_ghosts = 8;
+    p.lens_flare_streak = 0.18;
+    p
+}
+
 fn draw_renderer_panel(
     ui: &mut egui::Ui,
     postfx: &mut PostFx,
@@ -2406,50 +2395,38 @@ fn draw_renderer_panel(
 ) {
     egui::CollapsingHeader::new("AI / Navmesh").default_open(true).show(ui, |ui| {
         ui.horizontal(|ui| {
-            if ui
-                .button("🔨 Bake Navmesh")
-                .on_hover_text(
-                    "Строит grid-navmesh из текущих физических коллайдеров сцены.\n\
-                     Результат используется AI-агентами (AiAgent + PatrolPath).",
-                )
-                .clicked()
-            {
+            if ui.button("🔨 Bake Navmesh").clicked() {
                 *action = Some(EditorAction::BakeNavmesh);
             }
         });
-        ui.checkbox(&mut editor.settings.show_navmesh, "Show navmesh")
-            .on_hover_text(
-                "Отображает границы walkable-ячеек зелёными линиями.\n\
-                 Видно только после того, как navmesh запечён.",
-            );
-        ui.label(
-            egui::RichText::new(
-                "Bake после любых изменений геометрии сцены: добавления стен, полов, препятствий."
-            )
-            .small()
-            .weak()
-            .italics(),
-        );
+        ui.checkbox(&mut editor.settings.show_navmesh, "Show navmesh");
     });
 
     ui.separator();
     ui.label(egui::RichText::new("Quality preset").strong());
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Low").on_hover_text("Без TAA, SSAO, bloom, volumetric. Максимум FPS.").clicked() { apply_preset(postfx, preset_low()); }
-        if ui.button("Medium").on_hover_text("Мягкое SSAO, лёгкий bloom, TAA, лёгкий туман.").clicked() { apply_preset(postfx, preset_medium()); }
-        if ui.button("High").on_hover_text("Полное SSAO, заметный bloom, TAA + sharpen, god rays.").clicked() { apply_preset(postfx, preset_high()); }
-        if ui.button("Ultra").on_hover_text("Максимум постобработки.").clicked() { apply_preset(postfx, preset_ultra()); }
-        if ui.button("Reset").on_hover_text("PostFx::default()").clicked() { apply_preset(postfx, PostFx::default()); }
+        if ui.button("Low").clicked() { apply_preset(postfx, preset_low()); }
+        if ui.button("Medium").clicked() { apply_preset(postfx, preset_medium()); }
+        if ui.button("High").clicked() { apply_preset(postfx, preset_high()); }
+        if ui.button("Ultra").clicked() { apply_preset(postfx, preset_ultra()); }
+        if ui.button("Reset").clicked() { apply_preset(postfx, PostFx::default()); }
     });
+
+    ui.separator();
+    ui.label(egui::RichText::new("Style preset").strong());
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("🎬 RAGE Cinematic").clicked() { apply_preset(postfx, preset_rage_cinematic()); }
+        if ui.button("🌫 Desert Storm").clicked() { apply_preset(postfx, preset_desert_storm()); }
+        if ui.button("🌆 Night Urban").clicked() { apply_preset(postfx, preset_night_urban()); }
+    });
+
     ui.separator();
     egui::CollapsingHeader::new("Anti-aliasing").default_open(true).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.taa_strength, 0.0..=1.0).text("TAA strength"));
-        ui.label(egui::RichText::new("1.0 = полное накопление истории. 0.0 = passthrough.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.taa_sharpening, 0.0..=1.0).text("TAA sharpening"));
-        ui.label(egui::RichText::new("Unsharp-mask поверх TAA.").small().weak());
         ui.add(egui::Slider::new(&mut postfx.fxaa_strength, 0.0..=1.0).text("FXAA strength"));
-        ui.label(egui::RichText::new("При активной TAA ослабляется автоматически (в 2×).").small().weak());
     });
+
     ui.separator();
     egui::CollapsingHeader::new("Post-processing").default_open(true).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.bloom_threshold, 0.1..=5.0).text("Bloom threshold"));
@@ -2459,61 +2436,41 @@ fn draw_renderer_panel(
         ui.add(egui::Slider::new(&mut postfx.exposure, 0.1..=3.0).text("Exposure"));
     });
 
-    // Спринт 1.1 + 1.2: Color grading + Tonemapper
     ui.separator();
-    egui::CollapsingHeader::new("🎨 Color grading").default_open(true).show(ui, |ui| {
+    egui::CollapsingHeader::new("🎨 Color grading").default_open(false).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label("Tonemapper:");
             let tm = &mut postfx.tonemapper;
-            if ui.selectable_label(*tm == Tonemapper::AgX, "AgX")
-                .on_hover_text("Реалистичный (Sobotka 2022). Дефолт.").clicked() { *tm = Tonemapper::AgX; }
-            if ui.selectable_label(*tm == Tonemapper::ACESFilmic, "ACES")
-                .on_hover_text("Кинематографичный (Narkowicz).").clicked() { *tm = Tonemapper::ACESFilmic; }
-            if ui.selectable_label(*tm == Tonemapper::Reinhard, "Reinhard")
-                .on_hover_text("Простейший x/(1+x).").clicked() { *tm = Tonemapper::Reinhard; }
-            if ui.selectable_label(*tm == Tonemapper::Uncharted2, "Uncharted2")
-                .on_hover_text("Naughty Dog, яркая кривая.").clicked() { *tm = Tonemapper::Uncharted2; }
-            if ui.selectable_label(*tm == Tonemapper::None, "None")
-                .on_hover_text("Без тонального маппинга (clamp 0..1).").clicked() { *tm = Tonemapper::None; }
+            if ui.selectable_label(*tm == Tonemapper::AgX, "AgX").clicked() { *tm = Tonemapper::AgX; }
+            if ui.selectable_label(*tm == Tonemapper::ACESFilmic, "ACES").clicked() { *tm = Tonemapper::ACESFilmic; }
+            if ui.selectable_label(*tm == Tonemapper::Reinhard, "Reinhard").clicked() { *tm = Tonemapper::Reinhard; }
+            if ui.selectable_label(*tm == Tonemapper::Uncharted2, "Uncharted2").clicked() { *tm = Tonemapper::Uncharted2; }
+            if ui.selectable_label(*tm == Tonemapper::None, "None").clicked() { *tm = Tonemapper::None; }
         });
         ui.separator();
-        ui.add(egui::Slider::new(&mut postfx.exposure_bias, 0.25..=4.0)
-            .logarithmic(true).text("Exposure bias"));
-        ui.label(egui::RichText::new("Множитель к Exposure выше. 1.0 = нейтрально.")
-            .small().weak().italics());
-        ui.separator();
-        ui.add(egui::Slider::new(&mut postfx.color_temperature, -1.0..=1.0)
-            .text("Temperature (cool ↔ warm)"));
-        ui.add(egui::Slider::new(&mut postfx.color_tint, -1.0..=1.0)
-            .text("Tint (green ↔ magenta)"));
-        ui.add(egui::Slider::new(&mut postfx.color_contrast, 0.5..=2.0)
-            .text("Contrast"));
-        ui.add(egui::Slider::new(&mut postfx.color_saturation, 0.0..=2.0)
-            .text("Saturation"));
+        ui.add(egui::Slider::new(&mut postfx.exposure_bias, 0.25..=4.0).logarithmic(true).text("Exposure bias"));
+        ui.add(egui::Slider::new(&mut postfx.color_temperature, -1.0..=1.0).text("Temperature"));
+        ui.add(egui::Slider::new(&mut postfx.color_tint, -1.0..=1.0).text("Tint"));
+        ui.add(egui::Slider::new(&mut postfx.color_contrast, 0.5..=2.0).text("Contrast"));
+        ui.add(egui::Slider::new(&mut postfx.color_saturation, 0.0..=2.0).text("Saturation"));
         ui.separator();
         ui.label(egui::RichText::new("ASC CDL").strong());
         ui.horizontal(|ui| {
             ui.label("Lift:");
             for i in 0..3 {
-                ui.add(egui::DragValue::new(&mut postfx.color_lift[i])
-                    .speed(0.005).range(-0.2..=0.2)
-                    .prefix(["R ", "G ", "B "][i]));
+                ui.add(egui::DragValue::new(&mut postfx.color_lift[i]).speed(0.005).range(-0.2..=0.2).prefix(["R ", "G ", "B "][i]));
             }
         });
         ui.horizontal(|ui| {
             ui.label("Gain:");
             for i in 0..3 {
-                ui.add(egui::DragValue::new(&mut postfx.color_gain[i])
-                    .speed(0.005).range(0.0..=2.0)
-                    .prefix(["R ", "G ", "B "][i]));
+                ui.add(egui::DragValue::new(&mut postfx.color_gain[i]).speed(0.005).range(0.0..=2.0).prefix(["R ", "G ", "B "][i]));
             }
         });
         ui.horizontal(|ui| {
             ui.label("Gamma:");
             for i in 0..3 {
-                ui.add(egui::DragValue::new(&mut postfx.color_gamma[i])
-                    .speed(0.005).range(0.1..=3.0)
-                    .prefix(["R ", "G ", "B "][i]));
+                ui.add(egui::DragValue::new(&mut postfx.color_gamma[i]).speed(0.005).range(0.1..=3.0).prefix(["R ", "G ", "B "][i]));
             }
         });
         ui.separator();
@@ -2528,7 +2485,7 @@ fn draw_renderer_panel(
                 postfx.color_gain = [1.0, 1.0, 1.0];
                 postfx.color_gamma = [1.0, 1.0, 1.0];
             }
-            if ui.button("Cinematic").on_hover_text("Тёплый контрастный пресет").clicked() {
+            if ui.button("Cinematic").clicked() {
                 postfx.tonemapper = Tonemapper::ACESFilmic;
                 postfx.exposure_bias = 1.0;
                 postfx.color_temperature = 0.15;
@@ -2539,7 +2496,7 @@ fn draw_renderer_panel(
                 postfx.color_gain = [1.03, 1.0, 0.97];
                 postfx.color_gamma = [1.0, 1.0, 1.02];
             }
-            if ui.button("Cold horror").on_hover_text("Холодный, десатурированный").clicked() {
+            if ui.button("Cold horror").clicked() {
                 postfx.tonemapper = Tonemapper::AgX;
                 postfx.exposure_bias = 0.9;
                 postfx.color_temperature = -0.25;
@@ -2564,27 +2521,15 @@ fn draw_renderer_panel(
         });
     });
 
-    // Спринт 1.4: Lens flare
     ui.separator();
     egui::CollapsingHeader::new("✨ Lens flare").default_open(false).show(ui, |ui| {
-        ui.add(egui::Slider::new(&mut postfx.lens_flare_intensity, 0.0..=1.5)
-            .text("Intensity"));
-        ui.label(egui::RichText::new("0 = выключено. 0.3..0.8 — заметный flares.")
-            .small().weak().italics());
-        ui.add(egui::Slider::new(&mut postfx.lens_flare_threshold, 0.5..=8.0)
-            .logarithmic(true).text("Brightness threshold"));
-        ui.label(egui::RichText::new("Реагирует только на HDR-пиксели ярче порога.")
-            .small().weak().italics());
-
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_intensity, 0.0..=1.5).text("Intensity"));
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_threshold, 0.5..=8.0).logarithmic(true).text("Threshold"));
         let mut ghosts = postfx.lens_flare_ghosts as i32;
-        if ui.add(egui::Slider::new(&mut ghosts, 0..=12)
-            .text("Ghost count")).changed() {
+        if ui.add(egui::Slider::new(&mut ghosts, 0..=12).text("Ghost count")).changed() {
             postfx.lens_flare_ghosts = ghosts.max(0) as u32;
         }
-        ui.add(egui::Slider::new(&mut postfx.lens_flare_streak, 0.0..=0.5)
-            .text("Streak length"));
-
-        ui.separator();
+        ui.add(egui::Slider::new(&mut postfx.lens_flare_streak, 0.0..=0.5).text("Streak length"));
         ui.horizontal_wrapped(|ui| {
             if ui.button("Reset").clicked() {
                 postfx.lens_flare_intensity = 0.0;
@@ -2592,83 +2537,35 @@ fn draw_renderer_panel(
                 postfx.lens_flare_ghosts = 6;
                 postfx.lens_flare_streak = 0.15;
             }
-            if ui.button("Cinematic").on_hover_text("Мягкий flare").clicked() {
+            if ui.button("Cinematic").clicked() {
                 postfx.lens_flare_intensity = 0.4;
                 postfx.lens_flare_threshold = 2.0;
                 postfx.lens_flare_ghosts = 4;
                 postfx.lens_flare_streak = 0.12;
             }
-            if ui.button("J.J. Abrams").on_hover_text("Много flare").clicked() {
-                postfx.lens_flare_intensity = 1.0;
-                postfx.lens_flare_threshold = 1.0;
-                postfx.lens_flare_ghosts = 10;
-                postfx.lens_flare_streak = 0.35;
-            }
-            if ui.button("Subtle").clicked() {
-                postfx.lens_flare_intensity = 0.15;
-                postfx.lens_flare_threshold = 3.0;
-                postfx.lens_flare_ghosts = 3;
-                postfx.lens_flare_streak = 0.08;
-            }
         });
     });
 
-    // Спринт 2.1: Depth of Field
     ui.separator();
     egui::CollapsingHeader::new("🎥 Depth of Field").default_open(false).show(ui, |ui| {
         let mut enabled = postfx.dof_enabled > 0.5;
         if ui.checkbox(&mut enabled, "Enable DOF").changed() {
             postfx.dof_enabled = if enabled { 1.0 } else { 0.0 };
         }
-
         ui.add_enabled_ui(enabled, |ui| {
-            ui.add(egui::Slider::new(&mut postfx.dof_focus_distance, 0.5..=100.0)
-                .logarithmic(true).text("Focus distance (m)"));
-            ui.label(egui::RichText::new("Дистанция фокуса от камеры.")
-                .small().weak().italics());
-
-            ui.add(egui::Slider::new(&mut postfx.dof_focus_range, 0.0..=30.0)
-                .text("Focus range (m)"));
-            ui.label(egui::RichText::new("Зона резкости вокруг фокуса.")
-                .small().weak().italics());
-
-            ui.add(egui::Slider::new(&mut postfx.dof_max_blur, 0.0..=32.0)
-                .text("Max blur (px)"));
-            ui.label(egui::RichText::new("Максимальный радиус CoC.")
-                .small().weak().italics());
-
-            ui.add(egui::Slider::new(&mut postfx.dof_blur_falloff, 0.5..=20.0)
-                .logarithmic(true).text("Blur falloff (m/px)"));
-            ui.label(egui::RichText::new("Меньше = размытие растёт быстрее.")
-                .small().weak().italics());
+            ui.add(egui::Slider::new(&mut postfx.dof_focus_distance, 0.5..=100.0).logarithmic(true).text("Focus distance (m)"));
+            ui.add(egui::Slider::new(&mut postfx.dof_focus_range, 0.0..=30.0).text("Focus range (m)"));
+            ui.add(egui::Slider::new(&mut postfx.dof_max_blur, 0.0..=32.0).text("Max blur (px)"));
+            ui.add(egui::Slider::new(&mut postfx.dof_blur_falloff, 0.5..=20.0).logarithmic(true).text("Blur falloff"));
         });
-
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Auto (from camera)").on_hover_text("Фокус на цель камеры").clicked() {
-                postfx.dof_focus_distance = postfx.dof_focus_distance.clamp(0.5, 100.0);
-                postfx.dof_enabled = 1.0;
-            }
-            if ui.button("Cinematic").on_hover_text("Портрет: резкий центр, мягкий фон").clicked() {
+            if ui.button("Cinematic").clicked() {
                 postfx.dof_enabled = 1.0;
                 postfx.dof_focus_distance = 6.0;
                 postfx.dof_focus_range = 1.5;
                 postfx.dof_max_blur = 12.0;
                 postfx.dof_blur_falloff = 3.0;
-            }
-            if ui.button("Macro").on_hover_text("Очень близкий фокус").clicked() {
-                postfx.dof_enabled = 1.0;
-                postfx.dof_focus_distance = 1.5;
-                postfx.dof_focus_range = 0.3;
-                postfx.dof_max_blur = 16.0;
-                postfx.dof_blur_falloff = 1.5;
-            }
-            if ui.button("Landscape").on_hover_text("Всё резкое, размыт только дальний план").clicked() {
-                postfx.dof_enabled = 1.0;
-                postfx.dof_focus_distance = 40.0;
-                postfx.dof_focus_range = 30.0;
-                postfx.dof_max_blur = 6.0;
-                postfx.dof_blur_falloff = 8.0;
             }
             if ui.button("Disable").clicked() {
                 postfx.dof_enabled = 0.0;
@@ -2676,30 +2573,20 @@ fn draw_renderer_panel(
         });
     });
 
-    // Спринт 2.2: Motion Blur
     ui.separator();
     egui::CollapsingHeader::new("💨 Motion Blur").default_open(false).show(ui, |ui| {
         let mut enabled = postfx.motion_blur_enabled > 0.5;
         if ui.checkbox(&mut enabled, "Enable motion blur").changed() {
             postfx.motion_blur_enabled = if enabled { 1.0 } else { 0.0 };
         }
-
         ui.add_enabled_ui(enabled, |ui| {
-            ui.add(egui::Slider::new(&mut postfx.motion_blur_intensity, 0.0..=2.0)
-                .text("Intensity"));
-            ui.label(egui::RichText::new("Множитель скорости в пиксели. 1.0 = как в motion buffer.")
-                .small().weak().italics());
-
-            ui.add(egui::Slider::new(&mut postfx.motion_blur_max_px, 4.0..=120.0)
-                .logarithmic(true).text("Max blur length (px)"));
-
+            ui.add(egui::Slider::new(&mut postfx.motion_blur_intensity, 0.0..=2.0).text("Intensity"));
+            ui.add(egui::Slider::new(&mut postfx.motion_blur_max_px, 4.0..=120.0).logarithmic(true).text("Max blur length (px)"));
             let mut samples = postfx.motion_blur_samples as i32;
-            if ui.add(egui::Slider::new(&mut samples, 2..=24)
-                .text("Samples")).changed() {
+            if ui.add(egui::Slider::new(&mut samples, 2..=24).text("Samples")).changed() {
                 postfx.motion_blur_samples = samples.max(2) as u32;
             }
         });
-
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             if ui.button("Subtle").clicked() {
@@ -2708,17 +2595,11 @@ fn draw_renderer_panel(
                 postfx.motion_blur_max_px = 16.0;
                 postfx.motion_blur_samples = 8;
             }
-            if ui.button("Cinematic").on_hover_text("Заметный blur при быстром движении").clicked() {
+            if ui.button("Cinematic").clicked() {
                 postfx.motion_blur_enabled = 1.0;
                 postfx.motion_blur_intensity = 0.8;
                 postfx.motion_blur_max_px = 48.0;
                 postfx.motion_blur_samples = 14;
-            }
-            if ui.button("Speed").on_hover_text("Драматичный blur (racing, dash)").clicked() {
-                postfx.motion_blur_enabled = 1.0;
-                postfx.motion_blur_intensity = 1.5;
-                postfx.motion_blur_max_px = 100.0;
-                postfx.motion_blur_samples = 20;
             }
             if ui.button("Disable").clicked() {
                 postfx.motion_blur_enabled = 0.0;
@@ -2731,10 +2612,12 @@ fn draw_renderer_panel(
         ui.add(egui::Slider::new(&mut postfx.ssao_strength, 0.0..=2.0).text("Strength"));
         ui.add(egui::Slider::new(&mut postfx.ssao_radius, 0.05..=2.0).text("Radius"));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("IBL").default_open(true).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.ibl_strength, 0.0..=3.0).text("IBL strength"));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("Fog (height)").default_open(false).show(ui, |ui| {
         let mut c = postfx.fog_color;
@@ -2743,20 +2626,21 @@ fn draw_renderer_panel(
         ui.add(egui::Slider::new(&mut postfx.fog_height_base, -10.0..=20.0).text("Height base"));
         ui.add(egui::Slider::new(&mut postfx.fog_height_falloff, 0.0..=0.5).text("Height falloff"));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("Volumetric fog").default_open(true).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.volumetric_density, 0.0..=0.02).logarithmic(true).text("Density"));
-        ui.label(egui::RichText::new("0 = выключено. 0.02..0.05 — плотный туман с god rays.").small().weak());
-        ui.add(egui::Slider::new(&mut postfx.volumetric_scattering, 0.0..=1.0).text("Scattering (albedo)"));
-        ui.add(egui::Slider::new(&mut postfx.volumetric_phase_g, 0.0..=0.9).text("Phase g (god rays)"));
-        ui.label(egui::RichText::new("Больше g → сильнее forward scattering.").small().weak());
+        ui.add(egui::Slider::new(&mut postfx.volumetric_scattering, 0.0..=1.0).text("Scattering"));
+        ui.add(egui::Slider::new(&mut postfx.volumetric_phase_g, 0.0..=0.9).text("Phase g"));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("Screen effects").default_open(false).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.vignette_strength, 0.0..=1.0).text("Vignette"));
         ui.add(egui::Slider::new(&mut postfx.film_grain, 0.0..=1.0).text("Film grain"));
         ui.add(egui::Slider::new(&mut postfx.chromatic_aberration, 0.0..=1.0).text("Chromatic ab."));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("Shadows").default_open(false).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.shadow_bias, 0.0..=0.01).text("Depth bias"));
@@ -2764,6 +2648,7 @@ fn draw_renderer_panel(
         ui.add(egui::Slider::new(&mut postfx.shadow_fade_start, 50.0..=250.0).text("Fade start"));
         ui.add(egui::Slider::new(&mut postfx.shadow_fade_end, 60.0..=300.0).text("Fade end"));
     });
+
     ui.separator();
     egui::CollapsingHeader::new("LOD").default_open(false).show(ui, |ui| {
         ui.add(egui::Slider::new(&mut postfx.lod_bias, 0.2..=4.0).logarithmic(true).text("LOD bias"));
@@ -2775,6 +2660,7 @@ fn draw_renderer_panel(
         if d[1] <= d[0] { d[1] = d[0] + 1.0; }
         if d[2] <= d[1] { d[2] = d[1] + 1.0; }
     });
+
     ui.separator();
     ui.label("Debug view");
     ui.horizontal_wrapped(|ui| {
@@ -2785,6 +2671,7 @@ fn draw_renderer_panel(
         debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::HdrPreBloom, "HDR");
         debug_button(ui, &mut postfx.debug_view, crate::render::DebugView::CsmCascade0, "CSM");
     });
+
     ui.separator();
     draw_play_settings(ui, editor);
     ui.separator();
@@ -2805,55 +2692,10 @@ fn draw_play_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
 
         ui.separator();
         ui.label(egui::RichText::new("Feel").strong());
-        ui.add(egui::Slider::new(&mut p.coyote_time, 0.0..=0.5)
-            .text("Coyote time (s)")
-            .fixed_decimals(2))
-            .on_hover_text(
-                "Время после схода с платформы, когда прыжок ещё срабатывает. \
-                 0.1-0.2 — стандарт для платформеров."
-            );
-        ui.add(egui::Slider::new(&mut p.jump_buffer_time, 0.0..=0.5)
-            .text("Jump buffer (s)")
-            .fixed_decimals(2))
-            .on_hover_text(
-                "Если игрок нажал прыжок за N секунд до касания земли — \
-                 прыжок сработает автоматически при контакте."
-            );
-        ui.add(egui::Slider::new(&mut p.ground_accel_tau, 0.01..=0.3)
-            .text("Ground accel τ (s)")
-            .fixed_decimals(3))
-            .on_hover_text("Меньше = резче разгон/торможение на земле.");
-        ui.add(egui::Slider::new(&mut p.air_accel_tau, 0.05..=1.0)
-            .text("Air accel τ (s)")
-            .fixed_decimals(2))
-            .on_hover_text("Больше = меньше контроля в воздухе.");
-
-        ui.separator();
-        ui.label(egui::RichText::new("Slope / step").strong());
-        ui.add(egui::Slider::new(&mut p.step_down_max, 0.0..=1.5)
-            .text("Step-down max (m)")
-            .fixed_decimals(2))
-            .on_hover_text(
-                "Максимальная высота уступа, к которому персонаж \
-                 «прилипает» при спуске. 0.0 — выключает step-down."
-            );
-        let mut walk_deg = p.slope_walk_limit_cos.acos().to_degrees();
-        let r = ui.add(egui::Slider::new(&mut walk_deg, 10.0..=80.0)
-            .text("Walkable slope (°)")
-            .fixed_decimals(0));
-        if r.changed() {
-            p.slope_walk_limit_cos = walk_deg.to_radians().cos();
-        }
-        ui.add(egui::Slider::new(&mut p.slope_slide_speed, 0.0..=20.0)
-            .text("Slope slide speed (m/s)")
-            .fixed_decimals(1))
-            .on_hover_text("Скорость скольжения по вертикальной стене.");
-        if p.ground_normal.y < 0.999 {
-            ui.label(egui::RichText::new(format!(
-                "ground normal: ({:.2}, {:.2}, {:.2})",
-                p.ground_normal.x, p.ground_normal.y, p.ground_normal.z,
-            )).small().weak().monospace());
-        }
+        ui.add(egui::Slider::new(&mut p.coyote_time, 0.0..=0.5).text("Coyote time (s)").fixed_decimals(2));
+        ui.add(egui::Slider::new(&mut p.jump_buffer_time, 0.0..=0.5).text("Jump buffer (s)").fixed_decimals(2));
+        ui.add(egui::Slider::new(&mut p.ground_accel_tau, 0.01..=0.3).text("Ground accel τ (s)").fixed_decimals(3));
+        ui.add(egui::Slider::new(&mut p.air_accel_tau, 0.05..=1.0).text("Air accel τ (s)").fixed_decimals(2));
 
         ui.separator();
         ui.label("Player capsule");
@@ -2861,38 +2703,22 @@ fn draw_play_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
         ui.add(egui::Slider::new(&mut p.player_height, 0.5..=3.0).text("Height"));
 
         ui.separator();
-        ui.label("Crouch (Ctrl)");
-        ui.add(egui::Slider::new(&mut p.crouch_height, 0.5..=1.7).text("Eye height"));
-        ui.add(egui::Slider::new(&mut p.crouch_speed_mult, 0.1..=1.0).text("Speed mult"));
-
-        ui.separator();
         ui.label("Combat");
         ui.add(egui::Slider::new(&mut p.max_health, 10.0..=500.0).text("Max HP"));
         ui.add(egui::Slider::new(&mut p.max_ammo, 0..=500).text("Max ammo"));
         ui.add(egui::Slider::new(&mut p.damage_per_shot, 1.0..=200.0).text("Damage"));
         ui.add(egui::Slider::new(&mut p.gun_range, 5.0..=500.0).text("Range"));
-        ui.add(egui::Slider::new(&mut p.bullet_speed, 0.0..=300.0).text("Bullet speed"));
-        ui.add(egui::Slider::new(&mut p.fire_cooldown_max, 0.02..=1.0).text("Fire cd"));
-        ui.add(egui::Slider::new(&mut p.interact_distance, 1.0..=20.0).text("Interact dist"));
-
-        ui.separator();
-        ui.checkbox(&mut p.bob_enabled, "Head bob");
-        ui.add(egui::Slider::new(&mut p.bob_amplitude, 0.0..=0.15).text("Bob amplitude"));
 
         ui.separator();
         ui.checkbox(&mut p.show_crosshair, "Show crosshair");
         ui.checkbox(&mut p.show_hud, "Show HUD");
-        ui.checkbox(&mut p.show_health, "Show health bar");
-        ui.checkbox(&mut p.show_ammo, "Show ammo bar");
     });
 }
 
 fn draw_fly_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Fly (RMB)").default_open(false).show(ui, |ui| {
-        ui.label("WASD — move, E/Q or Space — up/down");
+        ui.label("WASD — move, E/Q — up/down");
         ui.label("Shift — faster, Ctrl — slower");
-        ui.label("Scroll during fly — fly speed");
-        ui.separator();
         ui.add(egui::Slider::new(&mut editor.fly_speed, 1.0..=100.0).text("Fly speed"));
         ui.add(egui::Slider::new(&mut editor.fly_sensitivity, 0.0005..=0.01).text("Fly sensitivity"));
     });
@@ -2926,28 +2752,6 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         for (e, _) in &with_tf { if let Some(t) = world.get_mut::<Transform>(*e) { t.position = new_pos; } }
     }
 
-    let eulers: Vec<Vec3> = with_tf.iter().map(|(_, t)| {
-        let (y, x, z) = t.rotation.to_euler(glam::EulerRot::YXZ);
-        Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees())
-    }).collect();
-    let rot_common = common_vec3(eulers.iter().copied());
-    let mixed_rot = rot_common.is_none();
-    let mut rot = rot_common.unwrap_or(Vec3::ZERO).to_array();
-    ui.label(if mixed_rot { egui::RichText::new("Rotation (deg, mixed)").weak() } else { egui::RichText::new("Rotation (deg)") });
-    let mut rot_changed = false;
-    ui.horizontal(|ui| {
-        for i in 0..3 {
-            let r = ui.add(egui::DragValue::new(&mut rot[i]).speed(0.5).prefix(["X ", "Y ", "Z "][i]));
-            if r.changed() { rot_changed = true; }
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-        }
-    });
-    if rot_changed {
-        let q = glam::Quat::from_euler(glam::EulerRot::YXZ,
-            rot[1].to_radians(), rot[0].to_radians(), rot[2].to_radians());
-        for (e, _) in &with_tf { if let Some(t) = world.get_mut::<Transform>(*e) { t.rotation = q; } }
-    }
-
     let scales: Vec<Vec3> = with_tf.iter().map(|(_, t)| t.scale).collect();
     let scale_common = common_vec3(scales.iter().copied());
     let mixed_scale = scale_common.is_none();
@@ -2965,32 +2769,12 @@ fn draw_multi_edit(ui: &mut egui::Ui, world: &mut World, editor: &mut EditorStat
         let new_scale = Vec3::from_array(scale);
         for (e, _) in &with_tf { if let Some(t) = world.get_mut::<Transform>(*e) { t.scale = new_scale; } }
     }
-
-    let tiled: Vec<(Entity, f32)> = selected.iter()
-        .filter_map(|&e| world.get::<TextureTiling>(e).map(|t| (e, t.size))).collect();
-    if tiled.is_empty() { return; }
-    ui.separator();
-    ui.label(egui::RichText::new(format!("Texture Tiling ({} objects)", tiled.len())).strong());
-    let common_size = common_vec3(tiled.iter().map(|(_, s)| Vec3::splat(*s)));
-    let mixed = common_size.is_none();
-    let mut size = common_size.unwrap_or(Vec3::ONE).x;
-    ui.label(if mixed { egui::RichText::new("Tile size (mixed)").weak() } else { egui::RichText::new("Tile size (world units)") });
-    let r = ui.add(egui::Slider::new(&mut size, 0.05..=50.0).logarithmic(true));
-    if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-    if r.changed() {
-        for &(e, _) in &tiled { if let Some(t) = world.get_mut::<TextureTiling>(e) { t.size = size; } }
-    }
 }
 
 fn common_vec3<I: Iterator<Item = Vec3>>(mut it: I) -> Option<Vec3> {
     let first = it.next()?;
     for v in it { if (v - first).length() > 1e-4 { return None; } }
     Some(first)
-}
-
-#[allow(dead_code)]
-fn draw_play_hud(_ctx: &egui::Context, _play: &PlayState, _stats: &Stats) {
-    // Отключено: runtime UI из Game::collect_ui рисует crosshair/health/ammo.
 }
 
 fn component_badges(world: &World, e: Entity) -> String {
@@ -3022,15 +2806,6 @@ fn component_badges(world: &World, e: Entity) -> String {
     if world.has::<crate::game::ai::AiAgent>(e) { s.push_str("🤖 "); }
     if world.has::<crate::game::ai::Enemy>(e) { s.push_str("👹 "); }
     if world.has::<crate::game::ai::AiTarget>(e) { s.push_str("🎯 "); }
-
-    if world.has::<Parent>(e) {
-        if let Some(rb) = world.get::<RigidBody>(e) {
-            if rb.body_type != BodyType::Static {
-                s.push_str("⚠ ");
-            }
-        }
-    }
-
     s.trim_end().to_string()
 }
 
@@ -3071,32 +2846,17 @@ fn texture_picker(
             if textures.is_empty() {
                 ui.label(egui::RichText::new("(no textures loaded)").weak().italics());
             }
-            for (name, w, h, is_srgb) in textures {
+            for (name, _w, _h, is_srgb) in textures {
                 let selected = current.as_deref() == Some(name.as_str());
-
                 let tag = if *is_srgb { "[sRGB]" } else { "[Linear]" };
                 let tag_color = if *is_srgb {
                     egui::Color32::from_rgb(230, 200, 130)
                 } else {
                     egui::Color32::from_rgb(150, 200, 230)
                 };
-
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(tag)
-                            .small()
-                            .monospace()
-                            .color(tag_color),
-                    );
-                    let resp = ui.selectable_label(selected, name);
-                    if resp
-                        .on_hover_text(format!(
-                            "{}×{} pixels\nLoaded as: {}",
-                            w, h,
-                            if *is_srgb { "sRGB (color)" } else { "Linear (data)" },
-                        ))
-                        .clicked()
-                    {
+                    ui.label(egui::RichText::new(tag).small().monospace().color(tag_color));
+                    if ui.selectable_label(selected, name).clicked() {
                         *current = Some(name.clone());
                         changed = true;
                     }

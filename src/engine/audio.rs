@@ -1,21 +1,3 @@
-//! Процедурный и файловый аудио-движок на базе `rodio` 0.21.
-//!
-//! # Возможности
-//!
-//! * Процедурные звуки (`shot`/`explosion`/`pickup`/`ding`) — синтез в
-//!   памяти, ноль дисковых операций.
-//! * Загрузка из файлов (Фаза 4.3): `.wav`, `.ogg`, `.flac`, `.mp3`.
-//! * Spatial audio (Фаза 4.1): `AudioSource` + distance attenuation.
-//! * Шины (Фаза 4.2): Master / SFX / Music / Voice / UI.
-//! * ИЗМЕНЕНО (audio occlusion): проверка препятствий между
-//!   источником и слушателем — громкость падает при блокировке.
-//!
-//! # Про тесты
-//!
-//! `AudioSystem::new` открывает аудио-устройство — на CI его нет, и
-//! `cargo test` упал бы. Поэтому юнит-тесты работают с чистой функцией
-//! `effective_bus_volume`, а не с самим `AudioSystem`.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
