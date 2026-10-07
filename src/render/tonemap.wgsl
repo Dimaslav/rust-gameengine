@@ -1,31 +1,34 @@
 // Tonemap + post-processing финал.
 //
-// AgX (Sobotka 2022, "Minimal AgX").
-//
-// ИСПРАВЛЕНО: в оригинальном шейдере была потеряна нормализация.
-// Правильная формула:
-//
-//     x' = (log2(x) − AGX_MIN_EV) / (AGX_MAX_EV − AGX_MIN_EV)
-//
-// В старой версии было:
-//
-//     x' = log2(x) + ( −AGX_MIN_EV / (AGX_MAX_EV − AGX_MIN_EV) )
-//
-// Также убран post-AgX contrast-boost: он жёстко клипал значения
-// выше 0.9 в 1.0, обрезая highlight rolloff — ради которого AgX
-// и используется.
+// ИЗМЕНЕНО (Спринт 1.1 + 1.2):
+//   * добавлен выбор тонального маппера (AgX / ACES / Reinhard / Uncharted2 / None);
+//   * добавлен color grading: temperature, tint, contrast, saturation,
+//     ASC CDL (slope/gain + offset/lift + power/gamma);
+//   * exposure_bias (множитель к exposure).
+
+const PI: f32 = 3.14159265359;
+
+struct Params {
+    // x = bloom strength, y = exposure, z = time, w = unused
+    values: vec4<f32>,
+    // x = vignette, y = grain, z = chromatic, w = unused
+    effects: vec4<f32>,
+    // temperature, tint, contrast, saturation
+    grading_a: vec4<f32>,
+    // exposure_bias, tonemapper_id, unused, unused
+    grading_b: vec4<f32>,
+    // lift.rgb
+    lift: vec4<f32>,
+    // gain.rgb
+    gain: vec4<f32>,
+    // gamma.rgb
+    gamma: vec4<f32>,
+};
 
 @group(0) @binding(0) var t_hdr: texture_2d<f32>;
 @group(0) @binding(1) var t_bloom: texture_2d<f32>;
 @group(0) @binding(2) var s_lin: sampler;
 @group(0) @binding(3) var<uniform> params: Params;
-
-struct Params {
-    // x = bloom strength, y = exposure, z = time (для grain), w = unused
-    values: vec4<f32>,
-    // x = vignette_strength, y = grain_strength, z = chromatic_strength, w = unused
-    effects: vec4<f32>,
-};
 
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
@@ -51,7 +54,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 }
 
 // ============================================================
-// AgX tonemap (Sobotka 2022, "Minimal AgX")
+// AgX (Sobotka 2022, "Minimal AgX")
 // ============================================================
 
 const AGX_MAT_IN: mat3x3<f32> = mat3x3<f32>(
@@ -70,7 +73,6 @@ const AGX_MIN_EV: f32 = -12.47393;
 const AGX_MAX_EV: f32 = 4.026069;
 
 fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
-    // Полиномиальная аппроксимация sigmoid из AgX.
     let x2 = x * x;
     let x4 = x2 * x2;
     return 15.5 * x4 * x2
@@ -82,10 +84,9 @@ fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
          - 0.00232;
 }
 
-fn agx(x: vec3<f32>) -> vec3<f32> {
+fn tonemap_agx(x: vec3<f32>) -> vec3<f32> {
     var v = AGX_MAT_IN * x;
 
-    // Правильная нормализация AgX.
     let log_v = log2(max(v, vec3<f32>(1e-10)));
     v = clamp(
         (log_v - vec3<f32>(AGX_MIN_EV)) / (AGX_MAX_EV - AGX_MIN_EV),
@@ -93,17 +94,115 @@ fn agx(x: vec3<f32>) -> vec3<f32> {
         vec3<f32>(1.0),
     );
 
-    // Sigmoid.
     v = agx_default_contrast_approx(v);
 
-    // Обратно в linear.
     v = AGX_MAT_OUT * v;
 
-    return v;
+    return max(v, vec3<f32>(0.0));
 }
 
 // ============================================================
-// Hash / noise helpers
+// ACES Filmic (Narkowicz 2015 approximation)
+// ============================================================
+
+fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp(
+        (x * (a * x + b)) / (x * (c * x + d) + e),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+}
+
+// ============================================================
+// Reinhard: x / (1 + x)
+// ============================================================
+
+fn tonemap_reinhard(x: vec3<f32>) -> vec3<f32> {
+    return x / (1.0 + x);
+}
+
+// ============================================================
+// Uncharted 2 (Hable 2010)
+// ============================================================
+
+fn uncharted2_partial(x: vec3<f32>) -> vec3<f32> {
+    let A = 0.15;
+    let B = 0.50;
+    let C = 0.10;
+    let D = 0.20;
+    let E = 0.02;
+    let F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+fn tonemap_uncharted2(x: vec3<f32>) -> vec3<f32> {
+    let W: f32 = 11.2;
+    let curr = uncharted2_partial(x * 2.0);
+    let white_scale = 1.0 / uncharted2_partial(vec3<f32>(W));
+    return clamp(curr * white_scale, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// ============================================================
+// Dispatcher
+// ============================================================
+
+fn tonemapper_apply(id: u32, x: vec3<f32>) -> vec3<f32> {
+    switch (id) {
+        case 0u: { return tonemap_agx(x); }
+        case 1u: { return tonemap_aces(x); }
+        case 2u: { return tonemap_reinhard(x); }
+        case 3u: { return tonemap_uncharted2(x); }
+        default: { return clamp(x, vec3<f32>(0.0), vec3<f32>(1.0)); }
+    }
+}
+
+// ============================================================
+// Color grading
+// ============================================================
+
+fn apply_color_grading(c_in: vec3<f32>, p: Params) -> vec3<f32> {
+    let temperature = p.grading_a.x;
+    let tint        = p.grading_a.y;
+    let contrast    = p.grading_a.z;
+    let saturation  = p.grading_a.w;
+
+    var c = c_in;
+
+    // Temperature: +t → теплее (R+, B-), -t → холоднее.
+    let t = clamp(temperature, -1.0, 1.0);
+    c.r = c.r * (1.0 + t * 0.20);
+    c.b = c.b * (1.0 - t * 0.20);
+
+    // Tint: +t → пурпурный (R+, B+, G-), -t → зелёный.
+    let g = clamp(tint, -1.0, 1.0);
+    c.g = c.g * (1.0 - g * 0.15);
+    c.r = c.r * (1.0 + g * 0.05);
+    c.b = c.b * (1.0 + g * 0.05);
+
+    // ASC CDL: out = (in * slope + offset) ^ power
+    // slope = gain, offset = lift, power = 1 / gamma
+    let slope  = p.gain.rgb;
+    let offset = p.lift.rgb;
+    let power  = vec3<f32>(1.0) / max(p.gamma.rgb, vec3<f32>(0.01));
+    c = pow(max(c * slope + offset, vec3<f32>(0.0)), power);
+
+    // Contrast (pivot 0.5).
+    c = (c - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
+
+    // Saturation (Rec.709 luma).
+    let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(vec3<f32>(luma), c, saturation);
+
+    return c;
+}
+
+// ============================================================
+// Hash / noise
 // ============================================================
 
 fn hash13(p3_in: vec3<f32>) -> f32 {
@@ -112,21 +211,20 @@ fn hash13(p3_in: vec3<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Простой 3D value noise для film grain.
 fn film_grain(uv: vec2<f32>, t: f32) -> f32 {
     let p = vec3<f32>(uv * 1024.0, t);
     return hash13(p) * 2.0 - 1.0;
 }
 
 // ============================================================
-// fs_main
+// Main
 // ============================================================
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var uv = in.uv;
 
-    // --- Хроматическая аберрация ---------------------------------
+    // --- Хроматическая аберрация ---
     let chromatic = params.effects.z;
     var hdr: vec3<f32>;
     if (chromatic > 0.0001) {
@@ -144,23 +242,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         hdr = textureSample(t_hdr, s_lin, uv).rgb;
     }
 
-    // --- Bloom ---------------------------------------------------
+    // --- Bloom ---
     let bloom = textureSample(t_bloom, s_lin, uv).rgb;
     let strength = params.values.x;
     hdr = hdr + bloom * strength;
 
-    // --- Exposure ------------------------------------------------
-    hdr = hdr * params.values.y;
+    // --- Exposure ---
+    let exposure_bias = params.grading_b.x;
+    hdr = hdr * params.values.y * exposure_bias;
 
-    // --- AgX tonemap --------------------------------------------
-    // ИСПРАВЛЕНО: убран post-AgX contrast-boost. Он делал
-    //   out = 0.5 + (out - 0.5) * 1.25
-    // что для out = 0.9 давало 1.0, а для out = 0.95 → 1.0625 → clamp → 1.0.
-    // Это убивало highlight rolloff AgX и превращало светлые части
-    // сцены в чистый белый. AgX сам по себе имеет правильную кривую.
-    var out_rgb = agx(max(hdr, vec3<f32>(0.0)));
+    // --- Tonemap ---
+    let tm_id = u32(params.grading_b.y + 0.5);
+    var out_rgb = tonemapper_apply(tm_id, max(hdr, vec3<f32>(0.0)));
 
-    // --- Vignette ------------------------------------------------
+    // --- Color grading ---
+    out_rgb = apply_color_grading(out_rgb, params);
+
+    // --- Vignette ---
     let vignette = params.effects.x;
     if (vignette > 0.0001) {
         let center = vec2<f32>(0.5, 0.5);
@@ -169,7 +267,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_rgb = out_rgb * mix(1.0, v, vignette);
     }
 
-    // --- Film grain (в perceptual sRGB пространстве) ------------
+    // --- Film grain ---
     let grain = params.effects.y;
     if (grain > 0.0001) {
         let t = floor(params.values.z * 24.0);
@@ -179,5 +277,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_rgb = clamp(out_rgb + g * grain * 0.08 * grain_mod, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
-    return vec4<f32>(out_rgb, 1.0);
+    return vec4<f32>(clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

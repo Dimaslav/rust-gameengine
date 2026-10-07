@@ -146,12 +146,6 @@ pub(super) fn encode_csm_all(
     }
 }
 
-/// ИЗМЕНЕНО (#7): рендерит cube shadow maps для **всех** активных
-/// point-light теней, а не только для первой. `cube_count` ограничен
-/// `MAX_SHADOW_CUBES` сверху (значение приходит из `Renderer::render`).
-///
-/// Слоты нумеруются как `3 + cube * 6 + face`, что совпадает с
-/// нумерацией слоёв в `cube_shadow_texture` — слой `cube * 6 + face`.
 pub(super) fn encode_cube_shadow_all(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -553,8 +547,79 @@ pub(super) fn encode_volumetric_composite(
 }
 
 // ============================================================
-// TAA
+// Lens flare (Спринт 1.4)
 // ============================================================
+
+pub(super) fn encode_lens_flare_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("lens_flare_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_fog_view,
+            resolve_target: None,
+            ops: load(),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.lens_flare_pipeline);
+    pass.set_bind_group(0, &r.lens_flare_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
+// Depth of Field (Спринт 2.1)
+// ============================================================
+
+/// Читает `hdr_fog_view` + `gbuffer_normal_view` (depth в .a),
+/// пишет в `hdr_dof_view`. Если DOF выключен, шейдер копирует вход.
+pub(super) fn encode_dof_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("dof_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_dof_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::BLACK),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.dof_pipeline);
+    pass.set_bind_group(0, &r.dof_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
+// Motion Blur (Спринт 2.2)
+// ============================================================
+
+/// Читает `hdr_dof_view` + `motion_view`, пишет в `hdr_mb_view`.
+pub(super) fn encode_motion_blur_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("motion_blur_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_mb_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::BLACK),
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&r.motion_blur_pipeline);
+    pass.set_bind_group(0, &r.motion_blur_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
 
 pub(super) fn encode_taa_pass(
     r: &Renderer,
@@ -812,6 +877,5 @@ pub(super) fn encode_ui_pass(
     pass.set_pipeline(&r.ui_pipeline);
     pass.set_bind_group(0, &r.ui_global_bind_group, &[]);
     pass.set_vertex_buffer(0, r.ui_instance_buffer.slice(..));
-    // 6 вершин на инстанс (два треугольника).
     pass.draw(0..6, 0..instance_count);
 }

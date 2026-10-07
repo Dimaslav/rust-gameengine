@@ -12,11 +12,6 @@ pub struct BloomMip {
     pub size: (u32, u32),
 }
 
-/// ИЗМЕНЕНО (#6): `prefilter_bgs` теперь `[_; 3]`.
-///
-/// Индекс 0 — prefilter читает `taa_resolved_views[0]` (TAA on, write_idx = 0).
-/// Индекс 1 — prefilter читает `taa_resolved_views[1]` (TAA on, write_idx = 1).
-/// Индекс 2 — prefilter читает `hdr_fog_view`      (TAA off, bypass).
 pub struct BloomChain {
     pub mips: Vec<BloomMip>,
     pub sampler: wgpu::Sampler,
@@ -26,13 +21,10 @@ pub struct BloomChain {
     pub prefilter_uniform: wgpu::Buffer,
     pub downsample_uniforms: Vec<wgpu::Buffer>,
     pub upsample_uniforms: Vec<wgpu::Buffer>,
-    /// Размер экрана на момент построения цепочки (src для prefilter).
     pub screen_size: (u32, u32),
 }
 
 impl BloomChain {
-    /// Обновить threshold / knee / radius во всех uniform'ах цепочки,
-    /// сохранив texel-размеры каждого уровня.
     pub fn update_params(
         &self,
         queue: &wgpu::Queue,
@@ -43,7 +35,6 @@ impl BloomChain {
         let knee = knee.max(1e-4);
         let radius = radius.max(0.5);
 
-        // --- Prefilter: src = screen, dst = mip0.
         let src = self.screen_size;
         let dst = self.mips[0].size;
         let data = BloomParams {
@@ -57,7 +48,6 @@ impl BloomChain {
         };
         queue.write_buffer(&self.prefilter_uniform, 0, bytemuck::bytes_of(&data));
 
-        // --- Downsample: src = mips[i], dst = mips[i + 1].
         for i in 0..self.downsample_uniforms.len() {
             let src = self.mips[i].size;
             let dst = self.mips[i + 1].size;
@@ -77,7 +67,6 @@ impl BloomChain {
             );
         }
 
-        // --- Upsample.
         for i in 0..self.upsample_uniforms.len() {
             let src_level = BLOOM_MIP_COUNT - 1 - i;
             let src = self.mips[src_level].size;
@@ -104,31 +93,31 @@ pub struct SizeDependent {
     pub hdr_view: wgpu::TextureView,
     pub motion_view: wgpu::TextureView,
 
-    /// HDR после volumetric fog. TAA читает отсюда.
+    /// HDR после volumetric fog. Вход для DOF.
     pub hdr_fog_view: wgpu::TextureView,
     pub _hdr_fog_tex: wgpu::Texture,
+
+    /// HDR после DOF. Вход для motion blur.
+    pub hdr_dof_view: wgpu::TextureView,
+    pub _hdr_dof_tex: wgpu::Texture,
+
+    /// HDR после motion blur. Вход для TAA.
+    pub hdr_mb_view: wgpu::TextureView,
+    pub _hdr_mb_tex: wgpu::Texture,
 
     pub taa_resolved_views: [wgpu::TextureView; 2],
     pub _taa_resolved_tex: [wgpu::Texture; 2],
     pub taa_read_bgs: [wgpu::BindGroup; 2],
     pub taa_uniform: wgpu::Buffer,
 
-    /// Froxel-текстура volumetric fog.
     pub volumetric_fog_view: wgpu::TextureView,
     pub _volumetric_fog_tex: wgpu::Texture,
-    /// Bind group для compute-прохода.
     pub volumetric_compute_bg: wgpu::BindGroup,
-    /// Bind group для composite-прохода (fog + SSR).
     pub volumetric_composite_bg: wgpu::BindGroup,
 
     pub bloom_chain: BloomChain,
     pub linear_sampler: wgpu::Sampler,
 
-    /// ИЗМЕНЕНО (#6): `composite_bgs` теперь `[_; 3]`.
-    ///
-    /// Индекс 0 — composite читает `taa_resolved_views[0]` (TAA on, write_idx = 0).
-    /// Индекс 1 — composite читает `taa_resolved_views[1]` (TAA on, write_idx = 1).
-    /// Индекс 2 — composite читает `hdr_fog_view`      (TAA off, bypass).
     pub composite_bgs: [wgpu::BindGroup; 3],
 
     pub ldr_view: wgpu::TextureView,
@@ -173,10 +162,6 @@ pub fn build_size_dependent(
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
     csm_sampler: &wgpu::Sampler,
-    // ИЗМЕНЕНО (#7): теперь cube array вместо одного куба.
-    // Тип `TextureView` не меняется (view_dimension — свойство view'а,
-    // не Rust-типа), но семантически: этот view имеет dimension
-    // `CubeArray` и содержит `6 * MAX_SHADOW_CUBES` слоёв.
     cube_shadow_array_view: &wgpu::TextureView,
     cube_shadow_sampler: &wgpu::Sampler,
     camera_buffer: &wgpu::Buffer,
@@ -194,9 +179,7 @@ pub fn build_size_dependent(
     let ldr_view = create_color_target(device, "ldr", w, h, LDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
 
-    // ============================================================
-    // Volumetric fog (froxel) resources
-    // ============================================================
+    // Volumetric fog (froxel)
     let volumetric_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("volumetric_fog_3d"),
         size: wgpu::Extent3d {
@@ -249,9 +232,49 @@ pub fn build_size_dependent(
         ],
     });
 
-    // ============================================================
-    // TAA ping-pong resolved
-    // ============================================================
+    // HDR fog target (вход DOF)
+    let hdr_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr_fog"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let hdr_fog_view = hdr_fog_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // HDR DOF target (вход motion blur)
+    let hdr_dof_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr_dof"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let hdr_dof_view = hdr_dof_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // HDR motion blur target (вход TAA и bloom-index-2)
+    let hdr_mb_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr_mb"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let hdr_mb_view = hdr_mb_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // TAA ping-pong
     let taa_resolved_tex: [wgpu::Texture; 2] = std::array::from_fn(|i| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("taa_resolved_{}", i)),
@@ -276,23 +299,7 @@ pub fn build_size_dependent(
         mapped_at_creation: false,
     });
 
-    // ============================================================
-    // HDR + volumetric fog composite target.
-    // TAA читает отсюда, а не из hdr_view напрямую.
-    // ============================================================
-    let hdr_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("hdr_fog"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let hdr_fog_view = hdr_fog_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
+    // TAA читает hdr_mb_view (после motion blur).
     let taa_read_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("taa_read_bg"),
@@ -300,7 +307,7 @@ pub fn build_size_dependent(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&hdr_fog_view),
+                    resource: wgpu::BindingResource::TextureView(&hdr_mb_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -322,9 +329,7 @@ pub fn build_size_dependent(
         })
     });
 
-    // ============================================================
-    // G-buffer: 3 MRT + depth (+ motion отдельно)
-    // ============================================================
+    // G-buffer
     let gbuffer_albedo_view =
         create_color_target(device, "gbuffer_albedo", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_normal_view =
@@ -333,9 +338,7 @@ pub fn build_size_dependent(
         create_color_target(device, "gbuffer_emissive", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
 
-    // ============================================================
-    // Volumetric composite bind group (fog + SSR).
-    // ============================================================
+    // Volumetric composite
     let volumetric_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("volumetric_composite_bg"),
         layout: volumetric_composite_layout,
@@ -379,9 +382,7 @@ pub fn build_size_dependent(
         ],
     });
 
-    // ============================================================
     // SSAO
-    // ============================================================
     let ssao_view = create_color_target(device, "ssao", w, h, SSAO_FORMAT, 1, true);
     let ssao_blur_view = create_color_target(device, "ssao_blur", w, h, SSAO_FORMAT, 1, true);
 
@@ -439,8 +440,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // ИЗМЕНЕНО (#7): shadow2_bind_group binding 2 → cube_shadow_array_view.
-    // Layout (`shadow2_layout`) в `mod.rs` приведён к `CubeArray`.
     let shadow2_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shadow2_bind_group"),
         layout: shadow2_layout,
@@ -523,26 +522,23 @@ pub fn build_size_dependent(
         ],
     });
 
-    // ============================================================
-    // Bloom chain
-    // ============================================================
+    // Bloom chain — index 2 (TAA off) читает hdr_mb_view.
     let bloom_chain = build_bloom_chain(
         device,
         bloom_layout,
         &taa_resolved_views,
-        &hdr_fog_view,
+        &hdr_mb_view,
         w,
         h,
         bloom_knee,
         bloom_radius,
     );
 
-    // ИЗМЕНЕНО (#6): три варианта composite bind group.
     let composite_bgs: [wgpu::BindGroup; 3] = std::array::from_fn(|i| {
         let src_view: &wgpu::TextureView = if i < 2 {
             &taa_resolved_views[i]
         } else {
-            &hdr_fog_view
+            &hdr_mb_view
         };
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
@@ -632,6 +628,10 @@ pub fn build_size_dependent(
         motion_view,
         hdr_fog_view,
         _hdr_fog_tex: hdr_fog_tex,
+        hdr_dof_view,
+        _hdr_dof_tex: hdr_dof_tex,
+        hdr_mb_view,
+        _hdr_mb_tex: hdr_mb_tex,
         taa_resolved_views,
         _taa_resolved_tex: taa_resolved_tex,
         taa_read_bgs,
@@ -668,7 +668,7 @@ fn build_bloom_chain(
     device: &wgpu::Device,
     bloom_layout: &wgpu::BindGroupLayout,
     taa_resolved_views: &[wgpu::TextureView; 2],
-    hdr_fog_view: &wgpu::TextureView,
+    hdr_mb_view: &wgpu::TextureView,
     screen_w: u32,
     screen_h: u32,
     knee: f32,
@@ -725,12 +725,11 @@ fn build_bloom_chain(
         radius,
     );
 
-    // ИЗМЕНЕНО (#6): три prefilter bind group.
     let prefilter_bgs: [wgpu::BindGroup; 3] = std::array::from_fn(|i| {
         let src_view: &wgpu::TextureView = if i < 2 {
             &taa_resolved_views[i]
         } else {
-            hdr_fog_view
+            hdr_mb_view
         };
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_prefilter_bg"),

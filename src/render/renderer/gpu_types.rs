@@ -27,22 +27,15 @@ pub const VOLUMETRIC_GRID_D: u32 = 64;
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;
 
-/// ИЗМЕНЕНО (#7): максимум point-light'ов, для которых рендерится
-/// cube shadow map. Раньше значение было жёстко 1 — тени были только
-/// от первого point light в массиве, остальные светили сквозь стены.
-///
-/// Каждый куб — 6 depth-only рендер-пассов за кадр. `MAX_SHADOW_CUBES = 4`
-/// даёт 24 пасса + 3 CSM = 27. Увеличение до 8+ заметно просаживает
-/// FPS на больших сценах. При уменьшении до 2 тени будут только
-/// у первых двух point-light'ов.
 pub const MAX_SHADOW_CUBES: usize = 4;
 
-/// Общее число shadow-slot'ов в `shadow_pass_buffer`:
-/// 3 каскада CSM (слоты 0..3) + `MAX_SHADOW_CUBES` × 6 граней cube
-/// shadow (слоты 3..3+6*MAX_SHADOW_CUBES).
 pub const SHADOW_SLOT_COUNT: u64 = (3 + 6 * MAX_SHADOW_CUBES) as u64;
 
 pub const TAA_JITTER_SEQUENCE: u32 = 8;
+
+// ============================================================
+// GPU-структуры
+// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -66,7 +59,6 @@ pub struct CameraUniform {
     pub view: [[f32; 4]; 4],
     pub inv_view: [[f32; 4]; 4],
     pub camera_pos: [f32; 4],
-    /// xy = (near, far), zw = (jitter_x_px, jitter_y_px) текущего кадра.
     pub near_far: [f32; 4],
     pub prev_view_proj: [[f32; 4]; 4],
     pub screen_size: [f32; 4],
@@ -78,9 +70,6 @@ pub struct LightsUniform {
     pub cascade_vp: [[[f32; 4]; 4]; CASCADE_COUNT],
     pub cascade_splits: [f32; 4],
     pub ambient_color: [f32; 4],
-    /// x = dir_count, y = point_count, z = shadow_point_count (0..MAX_SHADOW_CUBES), w = unused.
-    /// ИЗМЕНЕНО (#7): `z` раньше был 0/1 (флаг «есть ли хоть один point shadow»),
-    /// теперь — фактическое число активных cube shadow maps.
     pub counts: [u32; 4],
     pub light_view_proj: [[f32; 4]; 4],
     pub misc: [f32; 4],
@@ -89,10 +78,6 @@ pub struct LightsUniform {
     pub shadow_params: [f32; 4],
     pub dir_lights: [[f32; 4]; 8],
     pub point_lights: [[f32; 4]; 32],
-    /// ИЗМЕНЕНО (#7): позиция + range для каждого из `MAX_SHADOW_CUBES`
-    /// point-light'ов, для которых активна cube shadow map. Раньше
-    /// заполнялся только [0], но `deferred_lighting.wgsl` уже читал
-    /// элементы по индексу — теперь это работает по назначению.
     pub cube_shadow_pos: [[f32; 4]; 4],
 }
 
@@ -118,11 +103,61 @@ pub struct BloomParams {
     pub params: [f32; 4],
 }
 
+// ============================================================
+// Tonemap (Спринт 1.1 + 1.2)
+// ============================================================
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TonemapParams {
     pub values: [f32; 4],
     pub effects: [f32; 4],
+    pub grading_a: [f32; 4],
+    pub grading_b: [f32; 4],
+    pub lift: [f32; 4],
+    pub gain: [f32; 4],
+    pub gamma: [f32; 4],
+}
+
+// ============================================================
+// Lens Flare (Спринт 1.4)
+// ============================================================
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct LensFlareParams {
+    pub sun_screen: [f32; 4],
+    pub sun_color: [f32; 4],
+    pub params: [f32; 4],
+}
+
+// ============================================================
+// Depth of Field (Спринт 2.1)
+// ============================================================
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct DofParams {
+    pub params: [f32; 4],
+    pub screen: [f32; 4],
+    pub depth: [f32; 4],
+}
+
+// ============================================================
+// Motion Blur (Спринт 2.2)
+// ============================================================
+
+/// Uniform для motion blur.
+///
+/// Layout (32 байта):
+///   params: x = intensity (множитель velocity), y = max_blur_px,
+///           z = samples (float), w = unused
+///   screen: xy = (w_px, h_px), zw = unused
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct MotionBlurParams {
+    pub params: [f32; 4],
+    pub screen: [f32; 4],
 }
 
 #[repr(C)]
@@ -172,14 +207,6 @@ pub struct SsaoUniform {
     pub view: [[f32; 4]; 4],
 }
 
-/// Uniform TAA-пасса.
-///
-/// Layout (48 байт, кратен 16 — требование wgpu):
-///   values.xyzw   — (alpha, velocity_weight, sharpen, reset_flag)
-///   screen.xy     — (w_px, h_px)
-///   screen.zw     — jitter **текущего** кадра в пикселях
-///   prev_jitter.xy — jitter **предыдущего** кадра в пикселях
-///   prev_jitter.zw — unused (padding)
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TaaParams {
@@ -230,9 +257,44 @@ pub struct MeshDraw {
     pub double_sided: bool,
 }
 
+// ============================================================
+// Дефолты для PostFx
+// ============================================================
+
 fn default_volumetric_density() -> f32 { 0.001 }
 fn default_volumetric_scattering() -> f32 { 0.4 }
 fn default_volumetric_phase_g() -> f32 { 0.6 }
+
+fn default_one() -> f32 { 1.0 }
+fn default_zero_rgb() -> [f32; 3] { [0.0, 0.0, 0.0] }
+fn default_one_rgb() -> [f32; 3] { [1.0, 1.0, 1.0] }
+
+fn default_lens_flare_threshold() -> f32 { 1.5 }
+fn default_lens_flare_ghosts() -> u32 { 6 }
+fn default_lens_flare_streak() -> f32 { 0.15 }
+
+fn default_dof_focus_distance() -> f32 { 10.0 }
+fn default_dof_focus_range() -> f32 { 3.0 }
+fn default_dof_max_blur() -> f32 { 8.0 }
+fn default_dof_blur_falloff() -> f32 { 4.0 }
+
+// Спринт 2.2: Motion blur defaults
+fn default_motion_blur_intensity() -> f32 { 0.5 }
+fn default_motion_blur_max() -> f32 { 32.0 }
+fn default_motion_blur_samples() -> u32 { 12 }
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Tonemapper {
+    AgX = 0,
+    ACESFilmic = 1,
+    Reinhard = 2,
+    Uncharted2 = 3,
+    None = 4,
+}
+
+impl Default for Tonemapper {
+    fn default() -> Self { Self::AgX }
+}
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostFx {
@@ -268,6 +330,58 @@ pub struct PostFx {
     pub volumetric_scattering: f32,
     #[serde(default = "default_volumetric_phase_g")]
     pub volumetric_phase_g: f32,
+
+    // Спринт 1.1 + 1.2
+    #[serde(default)]
+    pub tonemapper: Tonemapper,
+    #[serde(default = "default_one")]
+    pub exposure_bias: f32,
+    #[serde(default)]
+    pub color_temperature: f32,
+    #[serde(default)]
+    pub color_tint: f32,
+    #[serde(default = "default_one")]
+    pub color_contrast: f32,
+    #[serde(default = "default_one")]
+    pub color_saturation: f32,
+    #[serde(default = "default_zero_rgb")]
+    pub color_lift: [f32; 3],
+    #[serde(default = "default_one_rgb")]
+    pub color_gain: [f32; 3],
+    #[serde(default = "default_one_rgb")]
+    pub color_gamma: [f32; 3],
+
+    // Спринт 1.4
+    #[serde(default)]
+    pub lens_flare_intensity: f32,
+    #[serde(default = "default_lens_flare_threshold")]
+    pub lens_flare_threshold: f32,
+    #[serde(default = "default_lens_flare_ghosts")]
+    pub lens_flare_ghosts: u32,
+    #[serde(default = "default_lens_flare_streak")]
+    pub lens_flare_streak: f32,
+
+    // Спринт 2.1
+    #[serde(default)]
+    pub dof_enabled: f32,
+    #[serde(default = "default_dof_focus_distance")]
+    pub dof_focus_distance: f32,
+    #[serde(default = "default_dof_focus_range")]
+    pub dof_focus_range: f32,
+    #[serde(default = "default_dof_max_blur")]
+    pub dof_max_blur: f32,
+    #[serde(default = "default_dof_blur_falloff")]
+    pub dof_blur_falloff: f32,
+
+    // === Спринт 2.2: Motion Blur ===
+    #[serde(default)]
+    pub motion_blur_enabled: f32,
+    #[serde(default = "default_motion_blur_intensity")]
+    pub motion_blur_intensity: f32,
+    #[serde(default = "default_motion_blur_max")]
+    pub motion_blur_max_px: f32,
+    #[serde(default = "default_motion_blur_samples")]
+    pub motion_blur_samples: u32,
 }
 
 impl Default for PostFx {
@@ -301,9 +415,39 @@ impl Default for PostFx {
             volumetric_density: 0.001,
             volumetric_scattering: 0.4,
             volumetric_phase_g: 0.6,
+
+            tonemapper: Tonemapper::AgX,
+            exposure_bias: 1.0,
+            color_temperature: 0.0,
+            color_tint: 0.0,
+            color_contrast: 1.0,
+            color_saturation: 1.0,
+            color_lift: [0.0, 0.0, 0.0],
+            color_gain: [1.0, 1.0, 1.0],
+            color_gamma: [1.0, 1.0, 1.0],
+
+            lens_flare_intensity: 0.0,
+            lens_flare_threshold: 1.5,
+            lens_flare_ghosts: 6,
+            lens_flare_streak: 0.15,
+
+            dof_enabled: 0.0,
+            dof_focus_distance: 10.0,
+            dof_focus_range: 3.0,
+            dof_max_blur: 8.0,
+            dof_blur_falloff: 4.0,
+
+            motion_blur_enabled: 0.0,
+            motion_blur_intensity: 0.5,
+            motion_blur_max_px: 32.0,
+            motion_blur_samples: 12,
         }
     }
 }
+
+// ============================================================
+// Helper-функции
+// ============================================================
 
 pub struct MaterialGpu {
     pub bind_group: wgpu::BindGroup,
