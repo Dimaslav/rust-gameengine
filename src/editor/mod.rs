@@ -1,6 +1,7 @@
 //! Редактор.
 
 pub mod camera_bookmarks;
+pub mod content_browser;
 pub mod gizmo;
 pub mod inspector_audio;
 pub mod palette;
@@ -124,7 +125,6 @@ pub enum EditorAction {
     PreviewSound(String),
 
     // === Фаза 6: AI ===
-    /// Пересчитать navmesh из текущей сцены.
     BakeNavmesh,
 }
 
@@ -244,7 +244,9 @@ impl EditorState {
 }
 
 impl Default for EditorState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Editor {
@@ -282,7 +284,9 @@ impl Editor {
         window: &Window,
         event: &winit::event::WindowEvent,
     ) -> bool {
-        if !self.enabled { return false; }
+        if !self.enabled {
+            return false;
+        }
         self.egui_state.on_window_event(window, event).consumed
     }
 }

@@ -36,6 +36,7 @@ pub struct UiState {
     pub command_palette_query: String,
     pub command_palette_selected: usize,
     pub show_bookmarks_panel: bool,
+    pub show_content_browser: bool,
 }
 
 impl UiState {
@@ -48,6 +49,7 @@ impl UiState {
             component_filter: String::new(), initialized: false,
             command_palette_open: false, command_palette_query: String::new(),
             command_palette_selected: 0, show_bookmarks_panel: false,
+            show_content_browser: false,
         }
     }
 }
@@ -86,6 +88,7 @@ pub fn draw(
     ctx: &egui::Context, state: &mut UiState, editor: &mut EditorState,
     world: &mut World, postfx: &mut PostFx, stats: &Stats, assets: &UiAssets<'_>,
     audio: &AudioSnapshot,
+    asset_db: &mut crate::assets::AssetDatabase,
 ) -> Option<EditorAction> {
     let mut action: Option<EditorAction> = None;
     initialize_from_settings(state, editor);
@@ -101,6 +104,14 @@ pub fn draw(
         draw_audio_panel(ctx, state, audio, &mut action);
     }
     crate::editor::inspector_audio::draw_window(ctx, editor, world, audio, &mut action);
+
+    // Content Browser — новая панель.
+    crate::editor::content_browser::draw_window(
+        ctx,
+        &mut state.show_content_browser,
+        asset_db,
+    );
+
     if editor.play.active {
         if editor.play.paused {
             draw_pause_overlay(ctx, editor, &mut action);
@@ -348,6 +359,8 @@ fn draw_top_bar(ctx: &egui::Context, state: &mut UiState, editor: &mut EditorSta
                 ui.toggle_value(&mut state.show_stats_panel, "Stats");
                 ui.toggle_value(&mut state.show_bookmarks_panel, "📷");
                 ui.toggle_value(&mut state.show_audio_panel, "🔊");
+                ui.toggle_value(&mut state.show_content_browser, "📁")
+                    .on_hover_text("Content Browser");
             });
         });
     });

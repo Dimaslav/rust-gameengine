@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+mod assets;
 mod ecs;
 mod editor;
 mod engine;
@@ -630,7 +631,22 @@ impl DemoGame {
 }
 
 impl Game for DemoGame {
-    fn init(&mut self, _world: &mut World, renderer: &mut Renderer) {
+    // ИЗМЕНЕНО: используем init_with_assets, чтобы получить доступ
+    // к AssetDatabase и залогировать найденные ассеты.
+    // Старый init() остаётся в трейте с дефолтной реализацией —
+    // существующий код без изменений продолжает работать.
+    fn init_with_assets(
+        &mut self,
+        _world: &mut World,
+        renderer: &mut Renderer,
+        assets: &crate::assets::AssetDatabase,
+    ) {
+        log::info!(
+            "DemoGame: AssetDatabase reports {} assets under {}",
+            assets.len(),
+            assets.root().display()
+        );
+
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));

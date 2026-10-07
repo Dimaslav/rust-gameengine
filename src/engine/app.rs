@@ -43,6 +43,19 @@ use super::time::Time;
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
+
+    /// Расширенная инициализация с доступом к `AssetDatabase`.
+    /// По умолчанию просто вызывает `init`, так что существующий
+    /// код продолжает работать без изменений.
+    fn init_with_assets(
+        &mut self,
+        world: &mut World,
+        renderer: &mut Renderer,
+        _assets: &crate::assets::AssetDatabase,
+    ) {
+        self.init(world, renderer);
+    }
+
     fn configure_input(&mut self, _map: &mut crate::engine::InputMap) {}
 
     /// ИЗМЕНЕНО (Фаза 6): движок вызывает этот метод каждый кадр
@@ -112,10 +125,9 @@ pub struct App<G: Game> {
     navmesh: Option<Navmesh>,
     ai_system: AiSystem,
 
-    /// ИЗМЕНЕНО (sound perception): счётчик шагов игрока для эмита
-    /// `NoiseEvent::Footstep`. Инкрементируется в `update_player`,
-    /// сбрасывается в 0 каждые `FOOTSTEP_INTERVAL` секунд.
     footstep_timer: f32,
+    pub asset_db: crate::assets::AssetDatabase,
+    hot_reload: crate::assets::HotReload,
 }
 
 impl<G: Game> Drop for App<G> {
@@ -164,7 +176,12 @@ impl<G: Game> App<G> {
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         let mut world = World::new();
         game.camera_mut().set_viewport(renderer.size.width, renderer.size.height);
-        game.init(&mut world, &mut renderer);
+
+        // AssetDatabase открываем ДО init — чтобы Game мог её использовать.
+        let asset_db = crate::assets::AssetDatabase::open("assets")
+            .expect("failed to open assets directory");
+
+        game.init_with_assets(&mut world, &mut renderer, &asset_db);
 
         let input = {
             let mut input = Input::new();
@@ -190,6 +207,8 @@ impl<G: Game> App<G> {
             navmesh: None,
             ai_system: AiSystem::new(),
             footstep_timer: 0.0,
+            asset_db,
+            hot_reload: crate::assets::HotReload::new(),
         };
         let initial_postfx = app.editor.state.settings.postfx;
         app.game.apply_postfx(initial_postfx);
@@ -955,6 +974,13 @@ impl<G: Game> App<G> {
         self.time.tick();
         self.input.tick_begin_frame();
 
+        // Hot-reload ассетов. Дёшево — проверка раз в ~0.75 сек.
+        let reloaded = self.hot_reload.tick(&mut self.asset_db, &mut self.renderer);
+        if !reloaded.is_empty() {
+            // Инвалидируем pickable-кэш: если изменились меши — он устарел.
+            self.pickable = None;
+        }
+
         self.pickable = None;
 
         let dt = self.time.delta;
@@ -1177,11 +1203,13 @@ impl<G: Game> App<G> {
         let ui_state = &mut self.ui_state;
         let editor_state = &mut self.editor.state;
         let world = &mut self.world;
+        let asset_db = &mut self.asset_db;
 
         let full_output = egui_ctx.run(raw_input, |ctx| {
             let action = editor_ui::draw(
                 ctx, ui_state, editor_state, world,
                 &mut postfx, &stats, &assets, &audio_snapshot,
+                asset_db,
             );
             if let Some(a) = action { editor_state.pending_action = Some(a); }
         });
