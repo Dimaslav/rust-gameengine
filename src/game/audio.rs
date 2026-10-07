@@ -6,6 +6,11 @@
 //! `AudioBus` (Фаза 4.2) — маршрутизация звука на шину. Громкость
 //! шины применяется поверх spatial attenuation, давая пользователю
 //! независимые ползунки «Master / SFX / Music / Voice / UI».
+//!
+//! ИЗМЕНЕНО (audio occlusion): добавлены `occlusion` и
+//! `occlusion_volume`. При включённом флаге `AudioSystem::update`
+//! делает raycast между слушателем и источником, и при блокировке
+//! громкость умножается на `occlusion_volume` (по умолчанию 0.3).
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -71,7 +76,7 @@ impl Default for AudioBus {
 /// `AudioSystem::load_sound_from_file`).
 ///
 /// Итоговая громкость = `volume * attenuation(distance) * bus_volume(bus)
-/// * bus_volume(Master)`.
+/// * bus_volume(Master) * occlusion_factor`.
 #[derive(Debug, Clone)]
 pub struct AudioSource {
     pub sound: String,
@@ -97,6 +102,29 @@ pub struct AudioSource {
     /// `true` — играть. Управляется игрой. Если `looping == false`
     /// и звук доиграл до конца, система сбросит флаг в `false`.
     pub playing: bool,
+
+    /// ИЗМЕНЕНО (audio occlusion): включить проверку препятствий
+    /// между источником и слушателем.
+    ///
+    /// Если `true`, `AudioSystem::update` делает raycast по
+    /// статическим коллайдерам (`physics::navmesh::segment_clear`).
+    /// При блокировке итоговая громкость умножается на
+    /// `occlusion_volume`.
+    ///
+    /// Стоимость: один raycast на активный spatial-звук в кадр
+    /// (обычно <20). При 20 звуках × 1000 коллайдеров = 20k
+    /// AABB-тестов в кадр. Приемлемо, но если станет дорого —
+    /// кэшировать результат на 5-10 кадров.
+    pub occlusion: bool,
+
+    /// Множитель громкости при заблокированном сегменте.
+    ///
+    /// * `1.0` — эффект отключён (громкость не меняется).
+    /// * `0.3` — «приглушено за стеной» (дефолт).
+    /// * `0.0` — полностью тихо за препятствием.
+    ///
+    /// Клампится в `[0, 1]`.
+    pub occlusion_volume: f32,
 }
 
 impl AudioSource {
@@ -110,9 +138,12 @@ impl AudioSource {
             max_distance: 20.0,
             looping: false,
             playing: true,
+            occlusion: true,
+            occlusion_volume: 0.3,
         }
     }
 
+    /// Non-spatial звук. Полезно для UI, глобальных эффектов.
     pub fn non_spatial(sound: impl Into<String>) -> Self {
         Self {
             max_distance: 0.0,
@@ -120,6 +151,7 @@ impl AudioSource {
         }
     }
 
+    /// Зацикленный (например, вентилятор, огонь).
     pub fn looping(sound: impl Into<String>) -> Self {
         Self {
             looping: true,
@@ -145,6 +177,17 @@ impl AudioSource {
     pub fn with_range(mut self, min: f32, max: f32) -> Self {
         self.min_distance = min.max(0.0);
         self.max_distance = max.max(self.min_distance);
+        self
+    }
+
+    /// ИЗМЕНЕНО (audio occlusion): включить/настроить occlusion.
+    ///
+    /// `enabled == false` — raycast не делается, громкость не меняется.
+    /// `volume_when_blocked` — множитель при блокировке. `1.0` эквивалентно
+    /// выключению эффекта.
+    pub fn with_occlusion(mut self, enabled: bool, volume_when_blocked: f32) -> Self {
+        self.occlusion = enabled;
+        self.occlusion_volume = volume_when_blocked.clamp(0.0, 1.0);
         self
     }
 }
@@ -205,6 +248,7 @@ mod tests {
 
     #[test]
     fn attenuation_midpoint() {
+        // На середине (5.5 при 1..10) t=0.5, (1-0.5)^2 = 0.25.
         let a = attenuation(5.5, 1.0, 10.0);
         assert!((a - 0.25).abs() < 1e-4, "expected 0.25, got {}", a);
     }
@@ -232,11 +276,22 @@ mod tests {
             .with_bus(AudioBus::Ui)
             .with_volume(0.5)
             .with_pitch(1.5)
-            .with_range(2.0, 8.0);
+            .with_range(2.0, 8.0)
+            .with_occlusion(false, 0.0);
         assert_eq!(src.bus, AudioBus::Ui);
         assert_eq!(src.volume, 0.5);
         assert_eq!(src.pitch, 1.5);
         assert_eq!(src.min_distance, 2.0);
         assert_eq!(src.max_distance, 8.0);
+        assert!(!src.occlusion);
+        assert!((src.occlusion_volume - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn occlusion_volume_clamps() {
+        let src = AudioSource::new("x").with_occlusion(true, 5.0);
+        assert!((src.occlusion_volume - 1.0).abs() < 1e-6);
+        let src = AudioSource::new("x").with_occlusion(true, -3.0);
+        assert!((src.occlusion_volume - 0.0).abs() < 1e-6);
     }
 }

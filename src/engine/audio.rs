@@ -5,26 +5,10 @@
 //! * Процедурные звуки (`shot`/`explosion`/`pickup`/`ding`) — синтез в
 //!   памяти, ноль дисковых операций.
 //! * Загрузка из файлов (Фаза 4.3): `.wav`, `.ogg`, `.flac`, `.mp3`.
-//!   Файл декодируется один раз в `Vec<f32>` (моно) и кэшируется как
-//!   `Arc` — `play` становится атомарной операцией.
-//! * Spatial audio (Фаза 4.1): `AudioSource` компонент + distance
-//!   attenuation + плавное сглаживание громкости.
-//! * Шины (Фаза 4.2): Master / SFX / Music / Voice / UI. Громкость
-//!   шины применяется поверх spatial.
-//!
-//! # Про формат сэмплов
-//!
-//! `rodio::Decoder` в 0.21 нормализует все форматы в `f32` (через
-//! symphonia + dasp). Поэтому после `Decoder::new(...)` мы просто
-//! собираем итератор в `Vec<f32>` — никакого `convert_samples` не
-//! требуется. Проверено на wav / ogg / flac / mp3.
-//!
-//! # Про память
-//!
-//! Декодирование в память — стратегия для SFX (короткие, до 2-3 секунд).
-//! Длинная музыка (5+ минут) съест десятки MB. Streaming — отдельная
-//! итерация, требует собственного микшера (rodio не даёт seek-able
-//! Source без full decode).
+//! * Spatial audio (Фаза 4.1): `AudioSource` + distance attenuation.
+//! * Шины (Фаза 4.2): Master / SFX / Music / Voice / UI.
+//! * ИЗМЕНЕНО (audio occlusion): проверка препятствий между
+//!   источником и слушателем — громкость падает при блокировке.
 //!
 //! # Про тесты
 //!
@@ -89,6 +73,10 @@ struct ActiveSound {
     sink: Sink,
     last_volume: f32,
     last_pitch: f32,
+    /// ИЗМЕНЕНО (audio occlusion): последний применённый
+    /// occlusion-множитель. Сглаживается, чтобы избежать щелчков
+    /// при пересечении стен.
+    last_occlusion: f32,
 }
 
 pub struct AudioSystem {
@@ -172,7 +160,6 @@ impl AudioSystem {
     // Регистрация звуков
     // ============================================================
 
-    /// Зарегистрировать процедурный звук (name → samples).
     pub fn register(&mut self, name: impl Into<String>, samples: Vec<f32>) {
         let sr = 44_100u32;
         self.cache.insert(name.into(), SoundEntry {
@@ -183,10 +170,6 @@ impl AudioSystem {
 
     /// Загрузка звука из файла (Фаза 4.3).
     ///
-    /// Поддерживаются форматы, которые умеет `rodio::Decoder`:
-    /// `.wav`, `.ogg`, `.flac`, `.mp3` (mp3 через symphonia).
-    ///
-    /// Файл декодируется целиком в память, стерео микшируется в моно.
     /// `rodio::Decoder` нормализует все сэмплы в `f32`, поэтому
     /// достаточно просто собрать итератор.
     pub fn load_sound_from_file(
@@ -206,8 +189,6 @@ impl AudioSystem {
         let channels = decoder.channels() as usize;
         let sample_rate = decoder.sample_rate();
 
-        // ИСПРАВЛЕНО: `Decoder::Item` уже `f32` — symphonia/dasp
-        // нормализуют формат внутри rodio. Никакой конвертации не надо.
         let raw: Vec<f32> = decoder.collect();
 
         // Микшируем N каналов в моно.
@@ -234,11 +215,7 @@ impl AudioSystem {
         let dur_s = samples.len() as f32 / sample_rate.max(1) as f32;
         log::info!(
             "audio: loaded '{}' from {} ({:.2}s, {} Hz, {} channels → mono)",
-            name,
-            path.display(),
-            dur_s,
-            sample_rate,
-            channels,
+            name, path.display(), dur_s, sample_rate, channels,
         );
 
         self.cache.insert(name, SoundEntry {
@@ -316,6 +293,11 @@ impl AudioSystem {
     // Spatial update
     // ============================================================
 
+    /// Синхронизировать активные spatial-звуки с `AudioSource` в мире.
+    ///
+    /// ИЗМЕНЕНО (audio occlusion): если у источника `occlusion == true`,
+    /// делаем raycast между слушателем и источником. При блокировке
+    /// громкость умножается на `occlusion_volume`.
     pub fn update(&mut self, world: &mut World, listener_pos: Vec3, dt: f32) {
         // 1. Снимок компонентов.
         let sources: Vec<(Entity, AudioSource, Vec3)> = world
@@ -328,7 +310,7 @@ impl AudioSystem {
             sources.iter().map(|(e, _, _)| *e).collect();
         self.active.retain(|e, a| alive.contains(e) && !a.sink.empty());
 
-        // 3. Обработка.
+        // 3. Обрабатываем каждую entity.
         for (e, src, pos) in sources {
             if !src.playing {
                 if let Some(active) = self.active.remove(&e) {
@@ -367,19 +349,45 @@ impl AudioSystem {
                     sink,
                     last_volume: initial_vol,
                     last_pitch: src.pitch,
+                    last_occlusion: 1.0,
                 });
                 continue;
             }
 
             // 3b. Обновление существующего.
-            // ИСПРАВЛЕНО: bus_volume_effective требует &self, но active
-            // держит &mut self. Вычисляем громкость шины заранее.
+            //
+            // ИЗМЕНЕНО (audio occlusion): вычисляем occlusion-множитель
+            // до `get_mut`, потому что raycast использует `&World`
+            // (нужен для `segment_clear`), а `get_mut` берёт `&mut self`.
+            let occl_target = if src.occlusion {
+                let blocked = !crate::physics::navmesh::segment_clear(
+                    world,
+                    listener_pos + Vec3::Y * 0.5,
+                    pos + Vec3::Y * 0.5,
+                );
+                if blocked { src.occlusion_volume } else { 1.0 }
+            } else {
+                1.0
+            };
+
+            // Кэшируем громкость шины, чтобы не занимать `&self`
+            // в момент `get_mut`.
             let bus_vol = self.bus_volume_effective(src.bus);
 
             let Some(active) = self.active.get_mut(&e) else { continue };
+
+            // Плавная интерполяция occlusion-множителя.
+            let occl_smoothing = (dt * 8.0).clamp(0.0, 1.0);
+            let occl = active.last_occlusion
+                + (occl_target - active.last_occlusion) * occl_smoothing;
+            if (occl - active.last_occlusion).abs() > 1e-4 {
+                active.last_occlusion = occl;
+            }
+
             let dist = (pos - listener_pos).length();
             let atten = attenuation(dist, src.min_distance, src.max_distance);
-            let target = (src.volume * atten * bus_vol).clamp(0.0, 4.0);
+            let target = (src.volume * atten * bus_vol * active.last_occlusion)
+                .clamp(0.0, 4.0);
 
             let smoothing = (dt * 10.0).clamp(0.0, 1.0);
             let smoothed = active.last_volume + (target - active.last_volume) * smoothing;

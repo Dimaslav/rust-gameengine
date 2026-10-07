@@ -853,7 +853,7 @@ fn draw_right_panel(ctx: &egui::Context, state: &mut UiState, editor: &mut Edito
             if state.show_renderer_panel {
                 ui.separator();
                 egui::CollapsingHeader::new("Renderer").default_open(true)
-                    .show(ui, |ui| { draw_renderer_panel(ui, postfx, editor); });
+                    .show(ui, |ui| { draw_renderer_panel(ui, postfx, editor, action); });
             }
         });
     state.right_panel_width = panel_response.response.rect.width();
@@ -944,6 +944,7 @@ fn palette_commands() -> Vec<PaletteCommand> {
         PaletteCommand { label: "File · Load scene", action: EditorAction::Load },
         PaletteCommand { label: "File · New scene", action: EditorAction::NewScene },
         PaletteCommand { label: "Audio · Load sound…", action: EditorAction::LoadSound },
+        PaletteCommand { label: "AI · Bake navmesh", action: EditorAction::BakeNavmesh },
         PaletteCommand { label: "FBX · Export all", action: EditorAction::ExportFbxAll },
         PaletteCommand { label: "FBX · Export selected", action: EditorAction::ExportFbxSelected },
         PaletteCommand { label: "FBX · Import…", action: EditorAction::ImportFbx },
@@ -1215,6 +1216,10 @@ fn draw_component_chips(ui: &mut egui::Ui, world: &mut World, e: Entity, editor:
     if world.has::<PointLight>(e) { chips.push(("💡 PointLight", ComponentKind::PointLight)); }
     if world.has::<crate::game::decals::Decal>(e) { chips.push(("🎨 Decal", ComponentKind::Decal)); }
     if world.has::<AudioSource>(e) { chips.push(("🔊 Audio", ComponentKind::AudioSource)); }
+    if world.has::<crate::game::ai::AiAgent>(e) { chips.push(("🤖 AI", ComponentKind::AiAgent)); }
+    if world.has::<crate::game::ai::PatrolPath>(e) { chips.push(("🚶 Patrol", ComponentKind::PatrolPath)); }
+    if world.has::<crate::game::ai::Enemy>(e) { chips.push(("👹 Enemy", ComponentKind::Enemy)); }
+    if world.has::<crate::game::ai::AiTarget>(e) { chips.push(("🎯 Target", ComponentKind::AiTarget)); }
 
     ui.horizontal_wrapped(|ui| {
         for (label, kind) in &chips {
@@ -1721,6 +1726,8 @@ enum ComponentKind {
     Interactable, Trigger, Parent, Tint, Visible, TextureTiling, Elevator, SlidingDoor,
     RigidBody, Collider, PhysicsMaterial, DirectionalLight, PointLight, Decal,
     AudioSource,
+    // === Фаза 6.5: AI ===
+    AiAgent, PatrolPath, Enemy, AiTarget,
 }
 
 fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
@@ -1750,6 +1757,10 @@ fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
         ComponentKind::PointLight => { world.remove::<PointLight>(e); }
         ComponentKind::Decal => { world.remove::<crate::game::decals::Decal>(e); }
         ComponentKind::AudioSource => { world.remove::<AudioSource>(e); }
+        ComponentKind::AiAgent => { world.remove::<crate::game::ai::AiAgent>(e); }
+        ComponentKind::PatrolPath => { world.remove::<crate::game::ai::PatrolPath>(e); }
+        ComponentKind::Enemy => { world.remove::<crate::game::ai::Enemy>(e); }
+        ComponentKind::AiTarget => { world.remove::<crate::game::ai::AiTarget>(e); }
     }
 }
 
@@ -1804,6 +1815,66 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
             }
         });
     }
+
+    // === Фаза 6.5: AI-компоненты ===
+    if !world.has::<crate::game::ai::AiAgent>(e) {
+        any = true;
+        ui.menu_button("🤖 AI Agent", |ui| {
+            let presets: [(&str, crate::game::ai::AiAgent); 4] = [
+                ("Melee (fast)", crate::game::ai::AiAgent::new()
+                    .with_speed(4.0)
+                    .with_vision(18.0, 60_f32.to_radians())
+                    .with_attack(1.5, 10.0, 0.8)),
+                ("Brute (slow)", crate::game::ai::AiAgent::new()
+                    .with_speed(2.0)
+                    .with_vision(12.0, 45_f32.to_radians())
+                    .with_attack(2.0, 25.0, 1.5)),
+                ("Sniper (range)", crate::game::ai::AiAgent::new()
+                    .with_speed(3.0)
+                    .with_vision(30.0, 30_f32.to_radians())
+                    .with_attack(8.0, 15.0, 2.0)),
+                ("Default", crate::game::ai::AiAgent::new()),
+            ];
+            for (label, agent) in presets {
+                if ui.button(label).clicked() {
+                    world.insert(e, agent);
+                    editor.undo_requested = true;
+                    ui.close();
+                }
+            }
+        });
+    }
+    if !world.has::<crate::game::ai::Enemy>(e) {
+        any = true;
+        if ui.button("👹 Enemy marker").on_hover_text("Помечает entity как 'врага' (для систем и UI)").clicked() {
+            world.insert(e, crate::game::ai::Enemy);
+            editor.undo_requested = true;
+            ui.close();
+        }
+    }
+    if !world.has::<crate::game::ai::AiTarget>(e) {
+        any = true;
+        if ui.button("🎯 AI Target").on_hover_text("Маркер цели — AI-агенты будут её преследовать").clicked() {
+            world.insert(e, crate::game::ai::AiTarget);
+            editor.undo_requested = true;
+            ui.close();
+        }
+    }
+    if !world.has::<crate::game::ai::PatrolPath>(e) {
+        any = true;
+        if ui.button("🚶 Patrol Path (circle)").on_hover_text("Простой круг радиусом 5м вокруг позиции").clicked() {
+            let origin = world.get::<Transform>(e).map(|t| t.position).unwrap_or(Vec3::ZERO);
+            let mut pts = Vec::new();
+            for i in 0..4 {
+                let a = i as f32 / 4.0 * std::f32::consts::TAU;
+                pts.push(origin + Vec3::new(a.cos() * 5.0, 0.0, a.sin() * 5.0));
+            }
+            world.insert(e, crate::game::ai::PatrolPath::new(pts));
+            editor.undo_requested = true;
+            ui.close();
+        }
+    }
+
     if !world.has::<Elevator>(e) {
         any = true;
         if ui.button("Elevator (2 floors)").on_hover_text("FSM-лифт. Требует RigidBody::Kinematic + Collider::Aabb.").clicked() {
@@ -1829,7 +1900,9 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, e: Entity, editor: &
     }
     if !world.has::<Chase>(e) {
         any = true;
-        if ui.button("Chase").clicked() { world.insert(e, Chase::new(3.0, 1.2)); editor.undo_requested = true; ui.close(); }
+        if ui.button("Chase (legacy)").on_hover_text("Простой lerp к игроку. Используй AI Agent для полноценного поведения.").clicked() {
+            world.insert(e, Chase::new(3.0, 1.2)); editor.undo_requested = true; ui.close();
+        }
     }
     if !world.has::<Parent>(e) {
         any = true;
@@ -2015,7 +2088,46 @@ fn preset_ultra() -> PostFx {
     p
 }
 
-fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut EditorState) {
+/// ИЗМЕНЕНО (Фаза 6.5): добавлен параметр `action`, добавлена
+/// секция `AI / Navmesh` в начале панели.
+fn draw_renderer_panel(
+    ui: &mut egui::Ui,
+    postfx: &mut PostFx,
+    editor: &mut EditorState,
+    action: &mut Option<EditorAction>,
+) {
+    // ИЗМЕНЕНО (Фаза 6.5): AI/Navmesh секция. Рисуется сверху —
+    // самый частый сценарий использования в новой версии: запечь
+    // navmesh и включить визуализацию.
+    egui::CollapsingHeader::new("AI / Navmesh").default_open(true).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .button("🔨 Bake Navmesh")
+                .on_hover_text(
+                    "Строит grid-navmesh из текущих физических коллайдеров сцены.\n\
+                     Результат используется AI-агентами (AiAgent + PatrolPath).",
+                )
+                .clicked()
+            {
+                *action = Some(EditorAction::BakeNavmesh);
+            }
+        });
+        ui.checkbox(&mut editor.settings.show_navmesh, "Show navmesh")
+            .on_hover_text(
+                "Отображает границы walkable-ячеек зелёными линиями.\n\
+                 Видно только после того, как navmesh запечён.",
+            );
+        ui.label(
+            egui::RichText::new(
+                "Bake после любых изменений геометрии сцены: добавления стен, полов, препятствий."
+            )
+            .small()
+            .weak()
+            .italics(),
+        );
+    });
+
+    ui.separator();
     ui.label(egui::RichText::new("Quality preset").strong());
     ui.horizontal_wrapped(|ui| {
         if ui.button("Low").on_hover_text("Без TAA, SSAO, bloom, volumetric. Максимум FPS.").clicked() { apply_preset(postfx, preset_low()); }
@@ -2106,7 +2218,6 @@ fn draw_renderer_panel(ui: &mut egui::Ui, postfx: &mut PostFx, editor: &mut Edit
     draw_fly_settings(ui, editor);
 }
 
-/// ИЗМЕНЕНО (Фаза 5): расширен платформерными параметрами.
 fn draw_play_settings(ui: &mut egui::Ui, editor: &mut EditorState) {
     egui::CollapsingHeader::new("Play").default_open(false).show(ui, |ui| {
         let p = &mut editor.play;
@@ -2349,7 +2460,6 @@ fn draw_play_hud(ctx: &egui::Context, play: &PlayState, stats: &Stats) {
                             else if play.on_ground { "on ground" } else { "airborne" };
                         ui.label(egui::RichText::new(state_str).monospace()
                             .color(egui::Color32::from_rgb(180, 200, 180)));
-                        // ИЗМЕНЕНО (Фаза 5): показываем coyote/jump buffer в HUD.
                         if play.coyote_timer > 0.0 && !play.on_ground {
                             ui.label(egui::RichText::new(
                                 format!("coyote: {:.2}s", play.coyote_timer)
@@ -2447,6 +2557,9 @@ fn component_badges(world: &World, e: Entity) -> String {
     if world.has::<PointLight>(e) { s.push_str("💡 "); }
     if world.has::<crate::game::decals::Decal>(e) { s.push_str("🎨 "); }
     if world.has::<AudioSource>(e) { s.push_str("🔊 "); }
+    if world.has::<crate::game::ai::AiAgent>(e) { s.push_str("🤖 "); }
+    if world.has::<crate::game::ai::Enemy>(e) { s.push_str("👹 "); }
+    if world.has::<crate::game::ai::AiTarget>(e) { s.push_str("🎯 "); }
 
     if world.has::<Parent>(e) {
         if let Some(rb) = world.get::<RigidBody>(e) {

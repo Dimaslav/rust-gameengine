@@ -122,6 +122,10 @@ pub enum EditorAction {
     SetBusVolume(AudioBus, f32),
     LoadSound,
     PreviewSound(String),
+
+    // === Фаза 6: AI ===
+    /// Пересчитать navmesh из текущей сцены.
+    BakeNavmesh,
 }
 
 impl EditorState {

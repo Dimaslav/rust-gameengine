@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod animation;
 pub mod audio;
 pub mod components;
@@ -6,6 +7,9 @@ pub mod lights;
 pub mod rpg;
 pub mod timers;
 
+pub use ai::{
+    AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath,
+};
 pub use animation::{
     AnimationEvent, AnimationEventTriggered, AnimationEvents, AnimationEventsFile,
     AnimationRuntime,
@@ -44,7 +48,6 @@ pub fn world_matrix(world: &World, entity: Entity) -> Mat4 {
     mat
 }
 
-/// См. полный doc-комментарий в оригинальном файле (#17).
 pub fn world_position(world: &World, entity: Entity) -> Option<glam::Vec3> {
     world.get::<Transform>(entity)?;
     Some(world_matrix(world, entity).transform_point3(glam::Vec3::ZERO))

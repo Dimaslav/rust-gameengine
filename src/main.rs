@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use ecs::{Entity, System, World};
 use engine::{run, Game, Input, InputMap, Key, MouseBtn};
+use game::ai::{AiAgent, AiState, AiTarget, DebugPath, Enemy, PatrolPath};
 use game::animation::{AnimationEvent, AnimationEvents, AnimationRuntime};
 use game::audio::AudioSource;
 use game::components::{
@@ -23,7 +24,6 @@ use game::components::{
 };
 use game::decals::Decal;
 use game::lights::{DirectionalLight, PointLight};
-use game::rpg::{self, RpgState};
 use game::timers::{Timer, TimerFinished, TimerSystem};
 use game::AudioBus;
 use glam::{Quat, Vec3};
@@ -35,6 +35,21 @@ use render::{
 };
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
+
+// ============================================================
+// Константы арены
+// ============================================================
+
+const ARENA_HALF: f32 = 20.0;
+const WALL_HEIGHT: f32 = 4.0;
+const WALL_THICKNESS: f32 = 0.5;
+const GATE_WIDTH: f32 = 5.0;
+const PLATFORM_HEIGHT: f32 = 1.0;
+const PLATFORM_HALF: f32 = 4.0;
+
+// ============================================================
+// Хелперы
+// ============================================================
 
 fn sphere_in_frustum(center: Vec3, radius: f32, planes: &[glam::Vec4; 6]) -> bool {
     for p in planes {
@@ -58,6 +73,34 @@ fn compute_uv_scale(mesh: &Mesh, model: &glam::Mat4, tiling_size: f32) -> [f32; 
     if uv_x < 0.001 { uv_x = uv_y; }
     [uv_x, uv_y]
 }
+
+fn spawn_static_box(
+    world: &mut World,
+    name: impl Into<String>,
+    material: &str,
+    center: Vec3,
+    size: Vec3,
+    collider_half: Vec3,
+    tiling: f32,
+) -> Entity {
+    let e = world.spawn();
+    world.insert(e, Name(name.into()));
+    world.insert(e, Transform {
+        position: center,
+        rotation: Quat::IDENTITY,
+        scale: size,
+    });
+    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, MaterialHandle(material.to_string()));
+    world.insert(e, TextureTiling::new(tiling));
+    world.insert(e, RigidBody::static_body());
+    world.insert(e, Collider::aabb(collider_half));
+    e
+}
+
+// ============================================================
+// Системы
+// ============================================================
 
 struct RotationSystem;
 impl System for RotationSystem {
@@ -90,10 +133,7 @@ impl System for ElevatorSystem {
         let entities: Vec<_> = world.query::<Elevator>().map(|(e, _)| e).collect();
         for e in entities {
             let Some(mut el) = world.get::<Elevator>(e).cloned() else { continue };
-            let current_y = world
-                .get::<Transform>(e)
-                .map(|t| t.position.y)
-                .unwrap_or(0.0);
+            let current_y = world.get::<Transform>(e).map(|t| t.position.y).unwrap_or(0.0);
 
             match el.state {
                 ElevatorState::Idle => { el.current_velocity = 0.0; }
@@ -140,8 +180,7 @@ impl System for ElevatorSystem {
                 .filter(|&d| {
                     world.get::<SlidingDoor>(d).is_some()
                         && world.get::<Parent>(d).map(|p| p.0 == e).unwrap_or(false)
-                })
-                .collect();
+                }).collect();
             for d in doors {
                 if let Some(sd) = world.get_mut::<SlidingDoor>(d) {
                     sd.target = el.doors_open;
@@ -175,70 +214,181 @@ impl System for SlidingDoorSystem {
     }
 }
 
-fn spawn_elevator(world: &mut World, xz: (f32, f32), floors_y: Vec<f32>, speed: f32) {
-    let y0 = *floors_y.first().unwrap_or(&0.0);
-    let top_y = *floors_y.last().unwrap_or(&y0);
+// ============================================================
+// Спавн арены
+// ============================================================
+
+fn spawn_arena_ground(world: &mut World) {
+    let e = world.spawn();
+    world.insert(e, Name("Arena_Ground".into()));
+    world.insert(e, Transform::at(Vec3::new(0.0, -0.01, 0.0)));
+    world.insert(e, MeshHandle("ground".into()));
+    world.insert(e, MaterialHandle("arena_floor".into()));
+    world.insert(e, TextureTiling::new(2.0));
+    world.insert(e, RigidBody::static_body());
+    world.insert(e, Collider::aabb(Vec3::new(ARENA_HALF, 0.01, ARENA_HALF)));
+}
+
+fn spawn_arena_walls(world: &mut World) {
+    let gate_half = GATE_WIDTH * 0.5;
+    let wall_len = ARENA_HALF - gate_half;
+    let wall_center_offset = gate_half + wall_len * 0.5;
+
+    spawn_static_box(world, "Wall_N_L", "arena_wall",
+        Vec3::new(-wall_center_offset, WALL_HEIGHT * 0.5, -ARENA_HALF),
+        Vec3::new(wall_len, WALL_HEIGHT, WALL_THICKNESS),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_N_R", "arena_wall",
+        Vec3::new(wall_center_offset, WALL_HEIGHT * 0.5, -ARENA_HALF),
+        Vec3::new(wall_len, WALL_HEIGHT, WALL_THICKNESS),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_S_L", "arena_wall",
+        Vec3::new(-wall_center_offset, WALL_HEIGHT * 0.5, ARENA_HALF),
+        Vec3::new(wall_len, WALL_HEIGHT, WALL_THICKNESS),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_S_R", "arena_wall",
+        Vec3::new(wall_center_offset, WALL_HEIGHT * 0.5, ARENA_HALF),
+        Vec3::new(wall_len, WALL_HEIGHT, WALL_THICKNESS),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_W_N", "arena_wall",
+        Vec3::new(-ARENA_HALF, WALL_HEIGHT * 0.5, -wall_center_offset),
+        Vec3::new(WALL_THICKNESS, WALL_HEIGHT, wall_len),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_W_S", "arena_wall",
+        Vec3::new(-ARENA_HALF, WALL_HEIGHT * 0.5, wall_center_offset),
+        Vec3::new(WALL_THICKNESS, WALL_HEIGHT, wall_len),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_E_N", "arena_wall",
+        Vec3::new(ARENA_HALF, WALL_HEIGHT * 0.5, -wall_center_offset),
+        Vec3::new(WALL_THICKNESS, WALL_HEIGHT, wall_len),
+        Vec3::splat(0.5), 2.0);
+    spawn_static_box(world, "Wall_E_S", "arena_wall",
+        Vec3::new(ARENA_HALF, WALL_HEIGHT * 0.5, wall_center_offset),
+        Vec3::new(WALL_THICKNESS, WALL_HEIGHT, wall_len),
+        Vec3::splat(0.5), 2.0);
+}
+
+fn spawn_arena_center(world: &mut World) {
+    spawn_static_box(world, "Arena_Platform", "arena_platform",
+        Vec3::new(0.0, PLATFORM_HEIGHT * 0.5, 0.0),
+        Vec3::new(PLATFORM_HALF * 2.0, PLATFORM_HEIGHT, PLATFORM_HALF * 2.0),
+        Vec3::splat(0.5), 2.0);
+
+    let col_half = PLATFORM_HALF - 0.6;
+    let col_height = 3.0;
+    let col_y = PLATFORM_HEIGHT + col_height * 0.5;
+    for (i, (sx, sz)) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        .iter().enumerate()
+    {
+        spawn_static_box(world, format!("Arena_Column_{}", i), "arena_column",
+            Vec3::new(sx * col_half, col_y, sz * col_half),
+            Vec3::new(0.8, col_height, 0.8),
+            Vec3::splat(0.5), 1.5);
+    }
+
+    let e = world.spawn();
+    world.insert(e, Name("Arena_CenterMarker".into()));
+    world.insert(e, Transform::at(Vec3::new(0.0, PLATFORM_HEIGHT + 3.0, 0.0)).with_scale(0.5));
+    world.insert(e, MeshHandle("sphere".into()));
+    world.insert(e, MaterialHandle("arena_marker".into()));
+    world.insert(e, Spinner::new(Vec3::Y, 1.2));
+}
+
+fn spawn_arena_props(world: &mut World) {
+    let crates: &[(Vec3, f32, &str)] = &[
+        (Vec3::new(-12.0, 0.5, -12.0), 1.0, "arena_crate"),
+        (Vec3::new(-10.5, 0.75, -12.5), 1.5, "arena_crate"),
+        (Vec3::new(-11.5, 1.25, -11.5), 1.0, "arena_crate"),
+        (Vec3::new(12.0, 0.5, -12.0), 1.0, "arena_crate"),
+        (Vec3::new(11.5, 1.0, -11.0), 1.0, "arena_crate"),
+        (Vec3::new(-12.0, 0.5, 12.0), 1.0, "arena_crate"),
+        (Vec3::new(12.0, 0.75, 12.0), 1.5, "arena_crate"),
+        (Vec3::new(11.0, 0.5, 10.5), 1.0, "arena_crate"),
+        (Vec3::new(8.0, 0.5, -14.0), 1.0, "arena_crate"),
+        (Vec3::new(-8.0, 0.5, 14.0), 1.0, "arena_crate"),
+    ];
+    for (i, (pos, size, mat)) in crates.iter().enumerate() {
+        spawn_static_box(world, format!("Crate_{}", i), mat,
+            *pos, Vec3::splat(*size), Vec3::splat(0.5), 1.0);
+    }
+
+    let barrels: &[(Vec3, &str)] = &[
+        (Vec3::new(-16.0, 0.6, -3.0), "arena_barrel"),
+        (Vec3::new(-16.5, 0.6, -1.5), "arena_barrel"),
+        (Vec3::new(16.0, 0.6, 3.0), "arena_barrel"),
+        (Vec3::new(15.5, 0.6, 1.5), "arena_barrel"),
+        (Vec3::new(-3.0, 0.6, 15.0), "arena_barrel"),
+        (Vec3::new(3.0, 0.6, -15.0), "arena_barrel"),
+    ];
+    for (i, (pos, mat)) in barrels.iter().enumerate() {
+        let e = world.spawn();
+        world.insert(e, Name(format!("Barrel_{}", i)));
+        world.insert(e, Transform {
+            position: *pos, rotation: Quat::IDENTITY,
+            scale: Vec3::new(0.8, 1.2, 0.8),
+        });
+        world.insert(e, MeshHandle("cylinder".into()));
+        world.insert(e, MaterialHandle(mat.to_string()));
+        world.insert(e, TextureTiling::new(1.0));
+        world.insert(e, RigidBody::static_body());
+        world.insert(e, Collider::aabb(Vec3::splat(0.5)));
+    }
+}
+
+fn spawn_arena_cover(world: &mut World) {
+    let covers: &[(Vec3, Vec3)] = &[
+        (Vec3::new(-8.0, 0.5, 0.0), Vec3::new(0.3, 1.0, 6.0)),
+        (Vec3::new(8.0, 0.5, 0.0), Vec3::new(0.3, 1.0, 6.0)),
+        (Vec3::new(0.0, 0.5, -8.0), Vec3::new(6.0, 1.0, 0.3)),
+        (Vec3::new(0.0, 0.5, 8.0), Vec3::new(6.0, 1.0, 0.3)),
+    ];
+    for (i, (pos, size)) in covers.iter().enumerate() {
+        spawn_static_box(world, format!("Cover_{}", i), "arena_cover",
+            *pos, *size, Vec3::splat(0.5), 2.0);
+    }
+}
+
+fn spawn_arena_elevator(world: &mut World) {
+    let xz = (-16.0_f32, -16.0_f32);
+    let floors_y = vec![0.0, 2.0, 4.0];
+    let speed = 2.5;
+    let y0 = floors_y[0];
     let plat_scale = Vec3::new(3.0, 0.2, 3.0);
 
     let plat = world.spawn();
-    world.insert(plat, Name("Elevator".into()));
+    world.insert(plat, Name("ArenaElevator".into()));
     world.insert(plat, Transform::at(Vec3::new(xz.0, y0, xz.1))
         .with_scale_xyz(plat_scale.x, plat_scale.y, plat_scale.z));
     world.insert(plat, MeshHandle("cube".into()));
-    world.insert(plat, MaterialHandle("flat_blue".into()));
+    world.insert(plat, MaterialHandle("arena_platform".into()));
     world.insert(plat, TextureTiling::new(1.5));
     world.insert(plat, RigidBody::kinematic());
     world.insert(plat, Collider::aabb(Vec3::splat(0.5)));
 
     let mut el = Elevator::new(floors_y.clone(), speed);
     el.acceleration = 3.0;
-    el.sensor_radius = 2.0;
+    el.sensor_radius = 2.5;
     world.insert(plat, el);
 
     for side in [-1.0_f32, 1.0] {
         let d = world.spawn();
-        world.insert(d, Name(format!("ElevatorDoor_{}", if side < 0.0 { "L" } else { "R" })));
-
+        world.insert(d, Name(format!("ArenaElevatorDoor_{}", if side < 0.0 { "L" } else { "R" })));
         let desired_world_size = Vec3::new(1.4, 2.0, 0.1);
         let local_scale = desired_world_size / plat_scale;
-
         let desired_world_pos = Vec3::new(side * 0.7, 1.0, 1.5);
         let local_pos = desired_world_pos / plat_scale;
-
         world.insert(d, Transform::at(local_pos)
             .with_scale_xyz(local_scale.x, local_scale.y, local_scale.z));
         world.insert(d, MeshHandle("cube".into()));
-        world.insert(d, MaterialHandle("rpg_door".into()));
+        world.insert(d, MaterialHandle("arena_door".into()));
         world.insert(d, Parent(plat));
         world.insert(d, Collider::aabb(Vec3::splat(0.5)));
-
-        let local_slide_distance = 1.4 / plat_scale.x;
-        world.insert(d, SlidingDoor::new(local_pos, Vec3::X * side, local_slide_distance));
-    }
-
-    let shaft_height = (top_y - y0) + 6.0;
-    let shaft_center_y = (y0 + top_y) * 0.5 + 1.0;
-
-    let wall_specs = [
-        (Vec3::new(0.0, 0.0, -1.75), Vec3::new(3.6, shaft_height, 0.2)),
-        (Vec3::new(-1.75, 0.0, 0.0), Vec3::new(0.2, shaft_height, 3.6)),
-        (Vec3::new(1.75, 0.0, 0.0), Vec3::new(0.2, shaft_height, 3.6)),
-    ];
-
-    for (i, (offset, size)) in wall_specs.iter().enumerate() {
-        let w = world.spawn();
-        world.insert(w, Name(format!("ElevatorShaft_{}", i)));
-        world.insert(w, Transform::at(Vec3::new(xz.0 + offset.x, shaft_center_y, xz.1 + offset.z))
-            .with_scale_xyz(size.x, size.y, size.z));
-        world.insert(w, MeshHandle("cube".into()));
-        world.insert(w, MaterialHandle("rpg_dungeon".into()));
-        world.insert(w, RigidBody::static_body());
-        world.insert(w, Collider::aabb(Vec3::splat(0.5)));
+        world.insert(d, SlidingDoor::new(local_pos, Vec3::X * side, 1.4 / plat_scale.x));
     }
 
     for (idx, &y) in floors_y.iter().enumerate() {
         let b = world.spawn();
-        world.insert(b, Name(format!("ElevatorButton_{}", idx)));
+        world.insert(b, Name(format!("ArenaElevatorButton_{}", idx)));
         world.insert(b, Transform::at(Vec3::new(xz.0 + 2.5, y + 1.0, xz.1)).with_scale(0.25));
         world.insert(b, MeshHandle("cube".into()));
         world.insert(b, MaterialHandle("emissive".into()));
@@ -249,9 +399,147 @@ fn spawn_elevator(world: &mut World, xz: (f32, f32), floors_y: Vec<f32>, speed: 
         }));
     }
 
-    log::info!("Elevator spawned at ({:.1}, {:.1}) with {} floors, speed {:.1} m/s",
-        xz.0, xz.1, floors_y.len(), speed);
+    log::info!("Arena elevator at ({:.1}, {:.1}), floors {:?}", xz.0, xz.1, floors_y);
 }
+
+fn spawn_arena_lighting(world: &mut World) {
+    {
+        let e = world.spawn();
+        world.insert(e, Name("Arena_Sun".into()));
+        world.insert(e, Transform::at(Vec3::new(0.0, 20.0, 0.0)));
+        let mut sun = DirectionalLight::sun();
+        sun.direction = Vec3::new(0.5, 1.0, 0.3);
+        sun.intensity = 3.0;
+        world.insert(e, sun);
+    }
+    {
+        let e = world.spawn();
+        world.insert(e, Name("Arena_Fill".into()));
+        world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
+        world.insert(e, DirectionalLight::fill());
+    }
+
+    let lamps: &[(Vec3, [f32; 3], f32, f32)] = &[
+        (Vec3::new(-14.0, 3.0, -14.0), [1.0, 0.65, 0.35], 6.0, 14.0),
+        (Vec3::new( 14.0, 3.0, -14.0), [1.0, 0.65, 0.35], 6.0, 14.0),
+        (Vec3::new(-14.0, 3.0,  14.0), [1.0, 0.65, 0.35], 6.0, 14.0),
+        (Vec3::new( 14.0, 3.0,  14.0), [1.0, 0.65, 0.35], 6.0, 14.0),
+    ];
+    for (i, (pos, color, intensity, range)) in lamps.iter().enumerate() {
+        let e = world.spawn();
+        world.insert(e, Name(format!("Arena_Lamp_{}", i)));
+        world.insert(e, Transform::at(*pos).with_scale(0.2));
+        world.insert(e, MeshHandle("sphere".into()));
+        world.insert(e, MaterialHandle("emissive".into()));
+        world.insert(e, PointLight::new(*color, *intensity, *range));
+    }
+}
+
+fn spawn_arena_decals(world: &mut World) {
+    let spots = [
+        (Vec3::new(-12.0, 0.02, -12.0), 1.8, 0.85),
+        (Vec3::new(-11.5, 0.02, -13.0), 1.5, 0.9),
+        (Vec3::new(12.0, 0.02, -11.5), 2.0, 0.8),
+        (Vec3::new(-8.0, PLATFORM_HEIGHT + 0.02, 0.0), 1.2, 0.7),
+        (Vec3::new(8.0, PLATFORM_HEIGHT + 0.02, 0.0), 1.5, 0.75),
+        (Vec3::new(0.0, 0.02, 6.0), 2.2, 0.85),
+    ];
+    for (i, (pos, size, alpha)) in spots.iter().enumerate() {
+        let e = world.spawn();
+        world.insert(e, Name(format!("Decal_Blood_{}", i)));
+        world.insert(e, Transform {
+            position: *pos, rotation: Quat::IDENTITY,
+            scale: Vec3::new(*size, 0.01, *size),
+        });
+        world.insert(e, Decal {
+            texture: "arena_blood".into(),
+            tint: [0.65, 0.05, 0.05, *alpha],
+        });
+    }
+}
+
+fn spawn_arena_bell(world: &mut World) -> Entity {
+    let bell = world.spawn();
+    world.insert(bell, Name("Arena_Bell".into()));
+    world.insert(bell, Transform::at(Vec3::new(0.0, PLATFORM_HEIGHT + 3.0, 0.0)).with_scale(0.3));
+    world.insert(bell, MeshHandle("sphere".into()));
+    world.insert(bell, MaterialHandle("emissive".into()));
+    world.insert(bell, Spinner::new(Vec3::Y, 0.8));
+    world.insert(bell, Timer::new(4.0));
+    world.insert(bell, AudioSource::new("ding")
+        .with_bus(AudioBus::Music)
+        .with_range(1.0, 20.0)
+        .with_volume(0.8));
+    bell
+}
+
+fn spawn_arena_ai_target(world: &mut World) -> Entity {
+    let e = world.spawn();
+    world.insert(e, Name("Arena_AiTarget".into()));
+    world.insert(e, Transform::at(Vec3::new(0.0, 1.0, 0.0)));
+    world.insert(e, AiTarget);
+    world.insert(e, game::Health::new(100_000.0));
+    e
+}
+
+fn spawn_arena_ai(world: &mut World) {
+    let cycles: &[(&str, Vec<Vec3>, f32, &str, f32)] = &[
+        (
+            "Patrol_Perimeter",
+            vec![
+                Vec3::new(-15.0, 0.5, -15.0),
+                Vec3::new( 15.0, 0.5, -15.0),
+                Vec3::new( 15.0, 0.5,  15.0),
+                Vec3::new(-15.0, 0.5,  15.0),
+            ],
+            3.0, "flat_red", 0.6,
+        ),
+        (
+            "Patrol_Center",
+            vec![
+                Vec3::new(-7.0, PLATFORM_HEIGHT + 0.5, 0.0),
+                Vec3::new( 0.0, PLATFORM_HEIGHT + 0.5, -7.0),
+                Vec3::new( 7.0, PLATFORM_HEIGHT + 0.5, 0.0),
+                Vec3::new( 0.0, PLATFORM_HEIGHT + 0.5, 7.0),
+            ],
+            4.0, "flat_red", 0.55,
+        ),
+        (
+            "Patrol_Gates",
+            vec![
+                Vec3::new(-18.0, 0.5, 0.0),
+                Vec3::new( 0.0, 0.5, -18.0),
+                Vec3::new( 18.0, 0.5, 0.0),
+                Vec3::new( 0.0, 0.5,  18.0),
+            ],
+            3.5, "flat_red", 0.65,
+        ),
+    ];
+
+    for (i, (name, cycle, speed, mat, scale)) in cycles.iter().enumerate() {
+        let start = cycle[0];
+        let e = world.spawn();
+        world.insert(e, Name(format!("AiEnemy_{}_{}", i, name)));
+        world.insert(e, Transform::at(start).with_scale(*scale));
+        world.insert(e, MeshHandle("sphere".into()));
+        world.insert(e, MaterialHandle(mat.to_string()));
+        world.insert(e, game::Health::new(60.0));
+        world.insert(e, Enemy);
+        world.insert(e, AiAgent::new()
+            .with_speed(*speed)
+            .with_vision(18.0, 60_f32.to_radians())
+            .with_hearing(25.0)
+            .with_attack(1.6, 12.0, 0.9));
+        world.insert(e, PatrolPath::new(cycle.clone()));
+        world.insert(e, DebugPath);
+    }
+
+    log::info!("Spawned {} AI enemies with patrol paths", cycles.len());
+}
+
+// ============================================================
+// Демо-игра
+// ============================================================
 
 struct DemoGame {
     camera: Camera3D,
@@ -271,9 +559,12 @@ struct DemoGame {
     animation_events: AnimationEvents,
 
     bell_entity: Option<Entity>,
+    ai_target_entity: Option<Entity>,
+
+    navmesh_bake_requested: bool,
+    ai_spawned: bool,
 
     lod_stats: [usize; 4],
-    rpg: RpgState,
     prev_world_matrices: HashMap<Entity, glam::Mat4>,
 }
 
@@ -289,21 +580,21 @@ impl DemoGame {
                 Box::new(SlidingDoorSystem),
             ],
             postfx: PostFx {
-                bloom_threshold: 1.2,
-                bloom_strength: 0.6,
+                bloom_threshold: 1.0,
+                bloom_strength: 0.5,
                 bloom_knee: 0.5,
                 bloom_radius: 1.0,
-                exposure: 0.6,
-                ssao_strength: 0.8,
+                exposure: 0.7,
+                ssao_strength: 0.9,
                 ssao_radius: 0.6,
-                ibl_strength: 0.15,
+                ibl_strength: 0.2,
                 debug_view: DebugView::Final,
                 fxaa_strength: 1.0,
-                fog_color: [0.55, 0.62, 0.72],
+                fog_color: [0.5, 0.55, 0.65],
                 fog_density: 0.0,
                 fog_height_base: 0.0,
                 fog_height_falloff: 0.05,
-                vignette_strength: 0.0,
+                vignette_strength: 0.1,
                 film_grain: 0.0,
                 chromatic_aberration: 0.0,
                 shadow_bias: 0.0015,
@@ -320,7 +611,7 @@ impl DemoGame {
             },
             spawned: false,
             dragging: false,
-            show_grid: true,
+            show_grid: false,
             show_culling: true,
             orbit_phase: 0.0,
             gltf_instances: Vec::new(),
@@ -329,13 +620,13 @@ impl DemoGame {
             animation_runtime: AnimationRuntime::new(),
             animation_events: AnimationEvents::new(),
             bell_entity: None,
+            ai_target_entity: None,
+            navmesh_bake_requested: false,
+            ai_spawned: false,
             lod_stats: [0; 4],
-            rpg: RpgState::new(),
             prev_world_matrices: HashMap::new(),
         }
     }
-
-    fn rpg_interact_distance(&self) -> f32 { 4.0 }
 }
 
 impl Game for DemoGame {
@@ -346,8 +637,8 @@ impl Game for DemoGame {
         renderer.add_mesh("quad", Mesh::plane(&renderer.device, 2.0, 1));
         renderer.add_mesh("quad_xy", Mesh::plane_xy(&renderer.device, 2.0, 1));
         renderer.add_mesh("cylinder", Mesh::cylinder(&renderer.device, 0.5, 1.0, 24));
-        renderer.add_mesh("cone",     Mesh::cone(&renderer.device, 0.5, 1.0, 24));
-        renderer.add_mesh("capsule",  Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
+        renderer.add_mesh("cone", Mesh::cone(&renderer.device, 0.5, 1.0, 24));
+        renderer.add_mesh("capsule", Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
@@ -359,12 +650,43 @@ impl Game for DemoGame {
         }
         renderer.load_texture_rgba("checker", &data, 64, 64).expect("checker");
 
-        renderer.add_material("ground",
-            Material::new([0.55, 0.60, 0.55, 1.0]).with_metallic_roughness(0.0, 0.85));
-        renderer.add_material("checker_red",
-            Material::new([1.0, 0.35, 0.35, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
-        renderer.add_material("checker_blue",
-            Material::new([0.35, 0.55, 1.0, 1.0]).with_texture("checker").with_metallic_roughness(0.0, 0.5));
+        let mut blood = vec![0u8; 64 * 64 * 4];
+        for y in 0..64 {
+            for x in 0..64 {
+                let idx = (y * 64 + x) * 4;
+                let dx = x as f32 - 31.5;
+                let dy = y as f32 - 31.5;
+                let d = (dx * dx + dy * dy).sqrt() / 32.0;
+                let a = (1.0 - d * 1.6).clamp(0.0, 1.0);
+                let noise = ((x * 17 + y * 31) % 16) as f32 / 16.0 * 0.3;
+                let alpha = (a * (1.0 - noise)).clamp(0.0, 1.0);
+                blood[idx] = (140.0 * (1.0 - d * 0.5)) as u8;
+                blood[idx + 1] = 20;
+                blood[idx + 2] = 15;
+                blood[idx + 3] = (alpha * 255.0) as u8;
+            }
+        }
+        renderer.load_texture_rgba("arena_blood", &blood, 64, 64).expect("blood");
+
+        renderer.add_material("arena_floor",
+            Material::new([0.48, 0.52, 0.55, 1.0]).with_metallic_roughness(0.0, 0.9));
+        renderer.add_material("arena_wall",
+            Material::new([0.42, 0.42, 0.46, 1.0]).with_metallic_roughness(0.0, 0.85));
+        renderer.add_material("arena_platform",
+            Material::new([0.55, 0.58, 0.62, 1.0]).with_metallic_roughness(0.0, 0.8));
+        renderer.add_material("arena_column",
+            Material::new([0.65, 0.63, 0.58, 1.0]).with_metallic_roughness(0.1, 0.7));
+        renderer.add_material("arena_crate",
+            Material::new([0.65, 0.45, 0.25, 1.0]).with_metallic_roughness(0.0, 0.85));
+        renderer.add_material("arena_barrel",
+            Material::new([0.55, 0.30, 0.15, 1.0]).with_metallic_roughness(0.3, 0.6));
+        renderer.add_material("arena_cover",
+            Material::new([0.50, 0.50, 0.52, 1.0]).with_metallic_roughness(0.0, 0.9));
+        renderer.add_material("arena_door",
+            Material::new([0.45, 0.30, 0.20, 1.0]).with_metallic_roughness(0.1, 0.7));
+        renderer.add_material("arena_marker",
+            Material::new([1.0, 0.9, 0.4, 1.0]).with_metallic_roughness(0.0, 0.5).with_emissive([2.5, 2.2, 0.6]));
+
         renderer.add_material("flat_red",
             Material::new([1.0, 0.35, 0.35, 1.0]).with_metallic_roughness(0.0, 0.5));
         renderer.add_material("flat_blue",
@@ -375,20 +697,16 @@ impl Game for DemoGame {
             Material::new([1.0, 1.0, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5).with_emissive([2.5, 2.2, 0.6]));
         renderer.add_material("glass",
             Material::new([0.7, 0.85, 1.0, 0.35]).with_metallic_roughness(0.2, 0.05).with_alpha_mode(AlphaMode::Blend));
-        renderer.add_material("foliage",
-            Material::new([0.25, 0.75, 0.3, 1.0]).with_metallic_roughness(0.0, 0.7).with_double_sided(true));
-
-        rpg::register_materials(renderer);
 
         match render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             Ok(loaded) => {
-                println!("Loaded glTF: {} instances, {} skeletons, {} animations",
+                log::info!("Loaded glTF: {} instances, {} skeletons, {} animations",
                     loaded.instances.len(), loaded.skeletons.len(), loaded.animations.len());
                 self.gltf_instances = loaded.instances;
                 self.skeletons = loaded.skeletons;
                 self.animations = loaded.animations;
             }
-            Err(e) => eprintln!("glTF not loaded ({}). Using only procedural meshes.", e),
+            Err(e) => log::info!("glTF not loaded ({}). Using procedural meshes only.", e),
         }
 
         let sidecar = "assets/animated.anim_events.ron";
@@ -404,7 +722,6 @@ impl Game for DemoGame {
                         AnimationEvent::new(0.25, "footstep").with_payload("footstep_grass"));
                     self.animation_events.add(&clip_name,
                         AnimationEvent::new(0.75, "footstep").with_payload("footstep_grass"));
-                    log::info!("Animation events: 2 demo events on clip '{}'", clip_name);
                 }
             }
         }
@@ -432,6 +749,10 @@ impl Game for DemoGame {
             map.action_in_context(act, "editor");
         }
         map.action_in_context("primary_fire", "gameplay");
+    }
+
+    fn wants_navmesh_bake(&mut self) -> bool {
+        std::mem::take(&mut self.navmesh_bake_requested)
     }
 
     fn update(
@@ -484,121 +805,55 @@ impl Game for DemoGame {
             if pan != (0.0, 0.0) { self.camera.pan(pan.0, pan.1); }
         }
 
-        self.orbit_phase += dt * 0.5;
-        let (sp, cp) = self.orbit_phase.sin_cos();
-        let pts: Vec<Entity> = world.query::<PointLight>().map(|(e, _)| e).collect();
-        if pts.len() >= 3 {
-            if let Some(t) = world.get_mut::<Transform>(pts[1]) {
-                t.position.x = cp * 12.0; t.position.z = sp * 12.0;
-            }
-            if let Some(t) = world.get_mut::<Transform>(pts[2]) {
-                t.position.x = -cp * 12.0; t.position.z = -sp * 12.0;
-            }
-        }
+        self.orbit_phase += dt * 0.4;
 
         if !self.spawned {
             self.spawned = true;
-            rpg::spawn_scene(world);
 
-            {
-                let e = world.spawn();
-                world.insert(e, Name("Sun".into()));
-                world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
-                let mut sun = DirectionalLight::sun();
-                sun.intensity = 3.0;
-                world.insert(e, sun);
-            }
-            {
-                let e = world.spawn();
-                world.insert(e, Name("FillLight".into()));
-                world.insert(e, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
-                world.insert(e, DirectionalLight::fill());
-            }
-            for (i, (pos, color, intensity, range)) in [
-                ([0.0_f32, 3.0, 0.0], [1.0_f32, 0.4, 0.2], 4.0_f32, 18.0_f32),
-                ([10.0, 4.0, 10.0], [0.2, 0.6, 1.0], 3.0, 14.0),
-                ([-10.0, 4.0, -10.0], [0.4, 1.0, 0.4], 3.0, 14.0),
-            ].iter().enumerate() {
-                let e = world.spawn();
-                world.insert(e, Name(format!("PointLight_{}", i)));
-                world.insert(e, Transform::at(Vec3::from_array(*pos)));
-                world.insert(e, PointLight::new(*color, *intensity, *range));
-            }
+            spawn_arena_ground(world);
+            spawn_arena_walls(world);
+            spawn_arena_center(world);
+            spawn_arena_props(world);
+            spawn_arena_cover(world);
+            spawn_arena_elevator(world);
+            spawn_arena_lighting(world);
+            spawn_arena_decals(world);
 
-            spawn_elevator(world, (8.0, 8.0), vec![0.0, 3.0, 6.0, 9.0], 2.5);
+            self.bell_entity = Some(spawn_arena_bell(world));
 
-            for i in 0..5 {
-                let e = world.spawn();
-                let x = (i as f32 - 2.0) * 3.0;
-                world.insert(e, Name(format!("BloodDecal_{}", i)));
-                world.insert(e, Transform::at(Vec3::new(x, 0.06, 4.0))
-                    .with_scale_xyz(2.0, 0.2, 2.0));
-                world.insert(e, Decal {
-                    texture: "checker".into(),
-                    tint: [0.8, 0.05, 0.05, 0.9],
-                });
+            log::info!("Spawned arena: {}×{} m, walls, platform, props",
+                ARENA_HALF as u32 * 2, ARENA_HALF as u32 * 2);
+        }
+
+        if self.spawned && !self.ai_spawned {
+            self.ai_spawned = true;
+            self.ai_target_entity = Some(spawn_arena_ai_target(world));
+            spawn_arena_ai(world);
+            self.navmesh_bake_requested = true;
+        }
+
+        if let Some(t) = self.ai_target_entity {
+            let p = self.camera.position();
+            if let Some(tr) = world.get_mut::<Transform>(t) {
+                tr.position = Vec3::new(p.x, p.y - 0.8, p.z);
             }
+        }
 
-            {
-                let bell = world.spawn();
-                world.insert(bell, Name("Bell".into()));
-                world.insert(bell, Transform::at(Vec3::new(5.0, 2.0, 5.0)).with_scale(0.3));
-                world.insert(bell, MeshHandle("sphere".into()));
-                world.insert(bell, MaterialHandle("emissive".into()));
-                world.insert(bell, Spinner::new(Vec3::Y, 0.8));
-                world.insert(bell, Timer::new(2.0));
-                // ИЗМЕНЕНО (Фаза 4.2): колокольчик маршрутизируется на
-                // шину Music для демонстрации работы шин. Открой
-                // `all_bus_volumes` в UI/коде и покрути Music — ding
-                // станет тише/громче независимо от выстрелов (SFX).
-                world.insert(bell, AudioSource::new("ding")
-                    .with_bus(AudioBus::Music)
-                    .with_range(0.5, 15.0)
-                    .with_volume(1.0));
-                self.bell_entity = Some(bell);
-                log::info!("Bell spawned at (5, 2, 5) on Music bus");
-            }
-
-            let mut index = 0;
-            for inst in &self.gltf_instances {
-                let e = world.spawn();
-                let node_label = inst.node_name.clone().unwrap_or_else(|| format!("Gltf_{}", index));
-                world.insert(e, Name(node_label));
-                let (scale, rot, trans) = inst.model.to_scale_rotation_translation();
-                let offset = Vec3::new((index as f32) * 3.0 - 3.0, 0.5, 30.0);
-                world.insert(e, Transform::at(trans + offset).with_rotation(rot).with_scale(scale.x));
-                world.insert(e, MeshHandle(inst.mesh_name.clone()));
-                world.insert(e, MaterialHandle(inst.material_name.clone()));
-                world.insert(e, TextureTiling::default());
-                if let Some(skel_name) = &inst.skeleton_name {
-                    world.insert(e, SkeletonHandle(skel_name.clone()));
+        let finished: Vec<Entity> = world.read_events::<TimerFinished>()
+            .map(|ev| ev.entity).collect();
+        for e in finished {
+            if Some(e) == self.bell_entity {
+                if let Some(src) = world.get_mut::<AudioSource>(e) {
+                    src.playing = true;
                 }
-                if let Some(clip) = &inst.default_animation {
-                    world.insert(e, AnimationPlayer::new(clip.clone()));
-                }
-                index += 1;
+                if let Some(t) = world.get_mut::<Timer>(e) { t.restart(); }
             }
-
-            log::info!("Spawned RPG scene + lights + elevator + decals + bell");
         }
 
         if self.spawned {
             let player_pos = self.camera.position();
-
-            let finished: Vec<Entity> = world.read_events::<TimerFinished>()
-                .map(|ev| ev.entity).collect();
-            for e in finished {
-                if Some(e) == self.bell_entity {
-                    if let Some(src) = world.get_mut::<AudioSource>(e) {
-                        src.playing = true;
-                    }
-                    if let Some(t) = world.get_mut::<Timer>(e) { t.restart(); }
-                }
-            }
-
-            let elevator_entities: Vec<Entity> =
-                world.query::<Elevator>().map(|(e, _)| e).collect();
-            for e in elevator_entities {
+            let elevators: Vec<Entity> = world.query::<Elevator>().map(|(e, _)| e).collect();
+            for e in elevators {
                 let (sensor_r, center, half) = match (
                     world.get::<Elevator>(e).map(|el| el.sensor_radius),
                     world.get::<Transform>(e),
@@ -606,46 +861,40 @@ impl Game for DemoGame {
                     (Some(r), Some(t)) => (r, t.position, t.scale.abs() * 0.5),
                     _ => continue,
                 };
-
                 let dx = player_pos.x - center.x;
                 let dz = player_pos.z - center.z;
                 let dist_xz = (dx * dx + dz * dz).sqrt();
                 let in_xz = dist_xz < sensor_r + half.x.max(half.z);
-
                 let dy = player_pos.y - center.y;
-                let in_y = dy > -1.0 && dy < 3.0;
-
+                let in_y = dy > -1.5 && dy < 3.5;
                 if let Some(el) = world.get_mut::<Elevator>(e) {
                     el.player_inside = in_xz && in_y;
                 }
             }
+        }
 
-            rpg::tick(&mut self.rpg, world, player_pos, dt);
+        let anim_entities: Vec<_> = world.query::<AnimationPlayer>().map(|(e, _)| e).collect();
+        for e in anim_entities {
+            let Some(player) = world.get::<AnimationPlayer>(e) else { continue };
+            let clip_name = player.clip.clone();
+            let speed = player.speed;
+            let looping = player.looping;
 
-            if input.play_mode && input.key_pressed(KeyCode::KeyE) {
-                let origin = self.camera.position();
-                let dir = self.camera.forward();
-                if let Some((target, dist)) = crate::editor::picking::pick_ray(world, renderer, origin, dir) {
-                    if dist < self.rpg_interact_distance() {
-                        let handled = rpg::try_interact(world, &mut self.rpg, target);
-                        if !handled {
-                            if let Some(&inter) = world.get::<Interactable>(target) {
-                                match inter {
-                                    Interactable::Pickup => { world.despawn(target); }
-                                    Interactable::Paint(c) => { world.insert(target, Tint(c)); }
-                                    Interactable::Toggle => {
-                                        if let Some(sp) = world.get_mut::<Spinner>(target) {
-                                            sp.speed = -sp.speed;
-                                        } else if let Some(el) = world.get_mut::<Elevator>(target) {
-                                            el.call(el.target_floor);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let new_time = if let Some(player) = world.get_mut::<AnimationPlayer>(e) {
+                player.time += dt * speed;
+                player.time
+            } else { continue };
+
+            let Some(clip) = self.animations.get(&clip_name) else { continue };
+            let duration = clip.duration;
+            let final_time = if looping && duration > 0.0 { new_time % duration } else { new_time.min(duration) };
+
+            let Some(skel_handle) = world.get::<SkeletonHandle>(e).cloned() else { continue };
+            let Some(skel) = self.skeletons.get(&skel_handle.0) else { continue };
+
+            let local_pose = clip.local_pose(final_time, &skel.local_bind);
+            let joint_matrices = skel.joint_matrices(&local_pose);
+            renderer.update_skeleton(&skel_handle.0, &joint_matrices);
         }
 
         for sys in self.systems.iter_mut() {
@@ -669,16 +918,12 @@ impl Game for DemoGame {
     fn apply_postfx(&mut self, postfx: PostFx) { self.postfx = postfx; }
 
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
-        log::info!("Play-in-Editor: snapshotting RPG state");
-        Some(Box::new(self.rpg.clone()))
+        Some(Box::new(()))
     }
+    fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 
-    fn on_play_exit(&mut self, state: Box<dyn Any>) {
-        match state.downcast::<RpgState>() {
-            Ok(rpg) => { self.rpg = *rpg; log::info!("Play-in-Editor: RPG state restored"); }
-            Err(_) => { log::warn!("Play-in-Editor: failed to downcast RPG state"); }
-        }
-    }
+    fn save_game_state(&self) -> Option<String> { None }
+    fn load_game_state(&mut self, _ron: &str) {}
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
         use std::collections::HashMap;
@@ -762,8 +1007,8 @@ impl Game for DemoGame {
     fn collect_lines(&mut self, world: &mut World, renderer: &Renderer, selected: &[Entity]) -> Vec<LineVertex> {
         let mut batch = LineBatch::new();
         if self.show_grid {
-            batch.grid(100.0, 2.0, [0.15, 0.18, 0.22, 1.0], [0.35, 0.40, 0.48, 1.0], 5);
-            batch.axes(5.0);
+            batch.grid(40.0, 1.0, [0.15, 0.18, 0.22, 0.6], [0.35, 0.40, 0.48, 0.8], 5);
+            batch.axes(3.0);
         }
         for &e in selected {
             if let Some(v) = world.get::<Visible>(e) { if !v.0 { continue; } }
@@ -775,6 +1020,39 @@ impl Game for DemoGame {
                 }
             }
         }
+
+        for (e, agent) in world.query::<AiAgent>() {
+            if !world.has::<DebugPath>(e) { continue; }
+            if agent.path.len() < 2 { continue; }
+            for w in agent.path.windows(2) {
+                batch.line(
+                    w[0] + Vec3::Y * 0.1,
+                    w[1] + Vec3::Y * 0.1,
+                    [1.0, 0.9, 0.2, 0.9],
+                );
+            }
+        }
+
+        for (e, agent) in world.query::<AiAgent>() {
+            let Some(t) = world.get::<Transform>(e) else { continue };
+            let eye = t.position + Vec3::Y * 1.0;
+            let fwd = Vec3::new(-agent.yaw.sin(), 0.0, -agent.yaw.cos());
+            let color = match agent.state {
+                AiState::Idle | AiState::Patrol => [0.4, 0.9, 0.4, 0.7],
+                AiState::Investigate => [0.9, 0.7, 0.3, 0.8],
+                AiState::Chase => [1.0, 0.8, 0.2, 0.8],
+                AiState::Attack => [1.0, 0.3, 0.3, 0.9],
+                AiState::Dead => [0.4, 0.4, 0.4, 0.4],
+            };
+            let range = agent.vision_range.min(8.0);
+            let half = agent.vision_angle_cos.acos();
+            batch.line(eye, eye + fwd * range, color);
+            let left = Quat::from_axis_angle(Vec3::Y, half) * fwd;
+            let right = Quat::from_axis_angle(Vec3::Y, -half) * fwd;
+            batch.line(eye, eye + left * range, color);
+            batch.line(eye, eye + right * range, color);
+        }
+
         batch.vertices().to_vec()
     }
 
@@ -795,31 +1073,13 @@ impl Game for DemoGame {
         }).take(16).collect()
     }
 
-    fn ambient(&self) -> [f32; 3] { [0.03, 0.035, 0.05] }
+    fn ambient(&self) -> [f32; 3] { [0.04, 0.045, 0.06] }
     fn postfx(&self) -> PostFx { self.postfx }
     fn camera(&self) -> &Camera3D { &self.camera }
     fn camera_mut(&mut self) -> &mut Camera3D { &mut self.camera }
 
-    fn rpg_hud(&self) -> Vec<(String, String)> { self.rpg.hud_lines() }
-    fn on_kill(&mut self, world: &mut World, target: Entity) { rpg::on_kill(world, &mut self.rpg, target); }
-
-    fn save_game_state(&self) -> Option<String> {
-        match ron::ser::to_string(&self.rpg) {
-            Ok(s) => Some(s),
-            Err(e) => { log::warn!("Failed to serialize RpgState: {}", e); None }
-        }
-    }
-
-    fn load_game_state(&mut self, ron_str: &str) {
-        match ron::from_str::<RpgState>(ron_str) {
-            Ok(s) => {
-                self.rpg = s;
-                log::info!("RpgState restored: gold={}, keys={}, quests={}",
-                    self.rpg.gold, self.rpg.keys.len(), self.rpg.quests.len());
-            }
-            Err(e) => log::error!("Failed to parse RpgState: {}", e),
-        }
-    }
+    fn rpg_hud(&self) -> Vec<(String, String)> { Vec::new() }
+    fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
 }
 
 fn main() {

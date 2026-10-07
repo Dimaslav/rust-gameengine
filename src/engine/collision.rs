@@ -349,15 +349,13 @@ pub fn resolve_movement_ex(
     }
 
     let support = find_support(world, pos, cap);
-    if support.is_some() {
+    if support.is_some() && delta.y <= 0.0 {
         on_ground = true;
     }
 
     MovementResult { new_feet: pos, landed: on_ground, support }
 }
 
-/// Совместимость с прежним API. Не используется внутри — оставлено
-/// на случай внешних вызовов.
 pub fn resolve_movement(
     world: &World,
     start_feet: Vec3,

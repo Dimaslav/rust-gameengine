@@ -16,6 +16,7 @@ use crate::editor::palette::PaletteItem;
 use crate::editor::placement;
 use crate::editor::ui::{self as editor_ui, AudioSnapshot, Stats, UiAssets, UiState};
 use crate::editor::{BoxSelect, Editor, EditorAction};
+use crate::game::ai::{NoiseEvent, NoiseKind};
 use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::{
     Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle, MeshHandle, Parent,
@@ -24,7 +25,7 @@ use crate::game::components::{
 };
 use crate::game::decals::Decal;
 use crate::game::lights::{DirectionalLight, PointLight};
-use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
+use crate::physics::navmesh::{BakeOpts, Navmesh};
 use crate::physics::{BodyType, PhysicsWorld};
 use crate::render::decal::{DecalDraw, DecalInstance};
 use crate::render::{
@@ -33,6 +34,7 @@ use crate::render::{
 };
 use glam::Vec3;
 
+use super::ai_system::AiSystem;
 use super::audio::AudioSystem;
 use super::collision::{self, PlayerCapsule};
 use super::input::Input;
@@ -42,6 +44,12 @@ use super::time::Time;
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
     fn configure_input(&mut self, _map: &mut crate::engine::InputMap) {}
+
+    /// ИЗМЕНЕНО (Фаза 6): движок вызывает этот метод каждый кадр
+    /// (после `game.update`). Если игра вернула `true` — движок
+    /// делает бейк navmesh.
+    fn wants_navmesh_bake(&mut self) -> bool { false }
+
     fn update(&mut self, _world: &mut World, _input: &Input, _renderer: &mut Renderer, _dt: f32) -> bool { true }
     fn collect_draws(&mut self, _world: &mut World, _renderer: &Renderer) -> Vec<MeshDraw> { Vec::new() }
     fn collect_lines(&mut self, _world: &mut World, _renderer: &Renderer, _selected: &[Entity]) -> Vec<LineVertex> { Vec::new() }
@@ -100,6 +108,14 @@ pub struct App<G: Game> {
     elevator_prev_state: HashMap<Entity, ElevatorState>,
 
     pickable: Option<PickableSet>,
+
+    navmesh: Option<Navmesh>,
+    ai_system: AiSystem,
+
+    /// ИЗМЕНЕНО (sound perception): счётчик шагов игрока для эмита
+    /// `NoiseEvent::Footstep`. Инкрементируется в `update_player`,
+    /// сбрасывается в 0 каждые `FOOTSTEP_INTERVAL` секунд.
+    footstep_timer: f32,
 }
 
 impl<G: Game> Drop for App<G> {
@@ -171,6 +187,9 @@ impl<G: Game> App<G> {
             play_snapshot: None,
             elevator_prev_state: HashMap::new(),
             pickable: None,
+            navmesh: None,
+            ai_system: AiSystem::new(),
+            footstep_timer: 0.0,
         };
         let initial_postfx = app.editor.state.settings.postfx;
         app.game.apply_postfx(initial_postfx);
@@ -260,10 +279,10 @@ impl<G: Game> App<G> {
                 self.editor.state.selected = snap.selection.iter()
                     .filter_map(|old| id_map.get(old).copied()).collect();
                 log::info!(
-                    "Play-in-Editor: world restored ({} entities, {} selected remapped, \
-                     materials + textures from snapshot)",
+                    "Play-in-Editor: world restored ({} entities, {} selected remapped)",
                     self.world.len(), self.editor.state.selected.len()
                 );
+                self.navmesh = None;
             }
             Err(e) => log::error!("Failed to restore world after Play: {}", e),
         }
@@ -294,12 +313,22 @@ impl<G: Game> App<G> {
         self.elevator_prev_state.retain(|k, _| live.contains(k));
     }
 
+    fn bake_navmesh(&mut self) {
+        let opts = BakeOpts::default();
+        let nm = Navmesh::bake(&self.world, &opts);
+        log::info!(
+            "Navmesh baked: {} walkable cells, grid {}×{}, cell_size {:.2}",
+            nm.walkable_count(),
+            nm.grid_size().0,
+            nm.grid_size().1,
+            nm.cell_size(),
+        );
+        self.navmesh = Some(nm);
+    }
+
     /// ИЗМЕНЕНО (Фаза 5): платформерный контроллер.
-    ///
-    /// * Velocity-сглаживание вместо instant → air control.
-    /// * Coyote time + jump buffer.
-    /// * Slope slide (крутые склоны).
-    /// * Step-down при спуске с уступов.
+    /// ИЗМЕНЕНО (bugfix jump): фикс отмены прыжка в первом кадре.
+    /// ИЗМЕНЕНО (sound perception): emit noise on shot / footsteps.
     fn update_player(&mut self, dt: f32) {
         // ------------------------------------------------------------------
         // 1. Look
@@ -394,16 +423,12 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 5. Horizontal velocity — exponential smoothing к target
+        // 5. Horizontal velocity — exponential smoothing
         // ------------------------------------------------------------------
         {
             let play = &mut self.editor.state.play;
             let tau = if was_on_ground { ground_accel_tau } else { air_accel_tau };
-            let alpha = if tau > 1e-4 {
-                1.0 - (-dt / tau).exp()
-            } else {
-                1.0
-            };
+            let alpha = if tau > 1e-4 { 1.0 - (-dt / tau).exp() } else { 1.0 };
             play.horizontal_velocity +=
                 (target_velocity - play.horizontal_velocity) * alpha;
         }
@@ -413,6 +438,7 @@ impl<G: Game> App<G> {
         // ------------------------------------------------------------------
         let mut vvel = self.editor.state.play.vertical_velocity;
         let mut on_ground = self.editor.state.play.on_ground;
+        let mut did_jump = false;
 
         let can_jump = {
             let play = &self.editor.state.play;
@@ -423,6 +449,7 @@ impl<G: Game> App<G> {
         if can_jump {
             vvel = jump_speed;
             on_ground = false;
+            did_jump = true;
             let play = &mut self.editor.state.play;
             play.jump_buffer_timer = 0.0;
             play.coyote_timer = 0.0;
@@ -485,20 +512,20 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 9. Landed / air state
+        // 9. Landed / air state (bugfix jump)
         // ------------------------------------------------------------------
-        if landed {
+        if did_jump {
+            on_ground = false;
+        } else if landed && dy <= 0.0 {
             vvel = 0.0;
             on_ground = true;
+        } else if dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+            vvel = 0.0;
+            on_ground = true;
+        } else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
+            vvel = 0.0;
         } else {
-            if dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
-                vvel = 0.0;
-                on_ground = true;
-            } else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
-                vvel = 0.0;
-            } else {
-                on_ground = false;
-            }
+            on_ground = false;
         }
 
         // ------------------------------------------------------------------
@@ -532,6 +559,27 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
+        // 11b. Footstep noise (sound perception)
+        // ------------------------------------------------------------------
+        //
+        // Эмитим шум шага каждые ~0.4с при движении по земле.
+        // Скорость шага выше при беге — шаги чаще.
+        if on_ground && horizontal_moved > 0.001 {
+            self.footstep_timer -= dt;
+            if self.footstep_timer <= 0.0 {
+                self.footstep_timer = if running { 0.3 } else { 0.5 };
+                let pos = self.game.camera().position();
+                self.world.send(NoiseEvent {
+                    position: pos,
+                    radius: NoiseKind::Footstep.default_radius(),
+                    kind: NoiseKind::Footstep,
+                });
+            }
+        } else {
+            self.footstep_timer = 0.0;
+        }
+
+        // ------------------------------------------------------------------
         // 12. Firing
         // ------------------------------------------------------------------
         let origin = self.game.camera().position();
@@ -553,6 +601,14 @@ impl<G: Game> App<G> {
             && self.editor.state.play.ammo > 0;
         if can_fire {
             if let Some(audio) = &mut self.audio { audio.play("shot"); }
+
+            // ИЗМЕНЕНО (sound perception): выстрел привлекает AI.
+            self.world.send(NoiseEvent {
+                position: origin,
+                radius: NoiseKind::Gunshot.default_radius(),
+                kind: NoiseKind::Gunshot,
+            });
+
             let muzzle = origin + dir * 0.5;
             self.spawn_burst(muzzle, &particles::sparks(dir));
             let damage = self.editor.state.play.damage_per_shot;
@@ -629,11 +685,12 @@ impl<G: Game> App<G> {
         }
 
         // ------------------------------------------------------------------
-        // 14. Chase NPCs
+        // 14. Legacy Chase NPCs (без AiAgent)
         // ------------------------------------------------------------------
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
+            if self.world.has::<crate::game::ai::AiAgent>(e) { continue; }
             let c = self.world.get::<Chase>(e).copied();
             if let Some(c) = c {
                 if let Some(t) = self.world.get_mut::<Transform>(e) {
@@ -862,7 +919,6 @@ impl<G: Game> App<G> {
                     self.editor.state.play.paused = false;
                     self.time.paused = false;
                     log::info!("Resumed play");
-                    // ИЗМЕНЕНО (Фаза 5): сброс coyote/buffer при resume.
                     self.editor.state.play.coyote_timer = self.editor.state.play.coyote_time;
                     self.editor.state.play.jump_buffer_timer = 0.0;
                     let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
@@ -934,6 +990,10 @@ impl<G: Game> App<G> {
             let continue_running = self.game.update(&mut self.world, &self.input, &mut self.renderer, dt);
             if !continue_running { elwt.exit(); return; }
 
+            if self.game.wants_navmesh_bake() {
+                self.bake_navmesh();
+            }
+
             if let Some(audio) = self.audio.as_mut() {
                 let listener_pos = self.game.camera().position();
                 audio.update(&mut self.world, listener_pos, dt);
@@ -941,6 +1001,8 @@ impl<G: Game> App<G> {
 
             self.update_elevator_ding();
             self.physics.step(&mut self.world, dt);
+
+            self.ai_system.update(&mut self.world, self.navmesh.as_ref(), dt);
 
             if self.editor.state.play.active {
                 self.input.editor_captured = false;
@@ -1186,6 +1248,17 @@ impl<G: Game> App<G> {
         }
 
         let mut lines = self.game.collect_lines(&mut self.world, &self.renderer, &selected);
+
+        if self.editor.state.settings.show_navmesh {
+            if let Some(nm) = &self.navmesh {
+                let mut batch = LineBatch::new();
+                for (a, b) in nm.walkable_edges() {
+                    batch.line(a, b, [0.25, 1.0, 0.4, 0.75]);
+                }
+                lines.extend_from_slice(batch.vertices());
+            }
+        }
+
         if !self.editor.state.play.active && !selected.is_empty() {
             let mut batch = LineBatch::new();
             gizmo::draw_gizmo(&mut batch, &self.world, &selected, self.game.camera(), &self.editor.state.gizmo);
@@ -1277,10 +1350,13 @@ impl<G: Game> App<G> {
                 if self.editor.state.play.paused { "PAUSED" } else { "PLAY" }
             }
             else if self.editor.state.flying { "FLY" } else { "EDIT" };
+            let navmesh_str = self.navmesh.as_ref()
+                .map(|nm| format!("{} cells", nm.walkable_count()))
+                .unwrap_or_else(|| "not baked".to_string());
             self.window.set_title(&format!(
                 "Rust Engine 3D [{}] | FPS {:>5.1} | Frame {:.2}/{:.2} ms | \
                  Hitches {} | Entities {} | Sel {} | Particles {} | Proj {} | \
-                 Physics {} pairs | Audio {}",
+                 Physics {} pairs | Audio {} | Navmesh {}",
                 mode_str, self.time.fps(),
                 self.time.frame_time_avg_ms(), self.time.frame_time_max_ms(),
                 self.time.hitches, self.world.len(),
@@ -1288,6 +1364,7 @@ impl<G: Game> App<G> {
                 self.particles.len(), self.projectiles.len(),
                 self.physics.last_broad_pairs,
                 self.audio.as_ref().map(|a| a.active_count()).unwrap_or(0),
+                navmesh_str,
             ));
         }
         self.input.end_frame();
@@ -1317,7 +1394,6 @@ impl<G: Game> App<G> {
             Trigger, TriggerAction, Velocity, Visible,
         };
         use crate::game::lights::{DirectionalLight, PointLight};
-        use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
         use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 
         let originals: Vec<Entity> = self.editor.state.selected.iter().copied()
@@ -1374,6 +1450,28 @@ impl<G: Game> App<G> {
                 self.world.insert(new_e, s);
             }
 
+            if let Some(agent) = self.world.get::<crate::game::ai::AiAgent>(e).cloned() {
+                let mut a = agent;
+                a.path.clear();
+                a.path_index = 0;
+                a.repath_timer = 0.0;
+                a.attack_timer = 0.0;
+                a.last_seen_pos = None;
+                a.time_since_seen = 999.0;
+                a.state = crate::game::ai::AiState::Idle;
+                a.state_timer = 0.0;
+                self.world.insert(new_e, a);
+            }
+            if let Some(patrol) = self.world.get::<crate::game::ai::PatrolPath>(e).cloned() {
+                self.world.insert(new_e, patrol);
+            }
+            if self.world.has::<crate::game::ai::AiTarget>(e) {
+                self.world.insert(new_e, crate::game::ai::AiTarget);
+            }
+            if self.world.has::<crate::game::ai::Enemy>(e) {
+                self.world.insert(new_e, crate::game::ai::Enemy);
+            }
+
             if let Some(mut t) = self.world.get::<Trigger>(e).cloned() {
                 if let TriggerAction::CallElevator { elevator, floor_idx } = t.action {
                     let new_el = old_to_new.get(&elevator).copied().unwrap_or(elevator);
@@ -1383,13 +1481,6 @@ impl<G: Game> App<G> {
             }
             if let Some(l) = self.world.get::<DirectionalLight>(e).copied() { self.world.insert(new_e, l); }
             if let Some(l) = self.world.get::<PointLight>(e).copied() { self.world.insert(new_e, l); }
-
-            if let Some(g) = self.world.get::<GoldValue>(e).copied() { self.world.insert(new_e, g); }
-            if let Some(k) = self.world.get::<KeyItem>(e).copied() { self.world.insert(new_e, k); }
-            if let Some(c) = self.world.get::<Chest>(e).cloned() { self.world.insert(new_e, c); }
-            if let Some(d) = self.world.get::<Door>(e).cloned() { self.world.insert(new_e, d); }
-            if let Some(n) = self.world.get::<Npc>(e).cloned() { self.world.insert(new_e, n); }
-            if let Some(q) = self.world.get::<QuestTarget>(e).copied() { self.world.insert(new_e, q); }
 
             if let Some(&Parent(p)) = self.world.get::<Parent>(e) {
                 let new_parent = old_to_new.get(&p).copied().unwrap_or(p);
@@ -1448,7 +1539,13 @@ impl<G: Game> App<G> {
         match item {
             PaletteItem::Enemy => {
                 self.world.insert(e, Health::new(50.0));
-                self.world.insert(e, Chase::new(3.0, 1.2));
+                self.world.insert(e, crate::game::ai::Enemy);
+                let agent = crate::game::ai::AiAgent::new()
+                    .with_speed(3.5)
+                    .with_vision(15.0, 60_f32.to_radians())
+                    .with_hearing(20.0)
+                    .with_attack(1.5, 8.0, 0.9);
+                self.world.insert(e, agent);
             }
             PaletteItem::Pickup => { self.world.insert(e, Interactable::Pickup); }
             PaletteItem::Switch => {
@@ -1490,7 +1587,6 @@ impl<G: Game> App<G> {
                     play.highlight = None;
                     play.crouching = false;
                     play.current_eye_height = play.eye_height;
-                    // ИЗМЕНЕНО (Фаза 5): сброс платформерных таймеров.
                     play.horizontal_velocity = Vec3::ZERO;
                     play.coyote_timer = play.coyote_time;
                     play.jump_buffer_timer = 0.0;
@@ -1512,6 +1608,7 @@ impl<G: Game> App<G> {
                     self.input.skip_motion_frames = 4;
                     self.particles.clear();
                     self.projectiles.clear();
+                    self.footstep_timer = 0.0;
                     log::info!("Entered play mode at ({:.2}, {:.2}, {:.2})", spawn.x, spawn.y, spawn.z);
                 } else {
                     self.game.camera_mut().exit_fps();
@@ -1536,12 +1633,12 @@ impl<G: Game> App<G> {
                     play.highlight = None;
                     play.crouching = false;
                     play.current_eye_height = play.eye_height;
-                    // ИЗМЕНЕНО (Фаза 5).
                     play.horizontal_velocity = Vec3::ZERO;
                     play.coyote_timer = 0.0;
                     play.jump_buffer_timer = 0.0;
                     self.particles.clear();
                     self.projectiles.clear();
+                    self.footstep_timer = 0.0;
                     log::info!("Exited play mode (world restored from snapshot)");
                 }
             }
@@ -1644,6 +1741,7 @@ impl<G: Game> App<G> {
                     if let Some(ron) = game_state_ron {
                         self.game.load_game_state(&ron);
                     }
+                    self.navmesh = None;
                 }
             }
             EditorAction::Redo => {
@@ -1656,6 +1754,7 @@ impl<G: Game> App<G> {
                     if let Some(ron) = game_state_ron {
                         self.game.load_game_state(&ron);
                     }
+                    self.navmesh = None;
                 }
             }
             EditorAction::Save => {
@@ -1680,6 +1779,7 @@ impl<G: Game> App<G> {
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
+                        self.navmesh = None;
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
                         if let Some(ron) = game_state_ron {
                             self.game.load_game_state(&ron);
@@ -1701,6 +1801,7 @@ impl<G: Game> App<G> {
                         self.world = new_world;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
+                        self.navmesh = None;
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
                         if let Some(ron) = game_state_ron {
                             self.game.load_game_state(&ron);
@@ -1721,6 +1822,7 @@ impl<G: Game> App<G> {
                 self.editor.state.clipboard_transform = None;
                 self.particles.clear();
                 self.projectiles.clear();
+                self.navmesh = None;
                 log::info!("Created new empty scene");
             }
             EditorAction::AddCube | EditorAction::AddSphere => {
@@ -1870,6 +1972,7 @@ impl<G: Game> App<G> {
                             stats.total_vertices, stats.total_triangles, path.display()
                         );
                         self.editor.state.selected.clear();
+                        self.navmesh = None;
                     }
                     Err(e) => log::error!("FBX import failed: {:#}", e),
                 }
@@ -1935,14 +2038,8 @@ impl<G: Game> App<G> {
                     .unwrap_or_else(|| "sound".to_string());
                 if let Some(audio) = self.audio.as_mut() {
                     match audio.load_sound_from_file(&name, &path) {
-                        Ok(()) => log::info!(
-                            "Sound '{}' loaded from {}",
-                            name, path.display()
-                        ),
-                        Err(e) => log::error!(
-                            "Failed to load sound from {}: {:#}",
-                            path.display(), e
-                        ),
+                        Ok(()) => log::info!("Sound '{}' loaded from {}", name, path.display()),
+                        Err(e) => log::error!("Failed to load sound from {}: {:#}", path.display(), e),
                     }
                 }
             }
@@ -1950,6 +2047,10 @@ impl<G: Game> App<G> {
                 if let Some(audio) = self.audio.as_mut() {
                     audio.play(&name);
                 }
+            }
+
+            EditorAction::BakeNavmesh => {
+                self.bake_navmesh();
             }
         }
     }

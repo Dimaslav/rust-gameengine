@@ -19,9 +19,17 @@ pub struct EditorSettings {
     pub show_stats_panel: bool,
     pub show_hierarchy_panel: bool,
     pub show_inspector_panel: bool,
-    /// ИЗМЕНЕНО (Фаза 4.4): видимость окна аудио.
     #[serde(default)]
     pub show_audio_panel: bool,
+
+    /// ИЗМЕНЕНО (Фаза 6.5): показывать navmesh в вьюпорте.
+    ///
+    /// Когда `true`, `App::redraw` добавляет линии границ
+    /// walkable-ячеек (из `Navmesh::walkable_edges`) в общий
+    /// `LineBatch`. Работает только когда navmesh запечён.
+    #[serde(default)]
+    pub show_navmesh: bool,
+
     pub left_panel_width: f32,
     pub right_panel_width: f32,
 
@@ -43,22 +51,12 @@ pub struct EditorSettings {
     // === Recent ===
     pub recent_scenes: Vec<String>,
 
-    /// Закладки камеры (9 слотов).
     #[serde(default)]
     pub camera_bookmarks: CameraBookmarks,
 
-    /// Графические настройки (PostFx).
     #[serde(default)]
     pub postfx: PostFx,
 
-    /// ИЗМЕНЕНО (Фаза 4.4): громкость аудио-шин по имени.
-    ///
-    /// Ключ — строковое имя шины (`"Master"`, `"Sfx"`, `"Music"`,
-    /// `"Voice"`, `"Ui"`). Значение — громкость в `[0, 2]`.
-    ///
-    /// Строки, а не `AudioBus` — чтобы `editor.ron` оставался читаемым
-    /// и не ломался при переименовании enum-вариантов. При загрузке
-    /// `App` маппит имена обратно в `AudioBus`.
     #[serde(default)]
     pub audio_bus_volumes: HashMap<String, f32>,
 }
@@ -71,6 +69,7 @@ impl Default for EditorSettings {
             show_hierarchy_panel: true,
             show_inspector_panel: true,
             show_audio_panel: false,
+            show_navmesh: false,
             left_panel_width: 260.0,
             right_panel_width: 340.0,
             save_path: "scene.ron".to_string(),

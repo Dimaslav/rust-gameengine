@@ -1,3 +1,4 @@
+pub mod ai_system;
 pub mod app;
 pub mod audio;
 pub mod character;
@@ -8,6 +9,7 @@ pub mod input_keys;
 pub mod particles;
 pub mod time;
 
+pub use ai_system::{AiSystem, AiTuning};
 pub use app::{run, Game};
 pub use audio::AudioSystem;
 pub use character::{apply_radial_impulse, push_dynamic_bodies};

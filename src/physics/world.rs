@@ -1,8 +1,22 @@
 //! PhysicsWorld: пошаговая симуляция.
+//!
+//! ИЗМЕНЕНО (rotation): добавлена угловая динамика.
+//!   * `BodyState` теперь хранит `rotation`, `angular_velocity`, `inv_inertia`.
+//!   * Интеграция поворота через кватернионную производную.
+//!   * `Contact` хранит `point` — точку контакта в world-space для
+//!     angular impulse.
+//!   * `resolve_velocity` применяет линейный + угловой импульс.
+//!
+//! Ограничения:
+//!   * Инерция скалярная (изотропная). Для сферы — точная, для AABB —
+//!     усреднённая по осям (приближение, но визуально правдоподобно).
+//!   * Broad-phase по-прежнему AABB без учёта rotation — ящик
+//!     поворачивается визуально, но коллайдер считается AABB-ориентированным.
+//!     Для 90°-переворота это заметно, для лёгких поворотов — нет.
 
 use std::collections::HashSet;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::ecs::{Entity, World};
 use crate::game::components::{Parent, Transform};
@@ -10,24 +24,14 @@ use crate::game::components::{Parent, Transform};
 use super::components::{BodyType, Collider, PhysicsMaterial, RigidBody};
 
 const SLEEP_LINEAR_THRESHOLD: f32 = 0.05;
+const SLEEP_ANGULAR_THRESHOLD: f32 = 0.1;
 const SLEEP_TIME_REQUIRED: f32 = 0.5;
 const CONTACT_SLOP: f32 = 0.001;
 const BAUMGARTE: f32 = 0.2;
 const MAX_LINEAR_VELOCITY: f32 = 500.0;
+const MAX_ANGULAR_VELOCITY: f32 = 50.0;
 const VELOCITY_ITERATIONS: u32 = 4;
 
-/// ИЗМЕНЕНО (#20): максимальный шаг физики. Всё, что медленнее —
-/// «замедление времени» вместо «физического взрыва».
-///
-/// **Публичная константа**, потому что `engine::time::MAX_DELTA`
-/// теперь ссылается на неё. Раньше было два независимых `0.05`
-/// (здесь и в `time.rs`), синхронизированных комментарием. Если
-/// поменять здесь — time подхватит автоматически, компилятор
-/// проследит.
-///
-/// `time.rs` клампит свой `delta` этой же величиной, чтобы движок
-/// не получал `dt` больше, чем физика может обработать за один шаг.
-/// 0.05 s = 20 FPS. Всё медленнее — «замедляет» игровое время.
 pub const MAX_DT: f32 = 0.05;
 
 pub struct PhysicsWorld {
@@ -35,15 +39,6 @@ pub struct PhysicsWorld {
     pub enabled: bool,
     pub last_broad_pairs: usize,
     pub last_contacts: usize,
-
-    /// ИЗМЕНЕНО (#4): entity, для которых в прошлом кадре было
-    /// залогировано предупреждение «RigidBody + Parent → не симулируется».
-    ///
-    /// Раньше `collect_states` писал `log::debug!` на каждую такую entity
-    /// **каждый кадр**. В dev-сборке это давало до N×60 строк/сек спама,
-    /// в release — молчание. Теперь: `log::warn!` один раз на entity,
-    /// с автоматическим сбросом, когда entity перестаёт попадать
-    /// в категорию (убрали Parent или RigidBody).
     warned_parent_bodies: HashSet<Entity>,
 }
 
@@ -65,10 +60,15 @@ struct BodyState {
     body_type: BodyType,
     mass: f32,
     inv_mass: f32,
+    /// Скалярная обратная инерция. Для sphere — точная, для AABB — усреднённая.
+    inv_inertia: f32,
     position: Vec3,
     velocity: Vec3,
+    rotation: Quat,
+    angular_velocity: Vec3,
     gravity_scale: f32,
     linear_damping: f32,
+    angular_damping: f32,
     collider: Collider,
     material: PhysicsMaterial,
     scale: Vec3,
@@ -81,6 +81,8 @@ struct Contact {
     b: usize,
     normal: Vec3,
     penetration: f32,
+    /// Точка контакта в world-space.
+    point: Vec3,
 }
 
 impl PhysicsWorld {
@@ -88,9 +90,6 @@ impl PhysicsWorld {
         if !self.enabled || dt <= 0.0 { return; }
         let dt = dt.min(MAX_DT);
 
-        // ИЗМЕНЕНО (#4): `collect_states` теперь возвращает и список
-        // пропущенных entity (RigidBody + Parent). Логируем их один
-        // раз на entity через `warn_skipped_bodies`.
         let (mut states, skipped) = collect_states(world);
         self.warn_skipped_bodies(&skipped);
 
@@ -107,14 +106,23 @@ impl PhysicsWorld {
                     s.velocity += self.gravity * s.gravity_scale * dt;
                     let d = (1.0 - s.linear_damping * dt).max(0.0);
                     s.velocity *= d;
+                    s.angular_velocity *= (1.0 - s.angular_damping * dt).max(0.0);
+
                     let vlen = s.velocity.length();
                     if vlen > MAX_LINEAR_VELOCITY {
                         s.velocity *= MAX_LINEAR_VELOCITY / vlen;
                     }
+                    let wlen = s.angular_velocity.length();
+                    if wlen > MAX_ANGULAR_VELOCITY {
+                        s.angular_velocity *= MAX_ANGULAR_VELOCITY / wlen;
+                    }
+
                     s.position += s.velocity * dt;
+                    integrate_rotation(s, dt);
                 }
                 BodyType::Kinematic => {
                     s.position += s.velocity * dt;
+                    integrate_rotation(s, dt);
                 }
                 _ => {}
             }
@@ -149,11 +157,13 @@ impl PhysicsWorld {
 
             if a_kin && b_dyn && c.normal.y > 0.5 {
                 states[c.b].velocity = states[c.a].velocity;
+                states[c.b].angular_velocity = states[c.a].angular_velocity;
                 states[c.b].sleeping = false;
                 states[c.b].sleep_timer = 0.0;
             }
             if b_kin && a_dyn && c.normal.y < -0.5 {
                 states[c.a].velocity = states[c.b].velocity;
+                states[c.a].angular_velocity = states[c.b].angular_velocity;
                 states[c.a].sleeping = false;
                 states[c.a].sleep_timer = 0.0;
             }
@@ -167,12 +177,14 @@ impl PhysicsWorld {
         // 6. Sleep management.
         for s in states.iter_mut() {
             if s.body_type != BodyType::Dynamic { continue; }
-            let speed = s.velocity.length();
-            if speed < SLEEP_LINEAR_THRESHOLD {
+            let lin = s.velocity.length();
+            let ang = s.angular_velocity.length();
+            if lin < SLEEP_LINEAR_THRESHOLD && ang < SLEEP_ANGULAR_THRESHOLD {
                 s.sleep_timer += dt;
                 if s.sleep_timer > SLEEP_TIME_REQUIRED {
                     s.sleeping = true;
                     s.velocity = Vec3::ZERO;
+                    s.angular_velocity = Vec3::ZERO;
                 }
             } else {
                 s.sleep_timer = 0.0;
@@ -180,27 +192,16 @@ impl PhysicsWorld {
             }
         }
 
-        // 7. Записать обратно в ECS.
+        // 7. Записать обратно.
         write_back(world, &states);
     }
 
-    /// ИЗМЕНЕНО (#4): единожды логируем каждую entity, которую физика
-    /// пропускает из-за наличия `Parent`. Множество `warned_parent_bodies`
-    /// полностью перезаписывается текущим списком — если entity
-    /// перестала быть «Parent + RigidBody», она исчезнет из множества
-    /// и при следующем появлении снова получит одно предупреждение.
     fn warn_skipped_bodies(&mut self, skipped: &[Entity]) {
         let now: HashSet<Entity> = skipped.iter().copied().collect();
         for &e in &now {
             if !self.warned_parent_bodies.contains(&e) {
                 log::warn!(
-                    "Physics: entity #{} has both RigidBody (non-static) and \
-                     Parent — entity is NOT simulated. Parent-space dynamics \
-                     is unsupported: Transform.position is parent-local, and \
-                     gravity in a rotated parent frame would be wrong. \
-                     Remove Parent to enable simulation, or remove RigidBody \
-                     if the entity is meant to be driven by a parent system \
-                     (e.g. SlidingDoor).",
+                    "Physics: entity #{} has RigidBody + Parent — not simulated.",
                     e
                 );
             }
@@ -209,14 +210,54 @@ impl PhysicsWorld {
     }
 }
 
-/// ИЗМЕНЕНО (#4): возвращает также список entity, которые **хотели**
-/// бы симулироваться (RigidBody Dynamic/Kinematic), но пропущены
-/// из-за наличия `Parent`.
-///
-/// `Static` тела мы не считаем «пропущенными» — они и так не двигаются,
-/// `Parent` для них нормален (например, статичная деталь на движущейся
-/// платформе — но тогда она двигается через `world_matrix`, а не через
-/// физику).
+// ============================================================
+// Rotation integration
+// ============================================================
+
+fn integrate_rotation(s: &mut BodyState, dt: f32) {
+    if s.angular_velocity.length_squared() < 1e-10 { return; }
+    let w = s.angular_velocity;
+    // q' = q + 0.5 * dt * (ω_quat * q)
+    let wq = Quat::from_xyzw(w.x, w.y, w.z, 0.0);
+    let dq = wq * s.rotation;
+    let new_q = Quat::from_xyzw(
+        s.rotation.x + dq.x * 0.5 * dt,
+        s.rotation.y + dq.y * 0.5 * dt,
+        s.rotation.z + dq.z * 0.5 * dt,
+        s.rotation.w + dq.w * 0.5 * dt,
+    );
+    s.rotation = new_q.normalize();
+}
+
+// ============================================================
+// Inertia
+// ============================================================
+
+fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
+    if mass < 1e-6 { return 0.0; }
+    let i = match col {
+        Collider::Sphere { radius } => {
+            let r = radius * scale.max_element();
+            0.4 * mass * r * r
+        }
+        Collider::Aabb { half_extents } => {
+            let h = *half_extents * scale;
+            // Изотропное усреднение диагональных моментов.
+            mass * (h.x * h.x + h.y * h.y + h.z * h.z) / 3.0
+        }
+        Collider::Capsule { radius, height } => {
+            let r = radius * scale.max_element();
+            let h = height * scale.y * 0.5;
+            mass * (r * r * 0.5 + h * h / 3.0)
+        }
+    };
+    if i > 1e-8 { 1.0 / i } else { 0.0 }
+}
+
+// ============================================================
+// State collection
+// ============================================================
+
 fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
     let mut skipped = Vec::new();
@@ -225,13 +266,6 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
         let Some(col) = world.get::<Collider>(e).copied() else { continue };
 
         if world.get::<Parent>(e).is_some() {
-            // ИЗМЕНЕНО (#4): молчаливый `continue` заменён сбором
-            // в `skipped`. Логирование — на стороне `step`, чтобы
-            // иметь доступ к `self.warned_parent_bodies`.
-            //
-            // Static-тела не считаем проблемой: у них и без Parent
-            // никогда не бывает velocity, а Parent часто используется
-            // для группировки декора.
             if rb.body_type != BodyType::Static {
                 skipped.push(e);
             }
@@ -240,25 +274,27 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
 
         let Some(t) = world.get::<Transform>(e) else { continue };
 
-        let material = world
-            .get::<PhysicsMaterial>(e)
-            .copied()
-            .unwrap_or_default();
-
+        let material = world.get::<PhysicsMaterial>(e).copied().unwrap_or_default();
         let mass = rb.mass.max(1e-4);
+        let scale = t.scale.abs();
+        let inv_inertia = compute_inv_inertia(&col, mass, scale);
 
         out.push(BodyState {
             entity: e,
             body_type: rb.body_type,
             mass,
             inv_mass: rb.inv_mass(),
+            inv_inertia,
             position: t.position,
             velocity: rb.velocity,
+            rotation: t.rotation.normalize(),
+            angular_velocity: rb.angular_velocity,
             gravity_scale: rb.gravity_scale,
             linear_damping: rb.linear_damping,
+            angular_damping: rb.angular_damping,
             collider: col,
             material,
-            scale: t.scale.abs(),
+            scale,
             sleeping: rb.sleeping,
             sleep_timer: rb.sleep_timer,
         });
@@ -270,9 +306,11 @@ fn write_back(world: &mut World, states: &[BodyState]) {
     for s in states {
         if let Some(t) = world.get_mut::<Transform>(s.entity) {
             t.position = s.position;
+            t.rotation = s.rotation;
         }
         if let Some(rb) = world.get_mut::<RigidBody>(s.entity) {
             rb.velocity = s.velocity;
+            rb.angular_velocity = s.angular_velocity;
             rb.sleeping = s.sleeping;
             rb.sleep_timer = s.sleep_timer;
             rb.force = Vec3::ZERO;
@@ -318,8 +356,6 @@ fn global_aabb(s: &BodyState) -> (Vec3, Vec3) {
             (s.position - h, s.position + h)
         }
         Collider::Capsule { radius, height } => {
-            // `height` — полная высота капсулы (включая обе полусферы).
-            // См. doc-комментарий на `Collider::Capsule`.
             let r = radius * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
             let h = Vec3::new(r, hy, r);
@@ -355,7 +391,7 @@ fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact
             let r = radius * b.scale.max_element();
             let mut c = sphere_aabb(b.position, r, a.position, ha, ib, ia)?;
             c.normal = -c.normal;
-            Some(Contact { a: ia, b: ib, normal: c.normal, penetration: c.penetration })
+            Some(Contact { a: ia, b: ib, normal: c.normal, penetration: c.penetration, point: c.point })
         }
         (Collider::Aabb { half_extents: ha }, Collider::Aabb { half_extents: hb }) => {
             let h_a = ha * a.scale;
@@ -375,6 +411,10 @@ fn state_as_aabb(s: &BodyState) -> (Vec3, Vec3) {
     (s.position, (mx - mn) * 0.5)
 }
 
+fn closest_point_on_aabb(p: Vec3, center: Vec3, half: Vec3) -> Vec3 {
+    p.clamp(center - half, center + half)
+}
+
 fn sphere_sphere(pa: Vec3, ra: f32, pb: Vec3, rb: f32, ia: usize, ib: usize) -> Option<Contact> {
     let d = pb - pa;
     let dist_sq = d.length_squared();
@@ -383,11 +423,13 @@ fn sphere_sphere(pa: Vec3, ra: f32, pb: Vec3, rb: f32, ia: usize, ib: usize) -> 
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 { d / dist } else { Vec3::Y };
     let pen = r_sum - dist;
-    Some(Contact { a: ia, b: ib, normal, penetration: pen })
+    // Точка контакта — середина между поверхностями.
+    let point = pa + normal * (ra - pen * 0.5);
+    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
 
 fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize) -> Option<Contact> {
-    let closest = pc.clamp(center - half, center + half);
+    let closest = closest_point_on_aabb(pc, center, half);
     let d = pc - closest;
     let dist_sq = d.length_squared();
     if dist_sq >= r * r { return None; }
@@ -408,7 +450,9 @@ fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize)
         }
     };
     let pen = r - dist;
-    Some(Contact { a: ia, b: ib, normal, penetration: pen })
+    // Точка контакта — на поверхности AABB в сторону сферы.
+    let point = closest;
+    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
 
 fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Option<Contact> {
@@ -424,46 +468,81 @@ fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Op
     } else {
         (oz, Vec3::new(0.0, 0.0, d.z.signum()))
     };
-    Some(Contact { a: ia, b: ib, normal, penetration: pen })
+
+    // Точка контакта: берём точку на A (по нормали наружу),
+    // ближайшую к центру B.
+    let point_a = closest_point_on_aabb(pb, pa, ha);
+    let point_b = closest_point_on_aabb(pa, pb, hb);
+    let point = (point_a + point_b) * 0.5;
+
+    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
 
 // ============================================================
-// Resolve
+// Resolve (linear + angular)
 // ============================================================
 
 fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;
     let inv_m_b = states[c.b].inv_mass;
+    let inv_i_a = states[c.a].inv_inertia;
+    let inv_i_b = states[c.b].inv_inertia;
     let inv_sum = inv_m_a + inv_m_b;
-    if inv_sum <= 0.0 { return; }
+    if inv_sum <= 0.0 && inv_i_a <= 0.0 && inv_i_b <= 0.0 { return; }
 
-    let v_rel = states[c.b].velocity - states[c.a].velocity;
+    // r-векторы от центра тела к точке контакта.
+    let ra = c.point - states[c.a].position;
+    let rb = c.point - states[c.b].position;
+
+    // Относительная скорость в точке контакта: v + ω × r.
+    let va = states[c.a].velocity + states[c.a].angular_velocity.cross(ra);
+    let vb = states[c.b].velocity + states[c.b].angular_velocity.cross(rb);
+    let v_rel = vb - va;
     let v_n = v_rel.dot(c.normal);
     if v_n > 0.0 { return; }
 
-    let e = states[c.a]
-        .material
-        .restitution
-        .min(states[c.b].material.restitution);
+    // Эффективная масса по нормали (линейная + угловая).
+    let ra_xn = ra.cross(c.normal);
+    let rb_xn = rb.cross(c.normal);
+    let ang_a = inv_i_a * ra_xn.length_squared();
+    let ang_b = inv_i_b * rb_xn.length_squared();
+    let k = inv_sum + ang_a + ang_b;
+    if k <= 1e-8 { return; }
 
-    let j = -(1.0 + e) * v_n / inv_sum;
+    let e = states[c.a].material.restitution.min(states[c.b].material.restitution);
+    let j = -(1.0 + e) * v_n / k;
     let impulse = c.normal * j;
+
+    // Линейный отклик.
     states[c.a].velocity -= impulse * inv_m_a;
     states[c.b].velocity += impulse * inv_m_b;
+    // Угловой отклик: Δω = inv_I * (r × J).
+    states[c.a].angular_velocity -= ra.cross(impulse) * inv_i_a;
+    states[c.b].angular_velocity += rb.cross(impulse) * inv_i_b;
 
-    let v_rel = states[c.b].velocity - states[c.a].velocity;
+    // Трение (по касательной).
+    let va = states[c.a].velocity + states[c.a].angular_velocity.cross(ra);
+    let vb = states[c.b].velocity + states[c.b].angular_velocity.cross(rb);
+    let v_rel = vb - va;
     let v_n_after = v_rel.dot(c.normal);
     let v_t = v_rel - c.normal * v_n_after;
     let v_t_len = v_t.length();
     if v_t_len > 1e-6 {
         let tangent = v_t / v_t_len;
-        let mu = (states[c.a].material.friction + states[c.b].material.friction) * 0.5;
-        let jt_unclamped = -v_t.dot(tangent) / inv_sum;
-        let max_friction = mu * j.abs();
-        let jt = jt_unclamped.clamp(-max_friction, max_friction);
-        let tan_impulse = tangent * jt;
-        states[c.a].velocity -= tan_impulse * inv_m_a;
-        states[c.b].velocity += tan_impulse * inv_m_b;
+        let ra_xt = ra.cross(tangent);
+        let rb_xt = rb.cross(tangent);
+        let kt = inv_sum + inv_i_a * ra_xt.length_squared() + inv_i_b * rb_xt.length_squared();
+        if kt > 1e-8 {
+            let jt_unclamped = -v_t.dot(tangent) / kt;
+            let mu = (states[c.a].material.friction + states[c.b].material.friction) * 0.5;
+            let max_friction = mu * j.abs();
+            let jt = jt_unclamped.clamp(-max_friction, max_friction);
+            let tan_impulse = tangent * jt;
+            states[c.a].velocity -= tan_impulse * inv_m_a;
+            states[c.b].velocity += tan_impulse * inv_m_b;
+            states[c.a].angular_velocity -= ra.cross(tan_impulse) * inv_i_a;
+            states[c.b].angular_velocity += rb.cross(tan_impulse) * inv_i_b;
+        }
     }
 
     states[c.a].sleeping = false;
