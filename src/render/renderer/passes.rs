@@ -779,3 +779,39 @@ pub(super) fn encode_debug_pass(
     }
     fullscreen_triangle(&mut pass);
 }
+
+// ============================================================
+// Runtime UI
+// ============================================================
+
+pub(super) fn encode_ui_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    swap_view: &wgpu::TextureView,
+    instance_count: u32,
+) {
+    if instance_count == 0 {
+        return;
+    }
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("ui_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: swap_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_pipeline(&r.ui_pipeline);
+    pass.set_bind_group(0, &r.ui_global_bind_group, &[]);
+    pass.set_vertex_buffer(0, r.ui_instance_buffer.slice(..));
+    // 6 вершин на инстанс (два треугольника).
+    pass.draw(0..6, 0..instance_count);
+}

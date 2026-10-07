@@ -22,6 +22,7 @@ use crate::render::material::{Material, MaterialRegistry, SamplerDesc};
 use crate::render::mesh::{InstanceData, Mesh, Vertex3D};
 use crate::render::shadow_cube;
 use crate::render::texture::Texture;
+use crate::ui::{UiGlobal, UiQuad};
 
 use gpu_types::*;
 use size_dep::{build_size_dependent, SizeDependent};
@@ -151,15 +152,6 @@ pub struct Renderer {
 
     skybox_time: f32,
 
-    /// Счётчик кадров TAA. Чётность определяет, в какую из двух
-    /// `taa_resolved_views` писать (ping-pong).
-    ///
-    /// ИЗМЕНЕНО (#27): инкрементируется через флаг `use_taa`
-    /// (`taa_strength > 0.01`), не через повторную проверку. При
-    /// выключенной TAA счётчик не растёт, `write_idx` остаётся 0, а
-    /// `read_idx = 1` — но сам TAA-pass не выполняется, и bloom/
-    /// composite переключаются на чтение из `hdr_fog_view` (индекс 2
-    /// в `bloom_chain.prefilter_bgs` / `composite_bgs`). См. #6.
     taa_frame_index: u32,
     taa_prev_view_proj: Mat4,
     taa_reset_frames: u32,
@@ -170,21 +162,18 @@ pub struct Renderer {
     /// При jitter = 0 (текущая конфигурация) всегда (0, 0).
     taa_prev_jitter_px: Vec2,
 
-    /// ИЗМЕНЕНО (#6): предыдущее значение «включена ли TAA»
-    /// (`postfx.taa_strength > 0.01`). Нужно для сброса
-    /// `taa_reset_frames` при переключении TAA через UI: иначе после
-    /// включения TAA первые 1-2 кадра шейдер прочитает устаревшую
-    /// историю (в `taa_resolved_views` лежит resolve, сделанный до
-    /// выключения) — визуально это «фантомный» след.
     taa_prev_enabled: bool,
 
-    /// Статистика последнего **успешно отрисованного** кадра.
-    /// Обновляется в `render()` после сортировки draws. `App::redraw`
-    /// читает эти поля для панели Stats — они отражают предыдущий
-    /// кадр (в текущем кадре render() ещё не вызван на момент
-    /// построения Stats). Разница в 1 кадр визуально незаметна.
     pub last_draw_count: usize,
     pub last_instance_count: usize,
+
+    ui_layout: wgpu::BindGroupLayout,
+    ui_pipeline: wgpu::RenderPipeline,
+    ui_global_buffer: wgpu::Buffer,
+    ui_global_bind_group: wgpu::BindGroup,
+    ui_instance_buffer: wgpu::Buffer,
+    ui_instance_capacity: u64,
+    _ui_font_atlas_tex: wgpu::Texture,
 }
 
 fn draw_center(d: &MeshDraw) -> Vec3 {
@@ -970,6 +959,167 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // ============================================================
+        // Runtime UI
+        // ============================================================
+        let ui_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ui_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let ui_global_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui_global_buffer"),
+            size: std::mem::size_of::<UiGlobal>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Процедурный атлас шрифта 128×64 RGBA.
+        let font_atlas_bytes = crate::ui::font::generate_atlas();
+        let ui_font_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui_font_atlas"),
+            size: wgpu::Extent3d {
+                width: crate::ui::font::ATLAS_W,
+                height: crate::ui::font::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &ui_font_atlas_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &font_atlas_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(crate::ui::font::ATLAS_W * 4),
+                rows_per_image: Some(crate::ui::font::ATLAS_H),
+            },
+            wgpu::Extent3d {
+                width: crate::ui::font::ATLAS_W,
+                height: crate::ui::font::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+        );
+        let ui_font_atlas_view = ui_font_atlas_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let ui_font_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui_font_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let ui_global_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui_global_bind_group"),
+            layout: &ui_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ui_global_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ui_font_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&ui_font_sampler),
+                },
+            ],
+        });
+
+        let ui_shader_src = crate::shader_source!("src/render/shaders/ui.wgsl")
+            .expect("ui.wgsl not found");
+        let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ui_shader"),
+            source: wgpu::ShaderSource::Wgsl(ui_shader_src.into()),
+        });
+
+        let ui_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ui_pipeline_layout"),
+            bind_group_layouts: &[&ui_layout],
+            push_constant_ranges: &[],
+        });
+
+        let ui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui_pipeline"),
+            layout: Some(&ui_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ui_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[UiQuad::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ui_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        const INITIAL_UI_CAPACITY: u64 = 1024;
+        let ui_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui_instance_buffer"),
+            size: INITIAL_UI_CAPACITY * std::mem::size_of::<UiQuad>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             surface, device, queue, config, size,
             camera_layout, lights_layout, shadow_pass_layout, shadow2_layout,
@@ -1022,7 +1172,29 @@ impl Renderer {
             taa_prev_enabled: true,
             last_draw_count: 0,
             last_instance_count: 0,
+
+            ui_layout,
+            ui_pipeline,
+            ui_global_buffer,
+            ui_global_bind_group,
+            ui_instance_buffer,
+            ui_instance_capacity: INITIAL_UI_CAPACITY,
+            _ui_font_atlas_tex: ui_font_atlas_tex,
         }
+    }
+
+    fn ensure_ui_capacity(&mut self, needed: u64) {
+        if needed <= self.ui_instance_capacity {
+            return;
+        }
+        let new_cap = (self.ui_instance_capacity * 2).max(needed);
+        self.ui_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui_instance_buffer"),
+            size: new_cap * std::mem::size_of::<UiQuad>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.ui_instance_capacity = new_cap;
     }
 
     #[cfg(debug_assertions)]
@@ -1394,6 +1566,7 @@ impl Renderer {
         ambient: [f32; 3],
         postfx: PostFx,
         time: f32,
+        ui_quads: &[UiQuad],
         egui_data: Option<EguiFrameData<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         self.skybox_time = time;
@@ -1718,6 +1891,33 @@ impl Renderer {
                 write_idx,
                 use_taa,
             );
+        }
+
+        // Runtime UI: screen-space quads поверх 3D, под egui.
+        if !ui_quads.is_empty() {
+            let ui_global = UiGlobal {
+                screen: [
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    2.0 / self.config.width.max(1) as f32,
+                    2.0 / self.config.height.max(1) as f32,
+                ],
+                time: [time, 0.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(
+                &self.ui_global_buffer,
+                0,
+                bytemuck::bytes_of(&ui_global),
+            );
+
+            self.ensure_ui_capacity(ui_quads.len() as u64);
+            self.queue.write_buffer(
+                &self.ui_instance_buffer,
+                0,
+                bytemuck::cast_slice(ui_quads),
+            );
+
+            passes::encode_ui_pass(self, &mut encoder, &swap_view, ui_quads.len() as u32);
         }
 
         if let Some(egui_data) = egui_data {
