@@ -2291,7 +2291,7 @@ fn make_ssao_pipelines(
     device: &wgpu::Device,
     ssao_layout: &wgpu::BindGroupLayout,
 ) -> Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String> {
-    let src = crate::shader_source!("src/render/ssao.wgsl")?;
+    let src = crate::shader_source!("src/render/shaders/ssao.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ssao_shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
@@ -2492,7 +2492,7 @@ fn make_fxaa_pipeline(
 }
 
 fn make_skybox_pipeline(device: &wgpu::Device, skybox_layout: &wgpu::BindGroupLayout) -> Result<wgpu::RenderPipeline, String> {
-    let src = crate::shader_source!("src/render/skybox.wgsl")?;
+    let src = crate::shader_source!("src/render/shaders/skybox.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("skybox_shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),

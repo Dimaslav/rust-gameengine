@@ -145,9 +145,6 @@ pub struct Mesh {
 impl Mesh {
     /// Ленивое построение BVH. При первом вызове строит из
     /// `self.triangles`, дальше возвращает закэшированное значение.
-    ///
-    /// `OnceLock` потокобезопасен и не требует `&mut self`, поэтому
-    /// можно звать из `&Mesh` в picking'е и в projectile-цикле.
     pub fn bvh(&self) -> &Bvh {
         self.bvh.get_or_init(|| Bvh::build(&self.triangles))
     }
@@ -329,7 +326,10 @@ impl Mesh {
             for seg in 0..segments {
                 let a = ring * stride + seg;
                 let b = a + stride;
-                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+                // ИСПРАВЛЕНО (winding): ∂ring × ∂θ даёт внутреннюю
+                // нормаль (спирографический крест). Меняем порядок
+                // обхода на CCW относительно внешней поверхности.
+                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
 
@@ -391,7 +391,9 @@ impl Mesh {
             for x in 0..n {
                 let a = y * stride + x;
                 let b = a + stride;
-                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+                // ИСПРАВЛЕНО (winding): ∂row(+Y) × ∂col(+X) = -Z,
+                // а ожидается +Z. Инвертируем обход.
+                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
 
@@ -535,7 +537,8 @@ impl Mesh {
             for s in 0..segs {
                 let a = ring * stride + s;
                 let b = a + stride;
-                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+                // ИСПРАВЛЕНО (winding): см. комментарий к sphere.
+                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
 
