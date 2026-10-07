@@ -265,21 +265,27 @@ fn ray_collider(origin: Vec3, dir: Vec3, s: &ColliderSnapshot) -> Option<(f32, V
             ray_sphere(origin, dir, s.position, radius * s.scale.max_element())
         }
         Collider::Aabb { half_extents } => {
+            // ИЗМЕНЕНО (rotation fix): трансформируем луч в локальное
+            // пространство OBB, делаем обычный ray-AABB тест в нём,
+            // и возвращаем нормаль обратно в world space.
             let h = half_extents * s.scale;
-            ray_aabb(origin, dir, s.position - h, s.position + h)
+            let inv_rot = s.rotation.inverse();
+            let local_o = inv_rot * (origin - s.position);
+            let local_d = inv_rot * dir;
+            let (t, local_n) = ray_aabb(local_o, local_d, -h, h)?;
+            let world_n = (s.rotation * local_n).normalize_or(Vec3::Y);
+            Some((t, world_n))
         }
         Collider::Capsule { radius, height } => {
-            // ВАЖНО: капсула трактуется как вертикальная мировая.
-            // Это согласуется с `physics::world::global_aabb` и
-            // `collision::collider_world_aabb` — там тоже так.
-            // Когда добавим rotation dynamics (Фаза 10), нужно будет
-            // трансформировать луч в локальное пространство коллайдера.
+            // ИЗМЕНЕНО (rotation fix): сегмент капсулы теперь поворачивается
+            // вместе с Transform.rotation.
             let r = radius * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
+            let up = s.rotation * Vec3::new(0.0, hy, 0.0);
             ray_capsule(
                 origin, dir,
-                s.position - Vec3::Y * hy,
-                s.position + Vec3::Y * hy,
+                s.position - up,
+                s.position + up,
                 r,
             )
         }
@@ -387,22 +393,9 @@ fn ray_capsule(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, radius: f32) -> Option
 // ============================================================
 
 fn world_aabb(s: &ColliderSnapshot) -> (Vec3, Vec3) {
-    match s.collider {
-        Collider::Sphere { radius } => {
-            let r = radius * s.scale.max_element();
-            (s.position - Vec3::splat(r), s.position + Vec3::splat(r))
-        }
-        Collider::Aabb { half_extents } => {
-            let h = half_extents * s.scale;
-            (s.position - h, s.position + h)
-        }
-        Collider::Capsule { radius, height } => {
-            let r = radius * s.scale.max_element();
-            let hy = height * s.scale.y * 0.5;
-            let h = Vec3::new(r, hy, r);
-            (s.position - h, s.position + h)
-        }
-    }
+    // ИЗМЕНЕНО (rotation fix): используем Collider::world_aabb,
+    // который корректно учитывает rotation.
+    s.collider.world_aabb(s.position, s.rotation, s.scale)
 }
 
 fn sphere_hits(center: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
@@ -412,15 +405,21 @@ fn sphere_hits(center: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
             (center - s.position).length_squared() < (radius + rr) * (radius + rr)
         }
         Collider::Aabb { half_extents } => {
+            // ИЗМЕНЕНО (rotation fix): трансформируем центр сферы
+            // в локальное пространство OBB.
             let h = half_extents * s.scale;
-            let p = center.clamp(s.position - h, s.position + h);
-            (center - p).length_squared() < radius * radius
+            let inv_rot = s.rotation.inverse();
+            let local_center = inv_rot * (center - s.position);
+            let p = local_center.clamp(-h, h);
+            (local_center - p).length_squared() < radius * radius
         }
         Collider::Capsule { radius: r, height } => {
+            // ИЗМЕНЕНО (rotation fix): сегмент капсулы повёрнут.
             let rr = r * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
-            let a = s.position - Vec3::Y * hy;
-            let b = s.position + Vec3::Y * hy;
+            let up = s.rotation * Vec3::new(0.0, hy, 0.0);
+            let a = s.position - up;
+            let b = s.position + up;
             let p = closest_on_segment(center, a, b);
             (center - p).length_squared() < (radius + rr) * (radius + rr)
         }

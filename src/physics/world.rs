@@ -346,22 +346,7 @@ fn can_move(bt: BodyType) -> bool {
 }
 
 fn global_aabb(s: &BodyState) -> (Vec3, Vec3) {
-    match s.collider {
-        Collider::Sphere { radius } => {
-            let r = radius * s.scale.max_element();
-            (s.position - Vec3::splat(r), s.position + Vec3::splat(r))
-        }
-        Collider::Aabb { half_extents } => {
-            let h = half_extents * s.scale;
-            (s.position - h, s.position + h)
-        }
-        Collider::Capsule { radius, height } => {
-            let r = radius * s.scale.max_element();
-            let hy = height * s.scale.y * 0.5;
-            let h = Vec3::new(r, hy, r);
-            (s.position - h, s.position + h)
-        }
-    }
+    s.collider.world_aabb(s.position, s.rotation, s.scale)
 }
 
 fn aabb_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {

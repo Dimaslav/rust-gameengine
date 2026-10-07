@@ -339,7 +339,7 @@ impl Navmesh {
                 if rb.body_type == BodyType::Dynamic { continue; }
             }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
-            let (bmin, bmax) = collider_aabb(col, t.position, t.scale.abs());
+            let (bmin, bmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
             min = min.min(bmin);
             max = max.max(bmax);
             any = true;
@@ -383,7 +383,7 @@ impl Navmesh {
                 if rb.body_type == BodyType::Dynamic { continue; }
             }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
-            let (cmin, cmax) = collider_aabb(col, t.position, t.scale.abs());
+            let (cmin, cmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
 
             let x0 = ((cmin.x - origin.x) / opts.cell_size).floor().max(0.0) as i32;
             let z0 = ((cmin.z - origin.z) / opts.cell_size).floor().max(0.0) as i32;
@@ -414,7 +414,7 @@ impl Navmesh {
                 if rb.body_type == BodyType::Dynamic { continue; }
             }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
-            let (cmin, cmax) = collider_aabb(col, t.position, t.scale.abs());
+            let (cmin, cmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
 
             let x0 = ((cmin.x - origin.x) / opts.cell_size).floor().max(0.0) as i32;
             let z0 = ((cmin.z - origin.z) / opts.cell_size).floor().max(0.0) as i32;
@@ -474,23 +474,11 @@ impl PartialOrd for HeapNode {
     }
 }
 
-fn collider_aabb(col: &Collider, pos: Vec3, scale: Vec3) -> (Vec3, Vec3) {
-    match col {
-        Collider::Sphere { radius } => {
-            let r = radius * scale.max_element();
-            (pos - Vec3::splat(r), pos + Vec3::splat(r))
-        }
-        Collider::Aabb { half_extents } => {
-            let h = *half_extents * scale;
-            (pos - h, pos + h)
-        }
-        Collider::Capsule { radius, height } => {
-            let r = radius * scale.max_element();
-            let hy = height * scale.y * 0.5;
-            let h = Vec3::new(r, hy, r);
-            (pos - h, pos + h)
-        }
-    }
+fn collider_aabb(col: &Collider, pos: Vec3, rotation: glam::Quat, scale: Vec3) -> (Vec3, Vec3) {
+    // ИЗМЕНЕНО (rotation fix): бейк navmesh теперь учитывает поворот
+    // стен. Без этого navmesh имел «дыры» в повёрнутых стенах, и AI
+    // ходил сквозь них.
+    col.world_aabb(pos, rotation, scale)
 }
 
 /// Проверка видимости между двумя точками через физические коллайдеры.
@@ -508,7 +496,7 @@ pub fn segment_clear(world: &World, a: Vec3, b: Vec3) -> bool {
         let Some(rb) = world.get::<RigidBody>(e) else { continue };
         if rb.body_type != BodyType::Static { continue; }
         let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
-        let (cmin, cmax) = collider_aabb(col, t.position, t.scale.abs());
+        let (cmin, cmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
         let dy = cmax.y - cmin.y;
         if dy < 0.2 { continue; }
         if segment_hits_aabb(a, dir, len, cmin, cmax) {

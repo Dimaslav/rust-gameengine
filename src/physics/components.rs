@@ -1,16 +1,12 @@
 //! Компоненты физики: RigidBody, Collider, PhysicsMaterial.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyType {
-    /// Не двигается. Бесконечная масса. Пол, стены.
     Static,
-    /// Двигается под действием сил и гравитации.
     Dynamic,
-    /// Двигается программно, не подчиняется силам.
-    /// Для движущихся платформ, дверей, лифтов.
     Kinematic,
 }
 
@@ -21,33 +17,20 @@ impl Default for BodyType {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RigidBody {
     pub body_type: BodyType,
-    /// Масса. Игнорируется для Static/Kinematic.
     pub mass: f32,
-
     pub velocity: Vec3,
-    /// Пока не используется — задел под rotation dynamics.
     #[serde(default)]
     pub angular_velocity: Vec3,
-
-    /// Экспоненциальное затухание: v *= (1 - damping·dt).
     pub linear_damping: f32,
     #[serde(default)]
     pub angular_damping: f32,
-
-    /// Множитель гравитации (0 = невесомый, 1 = норма).
     pub gravity_scale: f32,
-
-    /// Накопленная сила за кадр. Сбрасывается после `step`.
     #[serde(skip)]
     pub force: Vec3,
-    /// Накопленный момент. Сбрасывается после `step`.
     #[serde(skip)]
     pub torque: Vec3,
-
-    /// Тело спит — симуляция пропускается.
     #[serde(skip)]
     pub sleeping: bool,
-    /// Сколько секунд подряд тело «тихое».
     #[serde(skip)]
     pub sleep_timer: f32,
 }
@@ -108,22 +91,13 @@ impl RigidBody {
         }
     }
 
-    pub fn is_dynamic(&self) -> bool {
-        self.body_type == BodyType::Dynamic
-    }
+    pub fn is_dynamic(&self) -> bool { self.body_type == BodyType::Dynamic }
+    pub fn is_static(&self) -> bool { self.body_type == BodyType::Static }
 
-    pub fn is_static(&self) -> bool {
-        self.body_type == BodyType::Static
-    }
-
-    /// Накопить силу (применится в следующем `step`).
     pub fn apply_force(&mut self, f: Vec3) {
-        if self.is_dynamic() {
-            self.force += f;
-        }
+        if self.is_dynamic() { self.force += f; }
     }
 
-    /// Мгновенно изменить скорость (не зависит от шага физики).
     pub fn apply_impulse(&mut self, j: Vec3) {
         if self.is_dynamic() && self.mass > 1e-8 {
             self.velocity += j / self.mass;
@@ -143,29 +117,11 @@ impl Default for RigidBody {
 
 /// Коллайдер. Центр совпадает с `Transform.position`.
 ///
-/// Семантика `Capsule::height` — **полная высота, включая обе
-/// полусферы-крышки**. То есть `capsule(0.4, 1.8)` — капсула,
-/// у которой полная вертикальная протяжённость от нижней точки
-/// до верхней равна 1.8 м, а радиус полусфер 0.4 м. Цилиндрическая
-/// секция между полусферами получается `height - 2 * radius` (для
-/// приведённого примера — 1.0 м).
-///
-/// Это соглашение согласовано с `engine::PlayerCapsule` (там
-/// `height` тоже означает полную высоту). Раньше `Collider::Capsule`
-/// интерпретировал `height` как **высоту цилиндра**, из-за чего
-/// `capsule(0.4, 1.8)` давал коллайдер высотой 2.6 м при визуальной
-/// высоте меша 1.6 м — персонаж «отталкивался» от NPC за 0.5 м до
-/// касания.
+/// `Capsule::height` — **полная высота, включая обе полусферы-крышки**.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Collider {
-    /// Сфера, центр — в `Transform.position`.
     Sphere { radius: f32 },
-    /// Axis-aligned box с центром в `Transform.position`.
-    /// `half_extents` — в локальных единицах, масштабируются `Transform.scale`.
-    /// При ненулевом повороте — используется внешний AABB вокруг повёрнутого бокса.
     Aabb { half_extents: Vec3 },
-    /// Капсула вдоль локальной оси Y. `height` — полная высота,
-    /// включая обе полусферы (см. doc-комментарий выше).
     Capsule { radius: f32, height: f32 },
 }
 
@@ -178,9 +134,6 @@ impl Collider {
         Self::Aabb { half_extents: half_extents.max(Vec3::splat(1e-4)) }
     }
 
-    /// `height` — полная высота капсулы (включая обе полусферы).
-    /// Значение автоматически поднимается до `2 * radius`, чтобы
-    /// цилиндрическая секция не была отрицательной.
     pub fn capsule(radius: f32, height: f32) -> Self {
         let r = radius.max(1e-4);
         Self::Capsule {
@@ -188,13 +141,59 @@ impl Collider {
             height: height.max(2.0 * r + 1e-4),
         }
     }
+
+    /// Мировой AABB этого коллайдера с учётом поворота.
+    ///
+    /// Для AABB-коллайдера вычисляется **обёртывающий** AABB повёрнутого
+    /// OBB: каждая из 3 локальных полуосей умножается на `rotation`, и
+    /// берётся сумма абсолютных значений компонент. Для поворотов,
+    /// кратных 90°, это **точный** AABB. Для произвольных — слегка
+    /// завышенный (максимум в √3 раз), что безопасно для collision
+    /// (только false positives на очень острых углах).
+    ///
+    /// Для Capsule мировые концы сегмента (±Y · height/2) поворачиваются,
+    /// берётся их AABB, и к результату добавляется радиус.
+    ///
+    /// **ИЗМЕНЕНО:** раньше в `engine/collision.rs` и `physics/*` поворот
+    /// полностью игнорировался — коллайдеры стен, повёрнутых на 90°,
+    /// оказывались перпендикулярны визуальному мешу. Это был главный
+    /// источник «плохих коллизий».
+    pub fn world_aabb(&self, pos: Vec3, rotation: Quat, scale: Vec3) -> (Vec3, Vec3) {
+        let scale = scale.abs();
+        match self {
+            Collider::Sphere { radius } => {
+                let r = radius * scale.max_element();
+                (pos - Vec3::splat(r), pos + Vec3::splat(r))
+            }
+            Collider::Aabb { half_extents } => {
+                let h = *half_extents * scale;
+                let ax = rotation * Vec3::new(h.x, 0.0, 0.0);
+                let ay = rotation * Vec3::new(0.0, h.y, 0.0);
+                let az = rotation * Vec3::new(0.0, 0.0, h.z);
+                let wh = Vec3::new(
+                    ax.x.abs() + ay.x.abs() + az.x.abs(),
+                    ax.y.abs() + ay.y.abs() + az.y.abs(),
+                    ax.z.abs() + ay.z.abs() + az.z.abs(),
+                );
+                (pos - wh, pos + wh)
+            }
+            Collider::Capsule { radius, height } => {
+                let r = radius * scale.max_element();
+                let hh = height * scale.y * 0.5;
+                let up = rotation * Vec3::new(0.0, hh, 0.0);
+                let a = pos + up;
+                let b = pos - up;
+                let mn = a.min(b) - Vec3::splat(r);
+                let mx = a.max(b) + Vec3::splat(r);
+                (mn, mx)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PhysicsMaterial {
-    /// Коэффициент восстановления: 0 = нет отскока, 1 = абсолютно упругий.
     pub restitution: f32,
-    /// Коэффициент трения (Кулон): 0 = скольжение, >1 = сильно шероховатый.
     pub friction: f32,
 }
 

@@ -76,6 +76,15 @@ pub trait Game: 'static {
     fn lod_stats(&self) -> [usize; 4] { [0; 4] }
     fn rpg_hud(&self) -> Vec<(String, String)> { Vec::new() }
     fn on_kill(&mut self, _world: &mut World, _target: Entity) {}
+
+    /// Собрать runtime UI (HUD, меню) для этого кадра.
+    /// Вызывается до рендера. По умолчанию — пусто.
+    fn collect_ui(
+        &mut self,
+        _world: &mut World,
+        _renderer: &Renderer,
+        _ui: &mut crate::ui::UiLayer,
+    ) {}
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> { None }
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 
@@ -393,7 +402,7 @@ impl<G: Game> App<G> {
         let gun_range = self.editor.state.play.gun_range;
         let bullet_speed = self.editor.state.play.bullet_speed;
         let crouch_mult = self.editor.state.play.crouch_speed_mult;
-        let push_strength = self.editor.state.play.push_strength;
+        let _push_strength = self.editor.state.play.push_strength;
         let step_down_max = self.editor.state.play.step_down_max;
         let slope_walk_limit_cos = self.editor.state.play.slope_walk_limit_cos;
         let slope_slide_speed = self.editor.state.play.slope_slide_speed;
@@ -1339,6 +1348,26 @@ impl<G: Game> App<G> {
         let ambient = self.game.ambient();
         let postfx = self.game.postfx();
 
+        // Runtime UI: собрать quads с экшеном игры.
+        let mouse_clicked = self.input.mouse_pressed(winit::event::MouseButton::Left);
+        let mouse_down = self.input.mouse_down(winit::event::MouseButton::Left);
+        let mut ui_layer = crate::ui::UiLayer::new(
+            self.renderer.size.width as f32,
+            self.renderer.size.height as f32,
+            crate::ui::UiInput {
+                mouse_pos: self.input.mouse_pos,
+                mouse_clicked,
+                mouse_down,
+            },
+        );
+        {
+            let game = &mut self.game;
+            let renderer = &self.renderer;
+            let world = &mut self.world;
+            game.collect_ui(world, renderer, &mut ui_layer);
+        }
+        let ui_quads = ui_layer.into_quads();
+
         let pixels_per_point = full_output.pixels_per_point;
         let egui_data = EguiFrameData {
             renderer: &mut self.editor.egui_renderer,
@@ -1357,6 +1386,7 @@ impl<G: Game> App<G> {
             ambient,
             postfx,
             self.time.elapsed,
+            &ui_quads,
             Some(egui_data),
         );
 
