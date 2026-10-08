@@ -41,6 +41,7 @@ use glam::Vec3;
 use super::ai_system::AiSystem;
 use super::audio::AudioSystem;
 use super::collision::{self, PlayerCapsule};
+use super::collision_cache::ColliderCache;
 use super::input::Input;
 use super::particles::{self, Particle, MAX_PARTICLES};
 use super::time::Time;
@@ -105,6 +106,16 @@ pub struct WorldLoadRequest {
 pub struct ShotFired {
     pub origin: Vec3,
     pub direction: Vec3,
+    pub damage: f32,
+    pub is_crit: bool,
+}
+
+/// Событие: игрок подобрал предмет. `App` сам ничего не делает —
+/// игра читает событие и добавляет в инвентарь.
+#[derive(Debug, Clone)]
+pub struct ItemPickup {
+    pub item_id: String,
+    pub count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -146,6 +157,9 @@ pub struct App<G: Game> {
     was_paused: bool,
 
     pickable: Option<PickableSet>,
+    /// Кэш коллайдеров для player collision. Перестраивается в
+    /// `redraw` перед `update_player`, если мы в Play.
+    collider_cache: Option<ColliderCache>,
 
     navmesh: Option<Navmesh>,
     ai_system: AiSystem,
@@ -239,6 +253,7 @@ impl<G: Game> App<G> {
             elevator_prev_state: HashMap::new(),
             was_paused: false,
             pickable: None,
+            collider_cache: None,
             navmesh: None,
             ai_system: AiSystem::new(),
             footstep_timer: 0.0,
@@ -366,6 +381,8 @@ impl<G: Game> App<G> {
                     self.world.len(), self.editor.state.selected.len()
                 );
                 self.navmesh = None;
+                self.collider_cache = None;
+                self.pickable = None;
             }
             Err(e) => log::error!("Failed to restore world after Play: {}", e),
         }
@@ -565,10 +582,12 @@ impl<G: Game> App<G> {
 
         let support_delta_y = {
             let mut dy_extra = 0.0_f32;
-            if let Some(support) = collision::find_support_entity(&self.world, feet, &pcap) {
-                if let Some(rb) = self.world.get::<crate::physics::RigidBody>(support) {
-                    if rb.body_type == BodyType::Kinematic {
-                        dy_extra = rb.velocity.y * dt;
+            if let Some(cache) = self.collider_cache.as_ref() {
+                if let Some(support) = collision::find_support_entity(cache, feet, &pcap) {
+                    if let Some(rb) = self.world.get::<crate::physics::RigidBody>(support) {
+                        if rb.body_type == BodyType::Kinematic {
+                            dy_extra = rb.velocity.y * dt;
+                        }
                     }
                 }
             }
@@ -580,8 +599,22 @@ impl<G: Game> App<G> {
         let delta = horizontal * dt + Vec3::new(0.0, dy + support_delta_y, 0.0);
 
         let terrain_ref = self.renderer.terrain.as_ref();
+
+        // ColliderCache: если ещё не построен — строим локально.
+        let cache_local;
+        let cache_ref: &ColliderCache = if let Some(c) = self.collider_cache.as_ref() {
+            c
+        } else {
+            cache_local = {
+                let mut c = ColliderCache::new();
+                c.build(&self.world);
+                c
+            };
+            &cache_local
+        };
+
         let result = collision::resolve_movement_ex(
-            &self.world, feet, delta, &pcap, floor_y, step_down_max, terrain_ref,
+            &self.world, cache_ref, feet, delta, &pcap, floor_y, step_down_max, terrain_ref,
         );
 
         let new_feet = result.new_feet;
@@ -774,7 +807,10 @@ impl<G: Game> App<G> {
         self.spawn_burst(muzzle, &particles::sparks(dir));
 
         let gun_range = self.editor.state.play.gun_range;
-        let damage = self.editor.state.play.damage_per_shot;
+        let damage = shot.damage;
+        if shot.is_crit {
+            log::debug!("[HIT] CRIT! damage={:.1}", damage);
+        }
 
         let hit = {
             let cache = Self::ensure_pickable(&self.world, &self.renderer, &mut self.pickable);
@@ -1096,6 +1132,7 @@ impl<G: Game> App<G> {
                         new_world.sync_next_id();
                         self.world = new_world;
                         self.navmesh = None;
+                        self.collider_cache = None;
                         self.pickable = None;
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
@@ -1121,6 +1158,17 @@ impl<G: Game> App<G> {
             }
 
             self.update_elevator_ding();
+
+            // === ColliderCache: rebuild раз в кадр перед physics ===
+            //
+            // Нужен для `update_player` (игрок) и для kinematic
+            // support'а. Если сцена большая — этот rebuild O(n),
+            // но он замещает 4-5 O(n) обходов в capsule_hits.
+            if self.editor.state.play.active {
+                let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
+                cache.build(&self.world);
+            }
+
             self.physics.step(&mut self.world, self.renderer.terrain.as_ref(), dt);
 
             self.ai_system.update(&mut self.world, self.navmesh.as_ref(), dt);
@@ -1809,6 +1857,7 @@ impl<G: Game> App<G> {
                     self.particles.clear();
                     self.projectiles.clear();
                     self.footstep_timer = 0.0;
+                    self.collider_cache = None;
                 } else {
                     self.game.camera_mut().exit_fps();
                     let _ = self.window.set_cursor_grab(CursorGrabMode::None);
@@ -1935,6 +1984,7 @@ impl<G: Game> App<G> {
                         self.game.load_game_state(&ron);
                     }
                     self.navmesh = None;
+                    self.collider_cache = None;
                 }
             }
             EditorAction::Redo => {
@@ -1948,6 +1998,7 @@ impl<G: Game> App<G> {
                         self.game.load_game_state(&ron);
                     }
                     self.navmesh = None;
+                    self.collider_cache = None;
                 }
             }
             EditorAction::Save => {
@@ -1973,6 +2024,7 @@ impl<G: Game> App<G> {
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         self.navmesh = None;
+                        self.collider_cache = None;
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
                         if let Some(ron) = game_state_ron {
                             self.game.load_game_state(&ron);
@@ -1994,6 +2046,7 @@ impl<G: Game> App<G> {
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         self.navmesh = None;
+                        self.collider_cache = None;
                         if let Some(p) = spawn { self.editor.state.play.saved_position = p; }
                         if let Some(ron) = game_state_ron {
                             self.game.load_game_state(&ron);
@@ -2013,6 +2066,7 @@ impl<G: Game> App<G> {
                 self.particles.clear();
                 self.projectiles.clear();
                 self.navmesh = None;
+                self.collider_cache = None;
             }
             EditorAction::AddCube | EditorAction::AddSphere => {
                 let gs = self.game.save_game_state();
@@ -2146,6 +2200,7 @@ impl<G: Game> App<G> {
                         log::info!("FBX imported: {} verts, {} tris", stats.total_vertices, stats.total_triangles);
                         self.editor.state.selected.clear();
                         self.navmesh = None;
+                        self.collider_cache = None;
                     }
                     Err(e) => log::error!("FBX import failed: {:#}", e),
                 }
@@ -2299,6 +2354,7 @@ impl<G: Game> App<G> {
                         }
                         self.renderer.terrain = Some(hm);
                         self.pickable = None;
+                        self.collider_cache = None;
                         log::info!("Terrain: loaded from {}", path.display());
                     }
                     Err(e) => log::error!("Terrain: load failed: {}", e),

@@ -1,0 +1,8 @@
+(
+    id: "enemy_boss",
+    entries: [
+        (item_id: "gold_coin", chance: 1.0, min_count: 100, max_count: 250),
+        (item_id: "lucky_charm", chance: 1.0, min_count: 1, max_count: 1),
+        (item_id: "leather_armor", chance: 0.8, min_count: 1, max_count: 1),
+    ],
+)

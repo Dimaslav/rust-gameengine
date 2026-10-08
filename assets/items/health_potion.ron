@@ -1,0 +1,10 @@
+(
+    id: "health_potion",
+    name: "Health Potion",
+    kind: Consumable,
+    rarity: Common,
+    description: "Restores 40 HP when used",
+    heal_amount: 40.0,
+    sell_price: 15,
+    max_stack: 5,
+)

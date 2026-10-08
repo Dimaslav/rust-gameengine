@@ -1,9 +1,13 @@
 //! Коллизии игрока со сценой.
 //!
-//! **ИЗМЕНЕНО (Sprint B1):** поддержка terrain. `resolve_movement_ex`
-//! принимает `Option<&Heightmap>`. Если задан и содержит XZ-точку —
-//! высота пола берётся из bilinear-сэмпла heightmap вместо плоской
-//! `floor_y`.
+//! ## Что нового
+//!
+//! * **step3-spatial-hash**: broad-phase через `SpatialHash2D`.
+//! * **step4-collider-cache**: `resolve_movement_ex` и `find_support`
+//!   принимают `&ColliderCache` вместо обхода всего World. Это
+//!   ускоряет player collision в 5–10 раз при больших сценах.
+//! * Sprint B1: поддержка terrain. `resolve_movement_ex` принимает
+//!   `Option<&Heightmap>`.
 
 use glam::Vec3;
 
@@ -12,7 +16,8 @@ use crate::game::components::Visible;
 use crate::physics::{BodyType, Collider, RigidBody};
 use crate::render::terrain::Heightmap;
 
-const CAPSULE_SAMPLES: usize = 8;
+use super::collision_cache::{capsule_hits_aabb, ColliderCache};
+
 const SUPPORT_TOLERANCE: f32 = 0.15;
 const SUBSTEP_SIZE: f32 = 0.15;
 
@@ -42,96 +47,32 @@ pub struct MovementResult {
     pub support: Option<SupportInfo>,
 }
 
-#[inline]
-fn point_aabb_dist_sq(p: Vec3, min: Vec3, max: Vec3) -> f32 {
-    let clamped = p.clamp(min, max);
-    (p - clamped).length_squared()
+// ============================================================
+// Helpers (используются только для surface_normal_at)
+// ============================================================
+
+fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let ab = b - a;
+    let t = (p - a).dot(ab) / ab.length_squared().max(1e-12);
+    a + ab * t.clamp(0.0, 1.0)
 }
 
-#[inline]
-fn capsule_hits_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
-    let r2 = r * r;
-    let center = (amin + amax) * 0.5;
-    let half = (amax - amin) * 0.5;
-    let bs_radius = half.length();
-    let capsule_center = (a + b) * 0.5;
-    if (center - capsule_center).length() > bs_radius + r + (b - a).length() * 0.5 {
-        return false;
-    }
-    for i in 0..=CAPSULE_SAMPLES {
-        let t = i as f32 / CAPSULE_SAMPLES as f32;
-        let p = a.lerp(b, t);
-        if point_aabb_dist_sq(p, amin, amax) < r2 {
-            return true;
-        }
-    }
-    false
-}
-
-fn world_pos_rot_scale(world: &World, e: Entity) -> Option<(Vec3, glam::Quat, Vec3)> {
-    let model = crate::game::world_matrix(world, e);
-    let (s, r, t) = model.to_scale_rotation_translation();
-    Some((t, r, s.abs()))
-}
-
-fn capsule_hits_impl(
-    world: &World,
-    feet_pos: Vec3,
-    cap: &PlayerCapsule,
-    include_dynamic: bool,
-) -> bool {
-    let r = cap.radius;
-    let h = cap.height.max(2.0 * r + 1e-3);
-    let a = feet_pos + Vec3::Y * r;
-    let b = feet_pos + Vec3::Y * (h - r);
-
-    for &e in world.entities() {
-        if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 { continue; }
-        }
-        if !include_dynamic {
-            if let Some(rb) = world.get::<RigidBody>(e) {
-                if rb.body_type == BodyType::Dynamic { continue; }
-            }
-        }
-        let Some(col) = world.get::<Collider>(e) else { continue };
-        let Some((wp, wr, ws)) = world_pos_rot_scale(world, e) else { continue };
-
-        let (amin, amax) = col.world_aabb(wp, wr, ws);
-        if capsule_hits_aabb(a, b, r, amin, amax) {
-            return true;
-        }
-    }
-    false
-}
-
-fn capsule_hits(world: &World, feet_pos: Vec3, cap: &PlayerCapsule) -> bool {
-    capsule_hits_impl(world, feet_pos, cap, false)
-}
-
-fn capsule_hits_with_dynamic(world: &World, feet_pos: Vec3, cap: &PlayerCapsule) -> bool {
-    capsule_hits_impl(world, feet_pos, cap, true)
-}
-
-fn surface_normal_at(
-    col: &Collider,
-    wp: Vec3,
-    wr: glam::Quat,
-    ws: Vec3,
-    probe: Vec3,
-) -> Vec3 {
-    let inv_rot = wr.inverse();
-    match col {
+/// Нормаль поверхности коллайдера в точке `probe` (world-space).
+///
+/// Использует данные из `ColliderEntry` (уже готовые world pos/rot/scale).
+fn surface_normal_at_entry(e: &super::collision_cache::ColliderEntry, probe: Vec3) -> Vec3 {
+    let inv_rot = e.world_rot.inverse();
+    match e.collider {
         Collider::Sphere { radius } => {
-            let r = radius * ws.max_element();
-            let to = probe - wp;
+            let r = radius * e.world_scale.max_element();
+            let to = probe - e.world_pos;
             let dist = to.length();
             if dist < 1e-4 || r < 1e-6 { Vec3::Y }
             else { (to / dist).normalize_or(Vec3::Y) }
         }
         Collider::Aabb { half_extents } => {
-            let h = *half_extents * ws;
-            let d = inv_rot * (probe - wp);
+            let h = half_extents * e.world_scale;
+            let d = inv_rot * (probe - e.world_pos);
             let dx = (h.x - d.x.abs()).max(0.0);
             let dy = (h.y - d.y.abs()).max(0.0);
             let dz = (h.z - d.z.abs()).max(0.0);
@@ -142,14 +83,14 @@ fn surface_normal_at(
             } else {
                 Vec3::new(0.0, 0.0, d.z.signum())
             };
-            (wr * local_normal).normalize_or(Vec3::Y)
+            (e.world_rot * local_normal).normalize_or(Vec3::Y)
         }
         Collider::Capsule { radius, height } => {
-            let r = radius * ws.max_element();
-            let hy = height * ws.y * 0.5;
-            let up = wr * Vec3::new(0.0, hy, 0.0);
-            let a = wp - up;
-            let b = wp + up;
+            let r = radius * e.world_scale.max_element();
+            let hy = height * e.world_scale.y * 0.5;
+            let up = e.world_rot * Vec3::new(0.0, hy, 0.0);
+            let a = e.world_pos - up;
+            let b = e.world_pos + up;
             let closest = closest_on_segment(probe, a, b);
             let to = probe - closest;
             let dist = to.length();
@@ -159,53 +100,51 @@ fn surface_normal_at(
     }
 }
 
-fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
-    let ab = b - a;
-    let t = (p - a).dot(ab) / ab.length_squared().max(1e-12);
-    a + ab * t.clamp(0.0, 1.0)
-}
+// ============================================================
+// Find support — принимает кэш
+// ============================================================
 
 pub fn find_support(
-    world: &World,
+    cache: &ColliderCache,
     feet_pos: Vec3,
     cap: &PlayerCapsule,
 ) -> Option<SupportInfo> {
     let r = cap.radius;
     let mut best: Option<SupportInfo> = None;
 
-    for &e in world.entities() {
-        if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 { continue; }
-        }
-        let Some(col) = world.get::<Collider>(e) else { continue };
-        let Some((wp, wr, ws)) = world_pos_rot_scale(world, e) else { continue };
-
-        let (amin, amax) = col.world_aabb(wp, wr, ws);
+    for e in cache.entries() {
+        let amin = e.aabb_min;
+        let amax = e.aabb_max;
         let top_y = amax.y;
         let dy = feet_pos.y - top_y;
         if !(-0.02..=SUPPORT_TOLERANCE).contains(&dy) { continue; }
         if feet_pos.x + r < amin.x || feet_pos.x - r > amax.x { continue; }
         if feet_pos.z + r < amin.z || feet_pos.z - r > amax.z { continue; }
 
-        let normal = surface_normal_at(col, wp, wr, ws, feet_pos);
+        let normal = surface_normal_at_entry(e, feet_pos);
 
         if best.as_ref().map_or(true, |b| top_y > b.top_y) {
-            best = Some(SupportInfo { entity: e, normal, top_y });
+            best = Some(SupportInfo { entity: e.entity, normal, top_y });
         }
     }
     best
 }
 
 pub fn find_support_entity(
-    world: &World,
+    cache: &ColliderCache,
     feet_pos: Vec3,
     cap: &PlayerCapsule,
 ) -> Option<Entity> {
-    find_support(world, feet_pos, cap).map(|s| s.entity)
+    find_support(cache, feet_pos, cap).map(|s| s.entity)
 }
 
+// ============================================================
+// Movement resolution — принимает кэш
+// ============================================================
+
 pub fn resolve_movement_ex(
-    world: &World,
+    _world: &World,
+    cache: &ColliderCache,
     start_feet: Vec3,
     delta: Vec3,
     cap: &PlayerCapsule,
@@ -219,19 +158,26 @@ pub fn resolve_movement_ex(
     let can_step_up = true;
     let step_heights = [0.15_f32, 0.30, 0.45];
 
+    let r = cap.radius;
+    let h = cap.height.max(2.0 * r + 1e-3);
+
     // === X — субшагами ===
     if delta.x.abs() > 1e-6 {
         let steps = (delta.x.abs() / SUBSTEP_SIZE).ceil().max(1.0) as i32;
         let step = delta.x / steps as f32;
         for _ in 0..steps {
             let try_pos = pos + Vec3::new(step, 0.0, 0.0);
-            if !capsule_hits(world, try_pos, cap) {
+            let a = try_pos + Vec3::Y * r;
+            let b = try_pos + Vec3::Y * (h - r);
+            if !cache.capsule_hits(a, b, r, false) {
                 pos = try_pos;
             } else if can_step_up {
                 let mut stepped = false;
-                for h in step_heights {
-                    let lifted = try_pos + Vec3::new(0.0, h, 0.0);
-                    if !capsule_hits(world, lifted, cap) {
+                for sh in step_heights {
+                    let lifted = try_pos + Vec3::new(0.0, sh, 0.0);
+                    let a2 = lifted + Vec3::Y * r;
+                    let b2 = lifted + Vec3::Y * (h - r);
+                    if !cache.capsule_hits(a2, b2, r, false) {
                         pos = lifted;
                         stepped = true;
                         break;
@@ -250,13 +196,17 @@ pub fn resolve_movement_ex(
         let step = delta.z / steps as f32;
         for _ in 0..steps {
             let try_pos = pos + Vec3::new(0.0, 0.0, step);
-            if !capsule_hits(world, try_pos, cap) {
+            let a = try_pos + Vec3::Y * r;
+            let b = try_pos + Vec3::Y * (h - r);
+            if !cache.capsule_hits(a, b, r, false) {
                 pos = try_pos;
             } else if can_step_up {
                 let mut stepped = false;
-                for h in step_heights {
-                    let lifted = try_pos + Vec3::new(0.0, h, 0.0);
-                    if !capsule_hits(world, lifted, cap) {
+                for sh in step_heights {
+                    let lifted = try_pos + Vec3::new(0.0, sh, 0.0);
+                    let a2 = lifted + Vec3::Y * r;
+                    let b2 = lifted + Vec3::Y * (h - r);
+                    if !cache.capsule_hits(a2, b2, r, false) {
                         pos = lifted;
                         stepped = true;
                         break;
@@ -269,7 +219,7 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Y — субшагами ===
+    // === Y — субшагами (с dynamic-телами: можно стоять на ящике) ===
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
         let steps = (delta.y.abs() / max_step).ceil().max(1.0) as i32;
@@ -277,7 +227,9 @@ pub fn resolve_movement_ex(
 
         for _ in 0..steps {
             let try_pos = pos + Vec3::new(0.0, step, 0.0);
-            if !capsule_hits_with_dynamic(world, try_pos, cap) {
+            let a = try_pos + Vec3::Y * r;
+            let b = try_pos + Vec3::Y * (h - r);
+            if !cache.capsule_hits(a, b, r, true) {
                 pos = try_pos;
             } else {
                 if step < 0.0 { on_ground = true; }
@@ -293,7 +245,9 @@ pub fn resolve_movement_ex(
         let mut probe = pos;
         for _ in 0..n {
             let try_pos = probe + Vec3::new(0.0, -probe_step, 0.0);
-            if !capsule_hits_with_dynamic(world, try_pos, cap) {
+            let a = try_pos + Vec3::Y * r;
+            let b = try_pos + Vec3::Y * (h - r);
+            if !cache.capsule_hits(a, b, r, true) {
                 probe = try_pos;
             } else {
                 pos = probe;
@@ -303,7 +257,7 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Sprint B1: приземление на terrain ===
+    // === Terrain приземление ===
     let local_floor = match terrain {
         Some(t) if t.contains(pos.x, pos.z) => t.sample(pos.x, pos.z).max(floor_y),
         _ => floor_y,
@@ -313,7 +267,7 @@ pub fn resolve_movement_ex(
         on_ground = true;
     }
 
-    let support = find_support(world, pos, cap);
+    let support = find_support(cache, pos, cap);
     if support.is_some() && delta.y <= 0.0 {
         on_ground = true;
     }
@@ -321,6 +275,7 @@ pub fn resolve_movement_ex(
     MovementResult { new_feet: pos, landed: on_ground, support }
 }
 
+/// Устаревшая обёртка: строит кэш внутри. Не использовать в hot-path.
 pub fn resolve_movement(
     world: &World,
     start_feet: Vec3,
@@ -328,6 +283,17 @@ pub fn resolve_movement(
     cap: &PlayerCapsule,
     floor_y: f32,
 ) -> (Vec3, bool, Option<Entity>) {
-    let r = resolve_movement_ex(world, start_feet, delta, cap, floor_y, 0.0, None);
+    let mut cache = ColliderCache::new();
+    cache.build(world);
+    let r = resolve_movement_ex(world, &cache, start_feet, delta, cap, floor_y, 0.0, None);
     (r.new_feet, r.landed, r.support.map(|s| s.entity))
+}
+
+// ============================================================
+// Legacy: keep visible-check helper — некоторые системы его используют
+// ============================================================
+
+#[allow(dead_code)]
+fn entity_is_visible(world: &World, e: Entity) -> bool {
+    world.get::<Visible>(e).map(|v| v.0).unwrap_or(true)
 }

@@ -1,3 +1,24 @@
+//! "The Fallen Citadel" — 5-актовая сюжетная кампания.
+//!
+//! ## Акты
+//! * I   — Пробуждение: арена, 2 стражника, ворота на восток.
+//! * II  — Двор: периметр, снайперы на башнях, красный ключ в сокровищнице.
+//! * III — Лобби: портал в подземелье, элитный гвардеец.
+//! * IV  — Подземелье: кристаллы, волки, босс за северными воротами.
+//! * V   — Побег: короткий коридор, exit_zone → Victory.
+//!
+//! ## Ключевые фичи
+//! * Weapon framework: 4 ствола, ADS, pellet-система, hit-stop.
+//! * RPG: Attributes + XP + Level Up + Character Sheet (Tab).
+//! * Items: Inventory (20 слотов), Equipment (weapon/armor/trinket),
+//!   Loot tables (RON) → автопикап через Trigger с именем `Pickup_*`.
+//! * AI: AiAgent + PatrolPath + noise events (шаги/выстрелы).
+//! * Save/Load: 4 слота, автосейв на чекпоинтах, быстрый save/load из паузы.
+//!
+//! ## Управление
+//! ЛКМ — огонь, ПКМ — ADS, R — перезарядка, 1..4 — выбор ствола,
+//! Tab — Character Sheet, I — Inventory, Esc — пауза.
+
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
@@ -6,18 +27,21 @@ use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
 use crate::ecs::{Entity, System, World};
-use crate::engine::{Game, Input, InputMap, Key, WorldLoadRequest};
-use crate::game::ai::{AiAgent, AiState, AiTarget, DebugPath, Enemy};
-use crate::game::animation::{
-    AnimationEventTriggered, AnimationEvents, AnimationRuntime,
-};
-use crate::game::audio::AudioSource;
+use crate::engine::{Game, Input, InputMap, Key, ShotFired, WorldLoadRequest};
+use crate::game::ai::{AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath};
+use crate::game::animation::{AnimationEventTriggered, AnimationEvents, AnimationRuntime};
+use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::*;
 use crate::game::decals::Decal;
+use crate::game::items::{
+    roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
+};
+use crate::game::rpg::GoldValue;
 use crate::game::lights::{DirectionalLight, PointLight};
+use crate::game::stats::{PlayerStats, STAT_DESCRIPTIONS, STAT_NAMES};
 use crate::game::timers::{Timer, TimerFinished, TimerSystem};
-use crate::game::AudioBus;
-use crate::physics::Collider;
+use crate::game::weapons::{apply_spread, Weapon, WeaponRegistry, WeaponRuntime};
+use crate::physics::{Collider, RigidBody};
 use crate::render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GpuLight, GpuPointLight,
     InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx, Renderer, Skeleton,
@@ -28,7 +52,7 @@ use super::primitives::*;
 use super::primitives::{stop_gate_if_reached, GateMotion};
 
 // ============================================================
-// Layout
+// Layout — координаты актов
 // ============================================================
 
 const ACT1_CENTER: Vec3 = Vec3::new(-60.0, 0.0, 0.0);
@@ -58,12 +82,15 @@ const WALL_T: f32 = 0.6;
 struct RotationSystem;
 impl System for RotationSystem {
     fn update(&mut self, world: &mut World, dt: f32) {
-        let entities: Vec<_> = world.query::<Spinner>().map(|(e, _)| e).collect();
+        let entities: Vec<Entity> = world.query::<Spinner>().map(|(e, _)| e).collect();
         for e in entities {
             let spinner = world.get::<Spinner>(e).copied();
-            if let (Some(s), Some(t)) = (spinner, world.get_mut::<Transform>(e)) {
-                let axis = s.axis.normalize_or_zero();
-                if axis.length_squared() < 1e-6 { continue; }
+            let Some(s) = spinner else { continue };
+            let axis = s.axis.normalize_or_zero();
+            if axis.length_squared() < 1e-6 {
+                continue;
+            }
+            if let Some(t) = world.get_mut::<Transform>(e) {
                 let dq = Quat::from_axis_angle(axis, s.speed * dt);
                 t.rotation = dq * t.rotation;
             }
@@ -95,7 +122,7 @@ enum Stage {
 }
 
 impl Stage {
-    fn title(&self) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
             Stage::Act1 => "ACT I — Пробуждение",
             Stage::Act2 => "ACT II — Двор",
@@ -133,11 +160,11 @@ impl CampaignState {
             kills_required: 2,
             has_key_red: false,
             gold: 0,
-            objective: "Убей 2 стражников".to_string(),
+            objective: "Убей 2 стражников".into(),
             processed: HashSet::new(),
             dialog_shown: HashSet::new(),
             checkpoints: HashSet::new(),
-            dialog: Some(("Добро пожаловать в Павшую Цитадель.".to_string(), 4.0)),
+            dialog: Some(("Добро пожаловать в Павшую Цитадель.".into(), 4.0)),
             victory_time: None,
             playtime: 0.0,
         }
@@ -158,7 +185,7 @@ impl CampaignState {
 }
 
 // ============================================================
-// Game
+// FortressDemo
 // ============================================================
 
 pub struct FortressDemo {
@@ -175,6 +202,7 @@ pub struct FortressDemo {
     animation_runtime: AnimationRuntime,
     animation_events: AnimationEvents,
 
+    // === Campaign scene refs ===
     bell_entity: Option<Entity>,
     ai_target_entity: Option<Entity>,
     boss_entity: Option<Entity>,
@@ -182,33 +210,44 @@ pub struct FortressDemo {
     gate_2: Option<Entity>,
     gate_4: Option<Entity>,
     gate_boss: Option<Entity>,
-
     navmesh_bake_requested: bool,
 
-    // Player state
+    // === Player state ===
     demo_health: f32,
     demo_health_max: f32,
-    demo_ammo: u32,
-    demo_ammo_max: u32,
-    demo_ammo_reserve: u32,
-    demo_ammo_reserve_max: u32,
-    demo_reloading: bool,
-    demo_reload_timer: f32,
-    demo_reload_duration: f32,
-    demo_fire_cooldown: f32,
     demo_paused: bool,
     demo_show_debug: bool,
     last_target_hp: f32,
 
-    /// Последнее значение `input.play_mode`. Для UI: в редакторе
-    /// игровой HUD не рисуем.
+    // === Weapons ===
+    weapons: WeaponRegistry,
+    current_weapon: usize,
+    weapon_runtimes: Vec<WeaponRuntime>,
+    weapon_raise_timer: f32,
+    demo_reloading: bool,
+    demo_reload_timer: f32,
+    demo_fire_cooldown: f32,
+    ads_active: bool,
+    ads_blend: f32,
+    base_fov: f32,
+
+    // === RPG ===
+    player_stats: PlayerStats,
+    show_character_sheet: bool,
+
+    // === Items ===
+    inventory: Inventory,
+    equipment: Equipment,
+    item_registry: ItemRegistry,
+    loot_registry: LootRegistry,
+    show_inventory: bool,
+
+    // === Meta ===
     last_play_mode: bool,
-
     hud: Hud,
-
     campaign: CampaignState,
 
-    // Save/Load
+    // === Save / Load ===
     save_manager: crate::scene::SaveManager,
     pending_world_request: Option<WorldLoadRequest>,
     show_save_panel: bool,
@@ -216,13 +255,9 @@ pub struct FortressDemo {
     save_slots_cache_dirty: bool,
     pending_autosave: bool,
     pending_save_slot: Option<u32>,
-
-    /// Флаг «выйти в главное меню». Устанавливается кнопкой в pause
-    /// menu. `App::redraw` читает через `Game::take_quit_to_menu`.
     pending_quit_to_menu: bool,
 
     prev_world_matrices: HashMap<Entity, glam::Mat4>,
-
     was_in_play_mode: bool,
     last_dt: f32,
     weapon_recoil: f32,
@@ -239,37 +274,7 @@ impl FortressDemo {
                 Box::new(RotationSystem),
                 Box::new(MovementSystem),
             ],
-            postfx: PostFx {
-                bloom_threshold: 0.9,
-                bloom_strength: 0.55,
-                bloom_knee: 0.5,
-                bloom_radius: 1.1,
-                exposure: 0.6,
-                ssao_strength: 0.9,
-                ssao_radius: 0.65,
-                ibl_strength: 0.2,
-                debug_view: DebugView::Final,
-                fxaa_strength: 1.0,
-                fog_color: [0.35, 0.40, 0.55],
-                fog_density: 0.008,
-                fog_height_base: 0.0,
-                fog_height_falloff: 0.06,
-                vignette_strength: 0.15,
-                film_grain: 0.03,
-                chromatic_aberration: 0.0,
-                shadow_bias: 0.0015,
-                shadow_normal_bias: 3.0,
-                shadow_fade_start: 150.0,
-                shadow_fade_end: 200.0,
-                lod_bias: 1.0,
-                lod_distances: [30.0, 80.0, 200.0, 500.0],
-                taa_strength: 1.0,
-                taa_sharpening: 0.1,
-                volumetric_density: 0.006,
-                volumetric_scattering: 0.45,
-                volumetric_phase_g: 0.6,
-                ..Default::default()
-            },
+            postfx: default_postfx(),
             built: false,
             dragging: false,
             show_grid: false,
@@ -287,25 +292,35 @@ impl FortressDemo {
             gate_2: None,
             gate_4: None,
             gate_boss: None,
-
             navmesh_bake_requested: false,
 
             demo_health: 100.0,
             demo_health_max: 100.0,
-            demo_ammo: 30,
-            demo_ammo_max: 30,
-            demo_ammo_reserve: 90,
-            demo_ammo_reserve_max: 120,
-            demo_reloading: false,
-            demo_reload_timer: 0.0,
-            demo_reload_duration: 1.5,
-            demo_fire_cooldown: 0.0,
             demo_paused: false,
             demo_show_debug: true,
             last_target_hp: 100.0,
 
-            last_play_mode: false,
+            weapons: WeaponRegistry::empty(),
+            current_weapon: 0,
+            weapon_runtimes: Vec::new(),
+            weapon_raise_timer: 0.0,
+            demo_reloading: false,
+            demo_reload_timer: 0.0,
+            demo_fire_cooldown: 0.0,
+            ads_active: false,
+            ads_blend: 0.0,
+            base_fov: 75.0_f32.to_radians(),
 
+            player_stats: PlayerStats::default(),
+            show_character_sheet: false,
+
+            inventory: Inventory::new(20),
+            equipment: Equipment::default(),
+            item_registry: ItemRegistry::empty(),
+            loot_registry: LootRegistry::empty(),
+            show_inventory: false,
+
+            last_play_mode: false,
             hud: Hud::new(),
             campaign: CampaignState::new(),
 
@@ -320,9 +335,7 @@ impl FortressDemo {
 
             prev_world_matrices: HashMap::new(),
             was_in_play_mode: false,
-
             last_dt: 1.0 / 60.0,
-
             weapon_recoil: 0.0,
             pending_hit_stop: None,
             auto_fire_accumulator: 0.0,
@@ -352,18 +365,11 @@ impl FortressDemo {
                     Ok(()) => {
                         self.hud.push(format!("💾 Saved to slot {}", slot + 1));
                         self.save_slots_cache_dirty = true;
-                        log::info!("Saved to slot {}", slot);
                     }
-                    Err(e) => {
-                        self.hud.push(format!("Save failed: {}", e));
-                        log::error!("Save slot {} failed: {}", slot, e);
-                    }
+                    Err(e) => self.hud.push(format!("Save failed: {}", e)),
                 }
             }
-            Err(e) => {
-                self.hud.push(format!("Snapshot failed: {}", e));
-                log::error!("Snapshot for save slot {} failed: {}", slot, e);
-            }
+            Err(e) => self.hud.push(format!("Snapshot failed: {}", e)),
         }
     }
 
@@ -375,12 +381,8 @@ impl FortressDemo {
                     game_state_ron: file.game_state_ron,
                 });
                 self.hud.push(format!("📂 Loading slot {}…", slot + 1));
-                log::info!("Requested load of slot {}", slot);
             }
-            Err(e) => {
-                self.hud.push(format!("Load failed: {}", e));
-                log::error!("Load slot {} failed: {}", slot, e);
-            }
+            Err(e) => self.hud.push(format!("Load failed: {}", e)),
         }
     }
 
@@ -399,18 +401,14 @@ impl FortressDemo {
     }
 
     // ============================================================
-    // Gate helpers (fix gate-stale)
+    // Gate helpers
     // ============================================================
 
-    /// Найти entity по имени в текущем `World`. Для устойчивых ссылок
-    /// на двери/босса — `self.gate_2` может устареть после Save/Load.
     fn find_by_name(world: &World, name: &str) -> Option<Entity> {
         world.query::<Name>()
             .find_map(|(e, n)| if n.0 == name { Some(e) } else { None })
     }
 
-    /// Устойчивый `open_gate`: если `entity` устарел (нет в World),
-    /// ищем по имени `fallback_name`.
     fn open_gate_by_name(
         &self,
         world: &mut World,
@@ -421,39 +419,144 @@ impl FortressDemo {
             Some(e) if world.entities().contains(&e) => e,
             _ => match Self::find_by_name(world, fallback_name) {
                 Some(e) => {
-                    log::warn!(
-                        "Gate '{}': stored entity stale, resolved by name → #{}",
-                        fallback_name, e
-                    );
+                    log::warn!("Gate '{}': stale entity, resolved by name → #{}", fallback_name, e);
                     e
                 }
                 None => {
-                    log::error!("Gate '{}' not found in world", fallback_name);
+                    log::error!("Gate '{}' not found", fallback_name);
                     return;
                 }
             },
         };
         self.open_gate(world, Some(g));
     }
-}
 
-// ============================================================
-// Building
-// ============================================================
+    // ============================================================
+    // Weapon helpers
+    // ============================================================
 
-impl FortressDemo {
+    fn current_weapon(&self) -> Option<&Weapon> {
+        self.weapons.get(self.current_weapon)
+    }
+
+    fn current_runtime(&self) -> Option<&WeaponRuntime> {
+        self.weapon_runtimes.get(self.current_weapon)
+    }
+
+    fn current_runtime_mut(&mut self) -> Option<&mut WeaponRuntime> {
+        self.weapon_runtimes.get_mut(self.current_weapon)
+    }
+
+    fn switch_weapon(&mut self, idx: usize) {
+        if idx == self.current_weapon || idx >= self.weapons.len() {
+            return;
+        }
+        if let Some(rt) = self.current_runtime_mut() {
+            rt.reloading = false;
+            rt.reload_timer = 0.0;
+        }
+        self.current_weapon = idx;
+        self.weapon_raise_timer = 0.30;
+        self.ads_active = false;
+    }
+
+    fn give_ammo_all(&mut self, mult: f32) -> u32 {
+        let mut total = 0;
+        for i in 0..self.weapons.len() {
+            let Some(w) = self.weapons.get(i).cloned() else { continue };
+            let Some(rt) = self.weapon_runtimes.get_mut(i) else { continue };
+            let add = ((w.ammo_pickup as f32) * mult).round() as u32;
+            rt.reserve = rt.reserve.saturating_add(add);
+            total += add;
+        }
+        total
+    }
+
+    fn heal(&mut self, amount: f32) {
+        self.demo_health = (self.demo_health + amount).min(self.demo_health_max);
+    }
+
+    // ============================================================
+    // RPG helpers
+    // ============================================================
+
+    fn total_attributes(&self) -> crate::game::stats::Attributes {
+        let mut a = self.player_stats.attributes;
+        let bonus = self.equipment.bonus_attributes(&self.item_registry);
+        a.strength = a.strength.saturating_add(bonus.strength);
+        a.dexterity = a.dexterity.saturating_add(bonus.dexterity);
+        a.intelligence = a.intelligence.saturating_add(bonus.intelligence);
+        a.vitality = a.vitality.saturating_add(bonus.vitality);
+        a.luck = a.luck.saturating_add(bonus.luck);
+        a
+    }
+
+    fn try_pickup(&mut self, item_id: &str, count: u32) {
+        let stack = ItemStack::new(item_id, count);
+        let leftover = self.inventory.add(&self.item_registry, stack);
+        let picked = count.saturating_sub(leftover);
+
+        if picked > 0 {
+            let name = self
+                .item_registry
+                .get_by_id(item_id)
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| item_id.to_string());
+            self.hud.push(format!("+{} × {}", picked, name));
+        }
+        if leftover > 0 {
+            self.hud.push("Inventory full!");
+        }
+    }
+
+    fn equip_from_slot(&mut self, idx: usize) {
+        let Some(stack) = self.inventory.slots.get(idx).and_then(|s| s.clone()) else { return };
+        let Some(item) = self.item_registry.get_by_id(&stack.item_id).cloned() else { return };
+        if !item.equippable {
+            return;
+        }
+
+        let current = match item.kind {
+            ItemKind::Weapon => self.equipment.weapon_id.take(),
+            ItemKind::Armor => self.equipment.armor_id.take(),
+            ItemKind::Trinket => self.equipment.trinket_id.take(),
+            _ => return,
+        };
+
+        let _ = self.inventory.take_one(idx);
+
+        if let Some(old_id) = current {
+            let _ = self.inventory.add(&self.item_registry, ItemStack::new(old_id, 1));
+        }
+
+        match item.kind {
+            ItemKind::Weapon => self.equipment.weapon_id = Some(item.id.clone()),
+            ItemKind::Armor => self.equipment.armor_id = Some(item.id.clone()),
+            ItemKind::Trinket => self.equipment.trinket_id = Some(item.id.clone()),
+            _ => {}
+        }
+        self.hud.push(format!("Equipped: {}", item.name));
+    }
+
+    fn use_from_slot(&mut self, idx: usize) {
+        let Some(stack) = self.inventory.slots.get(idx).and_then(|s| s.clone()) else { return };
+        let Some(item) = self.item_registry.get_by_id(&stack.item_id).cloned() else { return };
+        if item.kind != ItemKind::Consumable {
+            return;
+        }
+        if item.heal_amount > 0.0 {
+            self.heal(item.heal_amount);
+            self.hud.push(format!("Used {} · +{:.0} HP", item.name, item.heal_amount));
+        }
+        let _ = self.inventory.take_one(idx);
+    }
+
+    // ============================================================
+    // Building
+    // ============================================================
+
     fn build(&mut self, world: &mut World) {
-        // === Terrain entity ===
-        //
-        // ВАЖНО: terrain-entity НЕ получает Collider. Раньше здесь
-        // висел AABB (1000, 0.5, 1000) с верхней гранью на y = +0.5;
-        // капсула игрока начинается на y = feet + radius = 0.35 и
-        // пересекала terrain-AABB — игрок не мог сдвинуться.
-        //
-        // Роль физического пола:
-        //   * для игрока — heightmap через
-        //     `collision::resolve_movement_ex`;
-        //   * для dynamic-тел — `physics::PhysicsWorld::step`.
+        // Terrain root (без Collider, чтобы не блокировать капсулу игрока).
         let terrain_e = world.spawn();
         world.insert(terrain_e, Name("Terrain".into()));
         world.insert(terrain_e, Transform::at(Vec3::ZERO));
@@ -471,184 +574,33 @@ impl FortressDemo {
         self.build_decorations(world);
         self.bell_entity = Some(self.build_bell(world));
 
-        log::info!(
-            "Campaign built: 5 acts, {} entities total",
-            world.len()
-        );
-
+        log::info!("Campaign built: 5 acts, {} entities", world.len());
         self.navmesh_bake_requested = true;
     }
 
-    /// Детализированные декорации.
-    fn build_decorations(&mut self, world: &mut World) {
-        // === Act 1 ===
-        crate_box(world, "Act1_Crate_1", Vec3::new(-66.0, 0.5, -6.0), 1.0);
-        crate_box(world, "Act1_Crate_2", Vec3::new(-66.0, 1.5, -6.0), 1.0);
-        crate_box(world, "Act1_Crate_3", Vec3::new(-65.0, 0.5, -7.0), 1.0);
-
-        barrel(world, "Act1_Barrel_1", Vec3::new(-65.0, 0.6, 6.0));
-        barrel(world, "Act1_Barrel_2", Vec3::new(-64.5, 0.6, 6.5));
-        barrel(world, "Act1_Barrel_3", Vec3::new(-65.5, 0.6, 7.0));
-
-        static_mesh(world, "Act1_Rock_1", "rock_cluster_a", "arena_column",
-            Vec3::new(-68.0, 0.0, 8.0), Quat::IDENTITY, Vec3::ONE, None);
-        static_mesh(world, "Act1_Rock_2", "rock_cluster_b", "arena_column",
-            Vec3::new(-54.0, 0.0, -8.0), Quat::IDENTITY, Vec3::ONE, None);
-
-        for i in 0..4 {
-            let x = -68.0 + i as f32 * 1.2;
-            static_mesh(world, format!("Act1_Grave_{}", i), "gravestone", "arena_column",
-                Vec3::new(x, 0.0, 8.5), Quat::IDENTITY, Vec3::ONE, None);
-        }
-
-        static_mesh(world, "Act1_Skull_1", "skull", "arena_column",
-            Vec3::new(-63.0, 0.1, 3.0), Quat::from_axis_angle(Vec3::Y, 0.7), Vec3::ONE, None);
-        static_mesh(world, "Act1_Skull_2", "skull", "arena_column",
-            Vec3::new(-64.0, 0.1, -4.0), Quat::from_axis_angle(Vec3::Y, 1.9), Vec3::ONE, None);
-
-        static_mesh(world, "Act1_Rack", "weapon_rack", "arena_column",
-            Vec3::new(-69.0, 0.0, 0.0), Quat::from_axis_angle(Vec3::Y, 1.57), Vec3::ONE, None);
-
-        // === Act 2 ===
-        let trees = [
-            (Vec3::new(-40.0, 0.0, -40.0), "tree_pine_a"),
-            (Vec3::new( 40.0, 0.0, -40.0), "tree_pine_b"),
-            (Vec3::new(-40.0, 0.0,  40.0), "tree_oak_a"),
-            (Vec3::new( 40.0, 0.0,  40.0), "tree_oak_b"),
-            (Vec3::new(-45.0, 0.0,   0.0), "tree_pine_c"),
-            (Vec3::new( 45.0, 0.0,   0.0), "tree_pine_a"),
-            (Vec3::new(  0.0, 0.0, -45.0), "tree_oak_a"),
-            (Vec3::new(  0.0, 0.0,  45.0), "tree_pine_b"),
-        ];
-        for (i, (pos, mesh_name)) in trees.iter().enumerate() {
-            static_mesh(world, format!("Act2_Tree_{}", i), mesh_name, "foliage",
-                *pos, Quat::from_axis_angle(Vec3::Y, i as f32 * 0.9), Vec3::ONE, None);
-        }
-
-        static_mesh(world, "Act2_Table_1", "table", "arena_crate",
-            Vec3::new(-20.0, 0.0, -20.0), Quat::from_axis_angle(Vec3::Y, 0.3), Vec3::ONE, None);
-        static_mesh(world, "Act2_Bench_1", "bench", "arena_crate",
-            Vec3::new(-20.0, 0.0, -21.5), Quat::from_axis_angle(Vec3::Y, 0.3), Vec3::ONE, None);
-        static_mesh(world, "Act2_Bench_2", "bench", "arena_crate",
-            Vec3::new(-20.0, 0.0, -18.5),
-            Quat::from_axis_angle(Vec3::Y, 0.3 + std::f32::consts::PI), Vec3::ONE, None);
-        static_mesh(world, "Act2_Table_2", "table", "arena_crate",
-            Vec3::new( 22.0, 0.0,  18.0), Quat::from_axis_angle(Vec3::Y, -1.1), Vec3::ONE, None);
-
-        for i in 0..6 {
-            let x = -26.0 + i as f32 * 1.2;
-            crate_box(world, format!("Act2_Crate_{}", i), Vec3::new(x, 0.5, -26.0), 1.0);
-        }
-        for i in 0..5 {
-            let x = 24.0 + (i % 2) as f32 * 1.2;
-            let y = 0.6 + (i / 2) as f32 * 0.9;
-            barrel(world, format!("Act2_Barrel_{}", i), Vec3::new(x, y, 26.0));
-        }
-
-        static_mesh(world, "Act2_Rock_1", "rock_cluster_c", "arena_column",
-            Vec3::new(-28.0, 0.0, -28.0), Quat::IDENTITY, Vec3::ONE, None);
-        static_mesh(world, "Act2_Rock_2", "rock_cluster_a", "arena_column",
-            Vec3::new( 28.0, 0.0,  28.0), Quat::IDENTITY, Vec3::ONE, None);
-
-        for i in 0..12 {
-            let a = i as f32 / 12.0 * std::f32::consts::TAU;
-            let r = 8.0;
-            static_mesh(world, format!("Act2_Fence_{}", i), "fence_post", "arena_column",
-                Vec3::new(a.cos() * r, 0.0, a.sin() * r),
-                Quat::from_axis_angle(Vec3::Y, -a),
-                Vec3::ONE, None);
-        }
-
-        // === Act 3 ===
-        for i in 0..4 {
-            let x = -10.0 + i as f32 * 6.0;
-            static_mesh(world, format!("Act3_Bench_{}", i), "bench", "arena_crate",
-                Vec3::new(x, 0.0, -6.0), Quat::IDENTITY, Vec3::ONE, None);
-        }
-
-        for i in 0..5 {
-            let x = -12.0 + i as f32 * 6.0;
-            static_mesh(world, format!("Act3_Col_{}", i), "column_fluted", "arena_column",
-                Vec3::new(x, 2.5, -9.0), Quat::IDENTITY, Vec3::new(0.6, 5.0, 0.6), None);
-        }
-
-        crate_box(world, "Act3_Crate_1", Vec3::new(-12.0, 0.5, 6.0), 1.0);
-        crate_box(world, "Act3_Crate_2", Vec3::new(-11.0, 0.5, 6.5), 1.0);
-
-        // === Act 4 ===
-        let pillars = [
-            (Vec3::new(-8.0, 0.0, 0.0), "pillar_ruined_a"),
-            (Vec3::new( 8.0, 0.0, 0.0), "pillar_ruined_b"),
-            (Vec3::new( 0.0, 0.0, -8.0), "pillar_ruined_c"),
-            (Vec3::new(-8.0, 0.0, 8.0), "pillar_ruined_a"),
-            (Vec3::new( 8.0, 0.0, 8.0), "pillar_ruined_b"),
-        ];
-        for (i, (pos, mesh_name)) in pillars.iter().enumerate() {
-            static_mesh(world, format!("Act4_Pillar_{}", i), mesh_name, "rpg_dungeon",
-                *pos + Vec3::new(ACT4_CENTER.x, ACT4_CENTER.y, ACT4_CENTER.z),
-                Quat::from_axis_angle(Vec3::Y, i as f32 * 0.7),
-                Vec3::new(1.0, 6.0, 1.0), None);
-        }
-
-        for i in 0..6 {
-            let a = i as f32 / 6.0 * std::f32::consts::TAU;
-            let x = ACT4_CENTER.x + a.cos() * 12.0;
-            let z = ACT4_CENTER.z + a.sin() * 12.0;
-            static_mesh(world, format!("Act4_Skull_{}", i), "skull", "arena_column",
-                Vec3::new(x, ACT4_CENTER.y + 0.05, z),
-                Quat::from_axis_angle(Vec3::Y, a), Vec3::new(1.2, 1.2, 1.2), None);
-        }
-
-        crate_box(world, "Act4_Crate_1", ACT4_CENTER + Vec3::new(-15.0, 0.5, -15.0), 1.0);
-        crate_box(world, "Act4_Crate_2", ACT4_CENTER + Vec3::new(-15.0, 1.5, -15.0), 1.0);
-
-        for i in 0..3 {
-            barrel(world, format!("Act4_Barrel_{}", i),
-                ACT4_CENTER + Vec3::new(15.0 + i as f32 * 0.7, 0.6, -15.0));
-        }
-
-        // === Act 5 ===
-        for i in 0..3 {
-            crate_box(world, format!("Act5_Crate_{}", i),
-                ACT5_CENTER + Vec3::new(-8.0 + i as f32 * 1.2, 0.5, 5.0), 1.0);
-        }
-
-        // === Мосты ===
-        torch(world, "Bridge_A1A2_TorchMid", Vec3::new(-40.0, 0.0, 3.5));
-        torch(world, "Bridge_A2A3_TorchMid", Vec3::new(35.0, 0.0, 3.5));
-
-        log::info!("Decorations: detailed props scattered across all acts");
-    }
-
     fn build_bridges(&mut self, world: &mut World) {
+        // Act1 ↔ Act2
         static_box(world, "Bridge_Act1_Act2", "arena_floor",
-            Vec3::new(-40.0, 0.0, 0.0),
-            Vec3::new(20.0, 0.5, 8.0),
+            Vec3::new(-40.0, 0.0, 0.0), Vec3::new(20.0, 0.5, 8.0),
             Vec3::splat(0.5), 2.0);
-
         wall(world, "Bridge_A1A2_Rail_N",
-            Vec3::new(-50.0, 0.0, -4.0),
-            Vec3::new(-30.0, 0.0, -4.0),
+            Vec3::new(-50.0, 0.0, -4.0), Vec3::new(-30.0, 0.0, -4.0),
             0.0, 1.0, 0.3, "arena_wall", 2.0);
         wall(world, "Bridge_A1A2_Rail_S",
-            Vec3::new(-50.0, 0.0, 4.0),
-            Vec3::new(-30.0, 0.0, 4.0),
+            Vec3::new(-50.0, 0.0, 4.0), Vec3::new(-30.0, 0.0, 4.0),
             0.0, 1.0, 0.3, "arena_wall", 2.0);
         torch(world, "Bridge_A1A2_Torch1", Vec3::new(-45.0, 3.0, 0.0));
         torch(world, "Bridge_A1A2_Torch2", Vec3::new(-35.0, 3.0, 0.0));
 
+        // Act2 ↔ Act3
         static_box(world, "Bridge_Act2_Act3", "arena_floor",
-            Vec3::new(35.0, 0.0, 0.0),
-            Vec3::new(10.0, 0.5, 8.0),
+            Vec3::new(35.0, 0.0, 0.0), Vec3::new(10.0, 0.5, 8.0),
             Vec3::splat(0.5), 2.0);
-
         wall(world, "Bridge_A2A3_Rail_N",
-            Vec3::new(30.0, 0.0, -4.0),
-            Vec3::new(40.0, 0.0, -4.0),
+            Vec3::new(30.0, 0.0, -4.0), Vec3::new(40.0, 0.0, -4.0),
             0.0, 1.0, 0.3, "arena_wall", 2.0);
         wall(world, "Bridge_A2A3_Rail_S",
-            Vec3::new(30.0, 0.0, 4.0),
-            Vec3::new(40.0, 0.0, 4.0),
+            Vec3::new(30.0, 0.0, 4.0), Vec3::new(40.0, 0.0, 4.0),
             0.0, 1.0, 0.3, "arena_wall", 2.0);
         torch(world, "Bridge_A2A3_Torch", Vec3::new(35.0, 3.0, 0.0));
     }
@@ -658,23 +610,17 @@ impl FortressDemo {
         let h = ACT1_HALF;
 
         static_box(world, "Act1_Floor", "arena_floor",
-            c, Vec3::new(h * 2.0, 0.5, h * 2.0),
-            Vec3::splat(0.5), 2.5);
+            c, Vec3::new(h * 2.0, 0.5, h * 2.0), Vec3::splat(0.5), 2.5);
 
-        wall(world, "Act1_Wall_W",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, h),
+        wall(world, "Act1_Wall_W", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act1_Wall_N",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(h, 0.0, -h),
+        wall(world, "Act1_Wall_N", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(h, 0.0, -h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act1_Wall_S",
-            c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act1_Wall_S", c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act1_Wall_E1",
-            c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, -3.0),
+        wall(world, "Act1_Wall_E1", c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, -3.0),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act1_Wall_E2",
-            c + Vec3::new(h, 0.0, 3.0), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act1_Wall_E2", c + Vec3::new(h, 0.0, 3.0), c + Vec3::new(h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
 
         let gate_pos = c + Vec3::new(h, 2.0, 0.0);
@@ -685,14 +631,14 @@ impl FortressDemo {
         torch(world, "Act1_Torch_1", c + Vec3::new(-h + 1.0, 3.0, -h + 1.0));
         torch(world, "Act1_Torch_2", c + Vec3::new(-h + 1.0, 3.0,  h - 1.0));
 
-        let p1 = vec![
+        let patrol = vec![
             c + Vec3::new(-6.0, 0.0, -6.0),
             c + Vec3::new( 6.0, 0.0, -6.0),
             c + Vec3::new( 6.0, 0.0,  6.0),
             c + Vec3::new(-6.0, 0.0,  6.0),
         ];
-        enemy(world, "Act1_Enemy_1", c + Vec3::new(-5.0, 0.0, 0.0), EnemyKind::Patrol, Some(p1.clone()));
-        enemy(world, "Act1_Enemy_2", c + Vec3::new( 5.0, 0.0, 0.0), EnemyKind::Patrol, Some(p1));
+        enemy(world, "Act1_Enemy_1", c + Vec3::new(-5.0, 0.0, 0.0), EnemyKind::Patrol, Some(patrol.clone()));
+        enemy(world, "Act1_Enemy_2", c + Vec3::new( 5.0, 0.0, 0.0), EnemyKind::Patrol, Some(patrol));
 
         checkpoint(world, "checkpoint_1", c + Vec3::new(-h + 3.0, 0.02, 0.0));
         health_pickup(world, "health_a1", c + Vec3::new(-7.0, 0.5, 7.0), 30.0);
@@ -709,26 +655,19 @@ impl FortressDemo {
         let h = ACT2_HALF;
 
         static_box(world, "Act2_Floor", "arena_floor",
-            c, Vec3::new(h * 2.0, 0.5, h * 2.0),
-            Vec3::splat(0.5), 2.0);
+            c, Vec3::new(h * 2.0, 0.5, h * 2.0), Vec3::splat(0.5), 2.0);
 
-        wall(world, "Act2_Wall_W1",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, -3.0),
+        wall(world, "Act2_Wall_W1", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, -3.0),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act2_Wall_W2",
-            c + Vec3::new(-h, 0.0, 3.0), c + Vec3::new(-h, 0.0, h),
+        wall(world, "Act2_Wall_W2", c + Vec3::new(-h, 0.0, 3.0), c + Vec3::new(-h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act2_Wall_E1",
-            c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, -3.0),
+        wall(world, "Act2_Wall_E1", c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, -3.0),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act2_Wall_E2",
-            c + Vec3::new(h, 0.0, 3.0), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act2_Wall_E2", c + Vec3::new(h, 0.0, 3.0), c + Vec3::new(h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act2_Wall_N",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(h, 0.0, -h),
+        wall(world, "Act2_Wall_N", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(h, 0.0, -h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act2_Wall_S",
-            c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act2_Wall_S", c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
 
         let tower_off = h - 3.0;
@@ -740,33 +679,31 @@ impl FortressDemo {
         ];
         for (side, center) in &towers {
             static_box(world, format!("Act2_Tower_{}", side), "arena_column",
-                *center + Vec3::Y * 3.0,
-                Vec3::new(6.0, 6.0, 6.0),
+                *center + Vec3::Y * 3.0, Vec3::new(6.0, 6.0, 6.0),
                 Vec3::splat(0.5), 2.0);
             static_box(world, format!("Act2_Tower_{}_top", side), "arena_wall",
-                *center + Vec3::Y * 6.4,
-                Vec3::new(6.6, 0.4, 6.6),
+                *center + Vec3::Y * 6.4, Vec3::new(6.6, 0.4, 6.6),
                 Vec3::splat(0.5), 1.0);
             torch(world, format!("Act2_Torch_{}", side), *center + Vec3::Y * 7.2);
         }
 
+        // 8 колонн по кругу.
         let col_r = 12.0;
         for i in 0..8 {
             let a = i as f32 / 8.0 * std::f32::consts::TAU;
-            let x = a.cos() * col_r;
-            let z = a.sin() * col_r;
+            let (sn, cs) = a.sin_cos();
             static_mesh(world, format!("Act2_Col_{}", i), "column_fluted", "arena_column",
-                c + Vec3::new(x, 2.5, z), Quat::IDENTITY,
+                c + Vec3::new(cs * col_r, 2.5, sn * col_r), Quat::IDENTITY,
                 Vec3::new(1.0, 5.0, 1.0),
                 Some(Collider::aabb(Vec3::splat(0.4))));
         }
 
+        // Алтарь.
         for i in 0..3u32 {
             let r = 5.0 - i as f32 * 1.3;
             let y = i as f32 * 0.5 + 0.25;
             static_mesh(world, format!("Act2_Altar_Step_{}", i), "cylinder", "arena_platform",
-                c + Vec3::Y * y, Quat::IDENTITY,
-                Vec3::new(r * 2.0, 0.5, r * 2.0),
+                c + Vec3::Y * y, Quat::IDENTITY, Vec3::new(r * 2.0, 0.5, r * 2.0),
                 Some(Collider::aabb(Vec3::splat(0.5))));
         }
 
@@ -805,17 +742,17 @@ impl FortressDemo {
             c + Vec3::new( tower_off, 6.6, -tower_off), EnemyKind::Sniper, None);
 
         health_pickup(world, "health_a2", c + Vec3::new(-20.0, 0.5, 20.0), 40.0);
-        ammo_pickup(world, "ammo_a2_1", c + Vec3::new(20.0, 0.5, -20.0), 30);
+        ammo_pickup(world, "ammo_a2_1", c + Vec3::new( 20.0, 0.5, -20.0), 30);
         ammo_pickup(world, "ammo_a2_2", c + Vec3::new(-24.0, 0.5, 0.0), 30);
 
         dialog_zone(world, "dialog_act2", c + Vec3::new(-h + 4.0, 1.0, 0.0), 3.0);
 
         for (x, z, s, a) in [
             (-12.0, -10.0, 1.8, 0.85),
-            (10.0, -13.0, 2.0, 0.8),
-            (15.0, 10.0, 1.6, 0.75),
-            (-8.0, 15.0, 1.9, 0.85),
-            (5.0, 5.0, 1.3, 0.7),
+            ( 10.0, -13.0, 2.0, 0.80),
+            ( 15.0,  10.0, 1.6, 0.75),
+            ( -8.0,  15.0, 1.9, 0.85),
+            (  5.0,   5.0, 1.3, 0.70),
         ] {
             blood_decal(world, c + Vec3::new(x, 0.02, z), s, a);
         }
@@ -832,11 +769,11 @@ impl FortressDemo {
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
         wall(world, "Act2_Treasure_N",
             center + Vec3::new(-half, 0.0, -half),
-            center + Vec3::new(half, 0.0, -half),
+            center + Vec3::new( half, 0.0, -half),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
         wall(world, "Act2_Treasure_S",
             center + Vec3::new(-half, 0.0, half),
-            center + Vec3::new(half, 0.0, half),
+            center + Vec3::new( half, 0.0, half),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
         wall(world, "Act2_Treasure_E",
             center + Vec3::new(half, 0.0, -half),
@@ -846,15 +783,14 @@ impl FortressDemo {
         enemy(world, "Act2_Treasure_Guard1",
             center + Vec3::new(2.0, 0.0, -2.0), EnemyKind::Elite, None);
         enemy(world, "Act2_Treasure_Guard2",
-            center + Vec3::new(2.0, 0.0, 2.0), EnemyKind::Elite, None);
+            center + Vec3::new(2.0, 0.0,  2.0), EnemyKind::Elite, None);
 
         chest(world, "Act2_Chest_A", center + Vec3::new(4.0, 0.25, -3.0), 200);
-        chest(world, "Act2_Chest_B", center + Vec3::new(4.0, 0.25, 0.0), 350);
+        chest(world, "Act2_Chest_B", center + Vec3::new(4.0, 0.25,  0.0), 350);
 
         let key_pos = center + Vec3::new(0.0, 0.6, 0.0);
         key_pickup(world, "key_red", key_pos, [1.0, 0.2, 0.2]);
         objective_marker(world, "objective_key", key_pos + Vec3::Y * 2.0);
-
         torch(world, "Act2_Treasure_Torch", center + Vec3::new(0.0, 3.5, 0.0));
     }
 
@@ -864,23 +800,17 @@ impl FortressDemo {
         let hz = ACT3_HALF_Z;
 
         static_box(world, "Act3_Floor", "arena_platform",
-            c, Vec3::new(hx * 2.0, 0.5, hz * 2.0),
-            Vec3::splat(0.5), 1.5);
+            c, Vec3::new(hx * 2.0, 0.5, hz * 2.0), Vec3::splat(0.5), 1.5);
 
-        wall(world, "Act3_Wall_W1",
-            c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(-hx, 0.0, -3.0),
+        wall(world, "Act3_Wall_W1", c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(-hx, 0.0, -3.0),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act3_Wall_W2",
-            c + Vec3::new(-hx, 0.0, 3.0), c + Vec3::new(-hx, 0.0, hz),
+        wall(world, "Act3_Wall_W2", c + Vec3::new(-hx, 0.0, 3.0), c + Vec3::new(-hx, 0.0, hz),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act3_Wall_E",
-            c + Vec3::new(hx, 0.0, -hz), c + Vec3::new(hx, 0.0, hz),
+        wall(world, "Act3_Wall_E", c + Vec3::new(hx, 0.0, -hz), c + Vec3::new(hx, 0.0, hz),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act3_Wall_N",
-            c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(hx, 0.0, -hz),
+        wall(world, "Act3_Wall_N", c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(hx, 0.0, -hz),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
-        wall(world, "Act3_Wall_S",
-            c + Vec3::new(-hx, 0.0, hz), c + Vec3::new(hx, 0.0, hz),
+        wall(world, "Act3_Wall_S", c + Vec3::new(-hx, 0.0, hz), c + Vec3::new(hx, 0.0, hz),
             0.0, WALL_H, WALL_T, "arena_wall", 2.0);
 
         let portal_pos = c + Vec3::new(hx - 5.0, 1.5, 0.0);
@@ -892,13 +822,13 @@ impl FortressDemo {
 
         health_pickup(world, "health_a3", c + Vec3::new(-8.0, 0.5, 5.0), 50.0);
         ammo_pickup(world, "ammo_a3_1", c + Vec3::new(-8.0, 0.5, -5.0), 40);
-        ammo_pickup(world, "ammo_a3_2", c + Vec3::new(0.0, 0.5, 6.0), 40);
+        ammo_pickup(world, "ammo_a3_2", c + Vec3::new( 0.0, 0.5,  6.0), 40);
 
         checkpoint(world, "checkpoint_3", c + Vec3::new(-hx + 3.0, 0.02, 0.0));
         dialog_zone(world, "dialog_act3", c + Vec3::new(-hx + 4.0, 1.0, 0.0), 3.0);
 
         torch(world, "Act3_Torch_1", c + Vec3::new(-hx + 2.0, 3.5, -hz + 2.0));
-        torch(world, "Act3_Torch_2", c + Vec3::new(-hx + 2.0, 3.5, hz - 2.0));
+        torch(world, "Act3_Torch_2", c + Vec3::new(-hx + 2.0, 3.5,  hz - 2.0));
     }
 
     fn build_act4(&mut self, world: &mut World) {
@@ -906,27 +836,20 @@ impl FortressDemo {
         let h = ACT4_HALF;
 
         static_box(world, "Act4_Floor", "rpg_dungeon",
-            c, Vec3::new(h * 2.0, 0.5, h * 2.0),
-            Vec3::splat(0.5), 2.0);
-
+            c, Vec3::new(h * 2.0, 0.5, h * 2.0), Vec3::splat(0.5), 2.0);
         static_box(world, "Act4_Ceiling", "arena_wall",
             c + Vec3::Y * 6.0, Vec3::new(h * 2.0, 0.5, h * 2.0),
             Vec3::splat(0.5), 2.0);
 
-        wall(world, "Act4_Wall_W",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, h),
+        wall(world, "Act4_Wall_W", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-h, 0.0, h),
             0.0, 6.0, WALL_T, "rpg_dungeon", 2.0);
-        wall(world, "Act4_Wall_E",
-            c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act4_Wall_E", c + Vec3::new(h, 0.0, -h), c + Vec3::new(h, 0.0, h),
             0.0, 6.0, WALL_T, "rpg_dungeon", 2.0);
-        wall(world, "Act4_Wall_S",
-            c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
+        wall(world, "Act4_Wall_S", c + Vec3::new(-h, 0.0, h), c + Vec3::new(h, 0.0, h),
             0.0, 6.0, WALL_T, "rpg_dungeon", 2.0);
-        wall(world, "Act4_Wall_N1",
-            c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-3.0, 0.0, -h),
+        wall(world, "Act4_Wall_N1", c + Vec3::new(-h, 0.0, -h), c + Vec3::new(-3.0, 0.0, -h),
             0.0, 6.0, WALL_T, "rpg_dungeon", 2.0);
-        wall(world, "Act4_Wall_N2",
-            c + Vec3::new(3.0, 0.0, -h), c + Vec3::new(h, 0.0, -h),
+        wall(world, "Act4_Wall_N2", c + Vec3::new(3.0, 0.0, -h), c + Vec3::new(h, 0.0, -h),
             0.0, 6.0, WALL_T, "rpg_dungeon", 2.0);
 
         let gate_boss_pos = c + Vec3::new(0.0, 2.5, -h);
@@ -936,11 +859,11 @@ impl FortressDemo {
 
         crystal(world, "Act4_Crystal_A", c + Vec3::new(-10.0, 1.5, -5.0), [0.35, 0.6, 1.0]);
         crystal(world, "Act4_Crystal_B", c + Vec3::new( 10.0, 1.5, -5.0), [0.6, 0.35, 1.0]);
-        crystal(world, "Act4_Crystal_C", c + Vec3::new( 0.0, 1.5,  10.0), [0.35, 1.0, 0.85]);
+        crystal(world, "Act4_Crystal_C", c + Vec3::new(  0.0, 1.5, 10.0), [0.35, 1.0, 0.85]);
 
         enemy(world, "Act4_Wolf_1", c + Vec3::new(-10.0, 0.0, 5.0), EnemyKind::Patrol, None);
         enemy(world, "Act4_Wolf_2", c + Vec3::new( 10.0, 0.0, 5.0), EnemyKind::Patrol, None);
-        enemy(world, "Act4_Wolf_3", c + Vec3::new( 0.0, 0.0, -10.0), EnemyKind::Patrol, None);
+        enemy(world, "Act4_Wolf_3", c + Vec3::new(  0.0, 0.0, -10.0), EnemyKind::Patrol, None);
 
         chest(world, "Act4_Chest_A", c + Vec3::new(-14.0, 0.25, 14.0), 750);
         chest(world, "Act4_Chest_B", c + Vec3::new( 14.0, 0.25, 14.0), 1000);
@@ -954,12 +877,9 @@ impl FortressDemo {
 
         for i in 0..6 {
             let a = i as f32 / 6.0 * std::f32::consts::TAU;
-            rune_decal(
-                world,
+            rune_decal(world,
                 c + Vec3::new(a.cos() * 8.0, 0.02, a.sin() * 8.0),
-                1.2,
-                [0.4, 0.3, 0.9, 0.6],
-            );
+                1.2, [0.4, 0.3, 0.9, 0.6]);
         }
 
         torch(world, "Act4_Torch_1", c + Vec3::new(-15.0, 4.0, -15.0));
@@ -985,7 +905,6 @@ impl FortressDemo {
             Vec3::new(room_cx, c.y, room_cz),
             Vec3::new(half_x * 2.0, 0.5, half_z * 2.0),
             Vec3::splat(0.5), 2.0);
-
         static_box(world, "Boss_Ceiling", "arena_wall",
             Vec3::new(room_cx, c.y + 8.0, room_cz),
             Vec3::new(half_x * 2.0, 0.5, half_z * 2.0),
@@ -1014,8 +933,7 @@ impl FortressDemo {
             Some(Collider::aabb(Vec3::splat(0.5))));
 
         let boss = enemy(world, "Boss_Dungeon",
-            Vec3::new(room_cx, c.y, room_cz),
-            EnemyKind::Boss, None);
+            Vec3::new(room_cx, c.y, room_cz), EnemyKind::Boss, None);
         self.boss_entity = Some(boss);
 
         crystal(world, "Boss_Crystal_1",
@@ -1025,12 +943,9 @@ impl FortressDemo {
 
         for i in 0..8 {
             let a = i as f32 / 8.0 * std::f32::consts::TAU;
-            rune_decal(
-                world,
+            rune_decal(world,
                 Vec3::new(room_cx + a.cos() * 6.0, c.y + 0.02, room_cz + a.sin() * 6.0),
-                1.5,
-                [1.0, 0.2, 0.2, 0.7],
-            );
+                1.5, [1.0, 0.2, 0.2, 0.7]);
         }
     }
 
@@ -1040,21 +955,16 @@ impl FortressDemo {
         let hz = ACT5_HALF_Z;
 
         static_box(world, "Act5_Floor", "arena_platform",
-            c, Vec3::new(hx * 2.0, 0.5, hz * 2.0),
-            Vec3::splat(0.5), 1.0);
-
+            c, Vec3::new(hx * 2.0, 0.5, hz * 2.0), Vec3::splat(0.5), 1.0);
         static_box(world, "Act5_Ceiling", "arena_wall",
             c + Vec3::Y * 6.0, Vec3::new(hx * 2.0, 0.5, hz * 2.0),
             Vec3::splat(0.5), 1.5);
 
-        wall(world, "Act5_Wall_W",
-            c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(-hx, 0.0, hz),
+        wall(world, "Act5_Wall_W", c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(-hx, 0.0, hz),
             0.0, 6.0, WALL_T, "arena_column", 2.0);
-        wall(world, "Act5_Wall_E",
-            c + Vec3::new(hx, 0.0, -hz), c + Vec3::new(hx, 0.0, hz),
+        wall(world, "Act5_Wall_E", c + Vec3::new(hx, 0.0, -hz), c + Vec3::new(hx, 0.0, hz),
             0.0, 6.0, WALL_T, "arena_column", 2.0);
-        wall(world, "Act5_Wall_N",
-            c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(hx, 0.0, -hz),
+        wall(world, "Act5_Wall_N", c + Vec3::new(-hx, 0.0, -hz), c + Vec3::new(hx, 0.0, -hz),
             0.0, 6.0, WALL_T, "arena_column", 2.0);
 
         let exit_pos = c + Vec3::new(0.0, 1.5, -hz + 3.0);
@@ -1064,8 +974,7 @@ impl FortressDemo {
             let x = if i % 2 == 0 { -hx + 2.0 } else { hx - 2.0 };
             let z = if i < 2 { -hz + 2.0 } else { hz - 2.0 };
             crystal(world, format!("Act5_Crystal_{}", i),
-                c + Vec3::new(x, 2.0, z),
-                [1.0, 0.8, 0.4]);
+                c + Vec3::new(x, 2.0, z), [1.0, 0.8, 0.4]);
         }
 
         checkpoint(world, "checkpoint_5", c + Vec3::new(0.0, 0.02, hz - 3.0));
@@ -1116,6 +1025,65 @@ impl FortressDemo {
         bell
     }
 
+    fn build_decorations(&mut self, world: &mut World) {
+        // Act1
+        for i in 0..3 {
+            crate_box(world, format!("Act1_Crate_{}", i),
+                Vec3::new(-66.0 + i as f32 * 0.8, 0.5, -6.0), 1.0);
+        }
+        for i in 0..3 {
+            barrel(world, format!("Act1_Barrel_{}", i),
+                Vec3::new(-65.0 + i as f32 * 0.5, 0.6, 6.0));
+        }
+        static_mesh(world, "Act1_Rock_1", "rock_cluster_a", "arena_column",
+            Vec3::new(-68.0, 0.0, 8.0), Quat::IDENTITY, Vec3::ONE, None);
+        for i in 0..4 {
+            static_mesh(world, format!("Act1_Grave_{}", i), "gravestone", "arena_column",
+                Vec3::new(-68.0 + i as f32 * 1.2, 0.0, 8.5),
+                Quat::IDENTITY, Vec3::ONE, None);
+        }
+
+        // Act2
+        let trees = [
+            (Vec3::new(-40.0, 0.0, -40.0), "tree_pine_a"),
+            (Vec3::new( 40.0, 0.0, -40.0), "tree_pine_b"),
+            (Vec3::new(-40.0, 0.0,  40.0), "tree_oak_a"),
+            (Vec3::new( 40.0, 0.0,  40.0), "tree_oak_b"),
+        ];
+        for (i, (pos, mesh)) in trees.iter().enumerate() {
+            static_mesh(world, format!("Act2_Tree_{}", i), mesh, "foliage",
+                *pos, Quat::from_axis_angle(Vec3::Y, i as f32 * 0.9), Vec3::ONE, None);
+        }
+        for i in 0..6 {
+            crate_box(world, format!("Act2_Crate_{}", i),
+                Vec3::new(-26.0 + i as f32 * 1.2, 0.5, -26.0), 1.0);
+        }
+        for i in 0..5 {
+            barrel(world, format!("Act2_Barrel_{}", i),
+                Vec3::new(24.0, 0.6 + (i / 2) as f32 * 0.9, 26.0));
+        }
+
+        // Act3
+        for i in 0..5 {
+            static_mesh(world, format!("Act3_Col_{}", i), "column_fluted", "arena_column",
+                Vec3::new(-12.0 + i as f32 * 6.0, 2.5, -9.0),
+                Quat::IDENTITY, Vec3::new(0.6, 5.0, 0.6), None);
+        }
+
+        // Act4
+        let pillars = [
+            (Vec3::new(-8.0, 0.0, 0.0), "pillar_ruined_a"),
+            (Vec3::new( 8.0, 0.0, 0.0), "pillar_ruined_b"),
+            (Vec3::new( 0.0, 0.0, -8.0), "pillar_ruined_c"),
+        ];
+        for (i, (pos, mesh)) in pillars.iter().enumerate() {
+            static_mesh(world, format!("Act4_Pillar_{}", i), mesh, "rpg_dungeon",
+                *pos + Vec3::new(ACT4_CENTER.x, ACT4_CENTER.y, ACT4_CENTER.z),
+                Quat::from_axis_angle(Vec3::Y, i as f32 * 0.7),
+                Vec3::new(1.0, 6.0, 1.0), None);
+        }
+    }
+
     fn open_gate(&self, world: &mut World, gate: Option<Entity>) {
         let Some(g) = gate else { return };
         let speed = world.get::<GateMotion>(g).map(|m| m.speed).unwrap_or(4.0);
@@ -1125,7 +1093,6 @@ impl FortressDemo {
         if let Some(src) = world.get_mut::<AudioSource>(g) {
             src.playing = true;
         }
-        log::info!("Gate opened: entity #{}", g);
     }
 
     fn tick_gates(&mut self, world: &mut World) {
@@ -1155,6 +1122,16 @@ impl FortressDemo {
     }
 
     fn on_trigger(&mut self, world: &mut World, e: Entity, name: &str) {
+        // Auto-pickup: имя = "Pickup_<item_id>_<idx>".
+        if let Some(rest) = name.strip_prefix("Pickup_") {
+            if let Some((item_id, _idx)) = rest.rsplit_once('_') {
+                let count = world.get::<GoldValue>(e).map(|g| g.0).unwrap_or(1);
+                self.try_pickup(item_id, count);
+                world.despawn(e);
+                return;
+            }
+        }
+
         if name == "key_red" {
             self.campaign.has_key_red = true;
             self.hud.push("🔑 Красный ключ получен");
@@ -1163,7 +1140,6 @@ impl FortressDemo {
                 t.position.y = -500.0;
             }
             self.hide_objective(world, "objective_key");
-            log::info!("Campaign: key_red collected, has_key_red = true");
             return;
         }
 
@@ -1172,7 +1148,7 @@ impl FortressDemo {
                 .get::<Tint>(e)
                 .map(|t| (t.0[0] * 100.0).max(10.0))
                 .unwrap_or(30.0);
-            self.demo_health = (self.demo_health + amount).min(self.demo_health_max);
+            self.heal(amount);
             self.hud.push(format!("+{:.0} HP", amount));
             if let Some(t) = world.get_mut::<Transform>(e) {
                 t.position.y = -500.0;
@@ -1181,15 +1157,12 @@ impl FortressDemo {
         }
 
         if name.starts_with("ammo_") {
-            let amount = world
+            let mult = world
                 .get::<Tint>(e)
-                .map(|t| (t.0[0] * 100.0).max(10.0) as u32)
-                .unwrap_or(20);
-            let before = self.demo_ammo_reserve;
-            self.demo_ammo_reserve = (self.demo_ammo_reserve + amount)
-                .min(self.demo_ammo_reserve_max);
-            let added = self.demo_ammo_reserve - before;
-            self.hud.push(format!("+{} reserve ammo", added));
+                .map(|t| (t.0[0] * 4.0).max(1.0))
+                .unwrap_or(2.0);
+            let added = self.give_ammo_all(mult);
+            self.hud.push(format!("+{} ammo (all weapons)", added));
             if let Some(t) = world.get_mut::<Transform>(e) {
                 t.position.y = -500.0;
             }
@@ -1204,51 +1177,24 @@ impl FortressDemo {
             return;
         }
 
-        if name == "dialog_intro" {
+        if name.starts_with("dialog_") {
             if self.campaign.dialog_shown.insert(name.to_string()) {
-                self.campaign.show_dialog(
-                    "Ты пробудился в руинах. Пробейся через стражу!",
-                    4.0,
-                );
-            }
-            return;
-        }
-        if name == "dialog_act2" {
-            if self.campaign.dialog_shown.insert(name.to_string()) {
-                self.campaign.show_dialog(
-                    "Двор полон врагов. Найди ключ в сокровищнице.",
-                    4.0,
-                );
-            }
-            return;
-        }
-        if name == "dialog_act3" {
-            if self.campaign.dialog_shown.insert(name.to_string()) {
-                self.campaign.show_dialog(
-                    "Впереди — портал. Возьми аптечку и патроны.",
-                    4.0,
-                );
-            }
-            return;
-        }
-        if name == "dialog_act4" {
-            if self.campaign.dialog_shown.insert(name.to_string()) {
-                self.campaign.show_dialog(
-                    "Это подземелье Владыки. Готовься к бою.",
-                    4.0,
-                );
+                let line = match name {
+                    "dialog_intro" => "Ты пробудился в руинах. Пробейся через стражу!",
+                    "dialog_act2"  => "Двор полон врагов. Найди ключ в сокровищнице.",
+                    "dialog_act3"  => "Впереди — портал. Возьми аптечку и патроны.",
+                    "dialog_act4"  => "Это подземелье Владыки. Готовься к бою.",
+                    _ => "…",
+                };
+                self.campaign.show_dialog(line, 4.0);
             }
             return;
         }
 
-        if name == "exit_zone" {
-            if self.campaign.stage != Stage::Victory {
-                self.trigger_victory();
-            }
+        if name == "exit_zone" && self.campaign.stage != Stage::Victory {
+            self.trigger_victory();
             return;
         }
-
-        log::debug!("Campaign trigger fired: {}", name);
     }
 
     fn hide_objective(&self, world: &mut World, name: &str) {
@@ -1256,7 +1202,6 @@ impl FortressDemo {
             .query::<Name>()
             .filter_map(|(e, n)| if n.0 == name { Some(e) } else { None })
             .collect();
-
         for e in targets {
             world.insert(e, Visible(false));
         }
@@ -1265,18 +1210,10 @@ impl FortressDemo {
     fn trigger_victory(&mut self) {
         self.campaign.stage = Stage::Victory;
         self.campaign.victory_time = Some(self.campaign.playtime);
-        self.campaign.objective = "Победа!".to_string();
+        self.campaign.objective = "Победа!".into();
         self.hud.push("🏆 VICTORY!");
-        log::info!(
-            "Victory at t={:.1}s, kills={}",
-            self.campaign.playtime,
-            self.campaign.kills_total
-        );
     }
 
-    /// Проверка переходов между актами. Обновляет `self.gate_*` и
-    /// `self.boss_entity` по имени, если они устарели (после Save/Load
-    /// / Undo/Redo World заменяется целиком, id становятся stale).
     fn check_stage_transitions(&mut self, world: &mut World) {
         match self.campaign.stage {
             Stage::Act1 => {
@@ -1288,12 +1225,8 @@ impl FortressDemo {
                     self.campaign.stage = Stage::Act2;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
-                    self.campaign.objective =
-                        "Найди красный ключ в сокровищнице".to_string();
-                    self.campaign.show_dialog(
-                        "Ворота открыты. Впереди — двор.", 4.0,
-                    );
-                    log::info!("Stage: Act1 → Act2");
+                    self.campaign.objective = "Найди красный ключ в сокровищнице".into();
+                    self.campaign.show_dialog("Ворота открыты. Впереди — двор.", 4.0);
                 }
             }
             Stage::Act2 => {
@@ -1302,50 +1235,35 @@ impl FortressDemo {
                     self.campaign.stage = Stage::Act3;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
-                    self.campaign.objective = "Войди в портал лобби".to_string();
+                    self.campaign.objective = "Войди в портал лобби".into();
                     self.campaign.show_dialog("Ключ открыл путь в лобби.", 4.0);
-                    log::info!("Stage: Act2 → Act3");
                 }
             }
             Stage::Act3 => {
-                let p = self.camera.position();
-                if p.y < -5.0 {
+                if self.camera.position().y < -5.0 {
                     self.campaign.stage = Stage::Act4;
-                    self.campaign.kills_in_stage = 0;
-                    self.campaign.kills_required = 0;
-                    self.campaign.objective =
-                        "Убей Владыку Цитадели".to_string();
+                    self.campaign.objective = "Убей Владыку Цитадели".into();
                     self.hide_objective(world, "objective_portal");
-                    log::info!("Stage: Act3 → Act4");
                 }
             }
             Stage::Act4 => {
-                // Босс мёртв, если:
-                //   * stored entity был и его больше нет в World, ИЛИ
-                //   * stored entity устарел (его вообще нет), и нет
-                //     никого с именем "Boss_Dungeon".
-                let stored_alive = self.boss_entity
+                let stored = self.boss_entity
                     .map(|b| world.entities().contains(&b))
                     .unwrap_or(false);
                 let name_alive = Self::find_by_name(world, "Boss_Dungeon").is_some();
-                let boss_dead = !stored_alive && !name_alive;
+                let boss_dead = !stored && !name_alive;
 
                 if boss_dead {
                     self.open_gate_by_name(world, self.gate_4, "gate_north_4");
                     self.campaign.stage = Stage::Act5;
-                    self.campaign.objective = "Покинь цитадель".to_string();
-                    self.campaign.show_dialog(
-                        "Владыка пал. Свобода ждёт!", 5.0,
-                    );
-                    log::info!("Stage: Act4 → Act5");
+                    self.campaign.objective = "Покинь цитадель".into();
+                    self.campaign.show_dialog("Владыка пал. Свобода ждёт!", 5.0);
                 }
             }
             Stage::Act5 | Stage::Victory => {}
         }
 
-        // === Обновляем сохранённые ссылки, если World заменили ===
-        // (Save/Load/Undo/Redo). Это ключевой фикс для «дверь после
-        // Act2 не открывается».
+        // Обновляем ссылки при подмене World.
         if self.gate_1.map_or(true, |e| !world.entities().contains(&e)) {
             self.gate_1 = Self::find_by_name(world, "gate_east_1");
         }
@@ -1363,40 +1281,62 @@ impl FortressDemo {
         }
     }
 
-    /// Обработчик анимационных событий (bugfix #5).
     fn on_animation_event(&mut self, world: &World, ev: AnimationEventTriggered) {
-        let pos = crate::game::world_position(world, ev.entity)
-            .unwrap_or(glam::Vec3::ZERO);
+        let pos = crate::game::world_position(world, ev.entity).unwrap_or(Vec3::ZERO);
         match ev.name.as_str() {
             "footstep" => {
-                log::debug!(
-                    "[ANIM] footstep on #{}, clip '{}', at ({:.1},{:.1},{:.1})",
-                    ev.entity, ev.clip, pos.x, pos.y, pos.z,
-                );
+                log::debug!("[ANIM] footstep #{} at ({:.1},{:.1},{:.1})",
+                    ev.entity, pos.x, pos.y, pos.z);
             }
             "hit" => {
-                log::debug!(
-                    "[ANIM] hit on #{}, clip '{}', at ({:.1},{:.1},{:.1})",
-                    ev.entity, ev.clip, pos.x, pos.y, pos.z,
-                );
                 self.hud.push("⚔ Hit!");
-            }
-            "spawn_vfx" => {
-                log::debug!(
-                    "[ANIM] spawn_vfx on #{}, payload={:?}, at ({:.1},{:.1},{:.1})",
-                    ev.entity, ev.payload, pos.x, pos.y, pos.z,
-                );
             }
             "open_door" => {
                 self.hud.push("🚪 Door opens");
             }
             _ => {
-                log::debug!(
-                    "[ANIM] event '{}' on #{} (clip '{}')",
-                    ev.name, ev.entity, ev.clip,
-                );
+                log::debug!("[ANIM] event '{}' on #{} (clip '{}')",
+                    ev.name, ev.entity, ev.clip);
             }
         }
+    }
+}
+
+// ============================================================
+// Default PostFx (тёплый «RAGE-стиль»)
+// ============================================================
+
+fn default_postfx() -> PostFx {
+    PostFx {
+        bloom_threshold: 0.9,
+        bloom_strength: 0.55,
+        bloom_knee: 0.5,
+        bloom_radius: 1.1,
+        exposure: 0.6,
+        ssao_strength: 0.9,
+        ssao_radius: 0.65,
+        ibl_strength: 0.2,
+        debug_view: DebugView::Final,
+        fxaa_strength: 1.0,
+        fog_color: [0.35, 0.40, 0.55],
+        fog_density: 0.008,
+        fog_height_base: 0.0,
+        fog_height_falloff: 0.06,
+        vignette_strength: 0.15,
+        film_grain: 0.03,
+        chromatic_aberration: 0.0,
+        shadow_bias: 0.0015,
+        shadow_normal_bias: 3.0,
+        shadow_fade_start: 150.0,
+        shadow_fade_end: 200.0,
+        lod_bias: 1.0,
+        lod_distances: [30.0, 80.0, 200.0, 500.0],
+        taa_strength: 1.0,
+        taa_sharpening: 0.1,
+        volumetric_density: 0.006,
+        volumetric_scattering: 0.45,
+        volumetric_phase_g: 0.6,
+        ..Default::default()
     }
 }
 
@@ -1413,9 +1353,7 @@ impl Game for FortressDemo {
     ) {
         log::info!("FortressDemo: AssetDatabase {} assets", assets.len());
 
-        // ============================================================
-        // Примитивы
-        // ============================================================
+        // Примитивы.
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
@@ -1425,9 +1363,7 @@ impl Game for FortressDemo {
         renderer.add_mesh("cone", Mesh::cone(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("capsule", Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
-        // ============================================================
-        // Детализированные пропсы
-        // ============================================================
+        // Пропсы.
         use crate::render::props;
         renderer.add_mesh("crate_detail",    props::crate_detail(&renderer.device));
         renderer.add_mesh("barrel_detail",   props::barrel_detail(&renderer.device));
@@ -1453,9 +1389,7 @@ impl Game for FortressDemo {
         renderer.add_mesh("weapon_rack",     props::weapon_rack(&renderer.device));
         renderer.add_mesh("skull",           props::skull(&renderer.device));
 
-        // ============================================================
-        // Процедурные текстуры
-        // ============================================================
+        // Процедурные текстуры.
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
             for x in 0..64 {
@@ -1484,54 +1418,59 @@ impl Game for FortressDemo {
         }
         renderer.load_texture_rgba("arena_blood", &blood, 64, 64).expect("blood");
 
+        // Weapons.
+        let registry = WeaponRegistry::load_from_dir("assets/weapons")
+            .ok()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                log::warn!("assets/weapons/ empty — using builtin set");
+                WeaponRegistry::default_set()
+            });
+        let runtimes: Vec<WeaponRuntime> = registry.iter().map(WeaponRuntime::new).collect();
+        self.current_weapon = 0;
+        self.weapon_runtimes = runtimes;
+        log::info!("weapons: {} loaded", registry.len());
+        self.weapons = registry;
+
+        // Items.
+        self.item_registry = ItemRegistry::load_from_dir("assets/items")
+            .ok()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                log::warn!("assets/items/ empty — using builtin set");
+                ItemRegistry::default_set()
+            });
+        log::info!("items: {} loaded", self.item_registry.len());
+
+        // Loot.
+        self.loot_registry = LootRegistry::load_from_dir("assets/loot")
+            .ok()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                log::warn!("assets/loot/ empty — using builtin set");
+                LootRegistry::default_set()
+            });
+        log::info!("loot: {} tables loaded", self.loot_registry.len());
+
         add_materials(renderer);
 
-        // ============================================================
-        // Terrain
-        // ============================================================
-        let heightmap = crate::render::terrain::Heightmap::new_procedural(
-            256,
-            2000.0,
-            /* seed */ 42,
-        );
-
-        let terrain_mesh = crate::render::terrain::generate_terrain_mesh(
-            &renderer.device,
-            &heightmap,
-        );
+        // Terrain.
+        let heightmap = crate::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
+        let terrain_mesh = crate::render::terrain::generate_terrain_mesh(&renderer.device, &heightmap);
         renderer.add_mesh("terrain", terrain_mesh);
-
-        let tex_data = crate::render::terrain::generate_terrain_texture(
-            &heightmap,
-            2048,
-        );
-        renderer
-            .load_texture_rgba("terrain_tex", &tex_data, 2048, 2048)
-            .expect("terrain texture");
-
-        renderer.add_material(
-            "terrain_mat",
+        let tex_data = crate::render::terrain::generate_terrain_texture(&heightmap, 2048);
+        renderer.load_texture_rgba("terrain_tex", &tex_data, 2048, 2048).expect("terrain texture");
+        renderer.add_material("terrain_mat",
             Material::new([1.0, 1.0, 1.0, 1.0])
                 .with_metallic_roughness(0.0, 0.92)
-                .with_texture("terrain_tex"),
-        );
-
+                .with_texture("terrain_tex"));
         renderer.terrain = Some(heightmap);
 
-        log::info!(
-            "Terrain: 256×256 heightmap (2000×2000 m), baked texture 2048×2048, ~131k tris",
-        );
-
-        // ============================================================
-        // Анимированный glTF (опционально)
-        // ============================================================
-        if let Ok(loaded) = crate::render::load_gltf_into(
-            renderer, "assets/animated.glb", "anim"
-        ) {
+        // Опционально — анимированная модель.
+        if let Ok(loaded) = crate::render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             self.skeletons = loaded.skeletons;
             self.animations = loaded.animations;
         }
-
         if let Ok(ev) = AnimationEvents::from_file("assets/animated.anim_events.ron") {
             self.animation_events = ev;
         }
@@ -1557,67 +1496,70 @@ impl Game for FortressDemo {
         renderer: &mut Renderer,
         dt: f32,
     ) -> bool {
-        // === Режим: Play или редактор ===
-        // `in_play == true` — всё игровое (стрельба, перезарядка,
-        // триггеры, кампания, playtime) разрешено.
-        // `in_play == false` — редактор: игровая логика не трогается,
-        // но spinner'ы, анимации, лифты продолжают жить.
         let in_play = input.play_mode;
         self.last_play_mode = in_play;
 
+        // RPG: max_hp зависит от Vitality + экипировки.
+        let total_attrs = self.total_attributes();
+        let max_hp = 100.0 + total_attrs.vitality as f32 * 10.0;
+        self.demo_health_max = max_hp;
+        if self.demo_health > self.demo_health_max {
+            self.demo_health = self.demo_health_max;
+        }
+
+        // Панели (только в Play).
+        if in_play && !self.demo_paused {
+            if input.key_pressed(KeyCode::Tab) {
+                self.show_character_sheet = !self.show_character_sheet;
+                if self.show_character_sheet { self.show_inventory = false; }
+            }
+            if input.key_pressed(KeyCode::KeyI) {
+                self.show_inventory = !self.show_inventory;
+                if self.show_inventory { self.show_character_sheet = false; }
+            }
+        }
+        if !in_play {
+            self.show_character_sheet = false;
+            self.show_inventory = false;
+        }
+
         self.last_dt = dt;
         if self.weapon_recoil > 0.0 {
-            let tau = 0.12_f32;
-            let alpha = 1.0 - (-dt / tau).exp();
-            self.weapon_recoil = (self.weapon_recoil - self.weapon_recoil * alpha).max(0.0);
-            if self.weapon_recoil < 1e-4 {
-                self.weapon_recoil = 0.0;
-            }
+            let alpha = 1.0 - (-dt / 0.12_f32).exp();
+            self.weapon_recoil = (self.weapon_recoil * (1.0 - alpha)).max(0.0);
         }
         self.auto_fire_accumulator = (self.auto_fire_accumulator - dt * 2.0).max(0.0);
 
-        // === Build (один раз) ===
+        // Build once.
         if !self.built {
             self.built = true;
             self.build(world);
-
             self.camera.target = ACT1_CENTER;
             self.camera.distance = 24.0;
             self.camera.yaw = -0.6;
             self.camera.pitch = 0.75;
         }
 
-        // === Play mode enter ===
+        // Play-mode enter.
         if input.play_mode && !self.was_in_play_mode {
             let p = self.camera.first_person_pos;
             let looks_default = p.x.abs() < 1.0 && (p.z - 45.0).abs() < 1.0;
             if looks_default {
-                self.camera.first_person_pos =
-                    ACT1_CENTER + Vec3::new(0.0, 1.7, 0.0);
-                log::info!("Play: default spawn detected, moved to Act 1");
+                self.camera.first_person_pos = ACT1_CENTER + Vec3::new(0.0, 1.7, 0.0);
             }
             self.camera.yaw = std::f32::consts::PI;
             self.camera.pitch = 0.0;
-            log::info!(
-                "Play entered at ({:.1}, {:.1}, {:.1})",
-                self.camera.first_person_pos.x,
-                self.camera.first_person_pos.y,
-                self.camera.first_person_pos.z,
-            );
-            log::info!(
-                "Campaign state: stage={:?}, kills={}/{}, key={}, \
-                 gates: g1={:?} g2={:?} g4={:?} boss_gate={:?}, boss={:?}",
-                self.campaign.stage,
-                self.campaign.kills_in_stage,
-                self.campaign.kills_required,
-                self.campaign.has_key_red,
-                self.gate_1, self.gate_2, self.gate_4, self.gate_boss,
-                self.boss_entity,
-            );
+            self.base_fov = self.camera.fov_y;
+            self.ads_blend = 0.0;
+            self.ads_active = false;
+            self.auto_fire_accumulator = 0.0;
+            self.weapon_raise_timer = 0.30;
+            log::info!("Play entered at ({:.1}, {:.1}, {:.1})",
+                p.x, p.y, p.z);
         }
         self.was_in_play_mode = input.play_mode;
 
-        // === Autosave / Manual save ===
+        // Autosave / manual save.
         if self.pending_autosave {
             self.pending_autosave = false;
             self.save_slot(0, world, renderer);
@@ -1626,7 +1568,7 @@ impl Game for FortressDemo {
             self.save_slot(slot, world, renderer);
         }
 
-        // === Misc input ===
+        // Misc input.
         if input.pressed("reload_shaders") {
             if let Err(e) = renderer.reload_shaders() {
                 log::error!("Shader reload: {}", e);
@@ -1642,134 +1584,142 @@ impl Game for FortressDemo {
             self.demo_show_debug = !self.demo_show_debug;
         }
 
-        self.demo_fire_cooldown = (self.demo_fire_cooldown - dt).max(0.0);
-
-        // ============================================================
-        // Ammo & reload — ТОЛЬКО в Play
-        // ============================================================
-
-        // (1) AUTO-START.
-        if in_play
-            && !self.demo_reloading
-            && self.demo_ammo == 0
-            && self.demo_ammo_reserve > 0
-            && !self.demo_paused
-            && self.campaign.stage != Stage::Victory
+        // Weapon tick + switch 1/2/3/4.
+        self.weapon_raise_timer = (self.weapon_raise_timer - dt).max(0.0);
         {
-            self.demo_reloading = true;
-            self.demo_reload_timer = self.demo_reload_duration;
-            self.hud.push("Reloading…");
-            log::info!(
-                "[RELOAD] auto-start: mag 0/{}, reserve {}",
-                self.demo_ammo_max, self.demo_ammo_reserve
-            );
+            let n = self.weapons.len().min(self.weapon_runtimes.len());
+            for i in 0..n {
+                let w = self.weapons.get(i).cloned();
+                if let (Some(w), Some(rt)) = (w, self.weapon_runtimes.get_mut(i)) {
+                    rt.tick(dt, &w);
+                }
+            }
+        }
+        if in_play && !self.demo_paused {
+            if input.key_pressed(KeyCode::Digit1) { self.switch_weapon(0); }
+            if input.key_pressed(KeyCode::Digit2) { self.switch_weapon(1); }
+            if input.key_pressed(KeyCode::Digit3) { self.switch_weapon(2); }
+            if input.key_pressed(KeyCode::Digit4) { self.switch_weapon(3); }
         }
 
-        // (2) TICK.
-        if self.demo_reloading && in_play {
-            self.demo_reload_timer -= dt;
-            if self.demo_reload_timer <= 0.0 {
-                self.demo_reloading = false;
-                self.demo_reload_timer = 0.0;
+        // ADS.
+        let rmb = input.mouse_down(MouseButton::Right);
+        let want_ads = in_play && !self.demo_paused && rmb
+            && self.weapon_raise_timer <= 0.0
+            && !self.demo_reloading;
+        if want_ads != self.ads_active {
+            self.ads_active = want_ads;
+        }
+        let ads_speed = if self.ads_active { 6.0 } else { 8.0 };
+        let target = if self.ads_active { 1.0 } else { 0.0 };
+        self.ads_blend += (target - self.ads_blend) * (dt * ads_speed).min(1.0);
+        self.ads_blend = self.ads_blend.clamp(0.0, 1.0);
+        if let Some(w) = self.current_weapon() {
+            let fov_mult = 1.0 + (w.ads_fov_mult - 1.0) * self.ads_blend;
+            self.camera.fov_y = self.base_fov * fov_mult;
+        }
 
-                let need = self.demo_ammo_max.saturating_sub(self.demo_ammo);
-                let take = need.min(self.demo_ammo_reserve);
-                self.demo_ammo += take;
-                self.demo_ammo_reserve -= take;
+        // Синхронизация HUD-полей.
+        let (rt_reloading, rt_reload_timer, rt_fire_cd) = self
+            .current_runtime()
+            .map(|rt| (rt.reloading, rt.reload_timer, rt.fire_cooldown))
+            .unwrap_or((false, 0.0, 0.0));
+        self.demo_reloading = rt_reloading;
+        self.demo_reload_timer = rt_reload_timer;
+        self.demo_fire_cooldown = rt_fire_cd;
 
-                if take > 0 {
-                    self.hud.push(format!(
-                        "Reloaded {}/{}",
-                        self.demo_ammo, self.demo_ammo_max
-                    ));
-                    log::info!(
-                        "[RELOAD] done: mag {}/{}, reserve {}",
-                        self.demo_ammo, self.demo_ammo_max, self.demo_ammo_reserve
-                    );
-                } else {
-                    self.hud.push("Out of ammo");
-                    log::info!("[RELOAD] done: no reserve left");
+        // Reload (auto + R).
+        if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
+            let w_opt = self.current_weapon().cloned();
+            let rt_opt = self.current_runtime().cloned();
+            if let (Some(w), Some(rt)) = (w_opt, rt_opt) {
+                if !rt.reloading && rt.mag == 0 && rt.reserve > 0 {
+                    if let Some(rtm) = self.current_runtime_mut() {
+                        rtm.start_reload(&w);
+                        self.hud.push(format!("Reloading {}…", w.name));
+                    }
+                }
+                if input.key_pressed(KeyCode::KeyR) && !rt.reloading {
+                    if rt.mag >= w.mag_size {
+                        self.hud.push("Magazine full");
+                    } else if rt.reserve == 0 {
+                        self.hud.push("No reserve ammo");
+                    } else if let Some(rtm) = self.current_runtime_mut() {
+                        rtm.start_reload(&w);
+                        self.hud.push(format!("Reloading {}…", w.name));
+                    }
                 }
             }
         }
 
-        // (3) MANUAL R.
-        if in_play
-            && !self.demo_paused
-            && input.key_pressed(KeyCode::KeyR)
-            && !self.demo_reloading
-            && self.campaign.stage != Stage::Victory
-        {
-            if self.demo_ammo >= self.demo_ammo_max {
-                self.hud.push("Magazine full");
-                log::info!(
-                    "[RELOAD] skipped: mag already full ({}/{})",
-                    self.demo_ammo, self.demo_ammo_max
-                );
-            } else if self.demo_ammo_reserve == 0 {
-                self.hud.push("No reserve ammo");
-                log::info!("[RELOAD] skipped: no reserve ammo");
-            } else {
-                self.demo_reloading = true;
-                self.demo_reload_timer = self.demo_reload_duration;
-                self.hud.push("Reloading…");
-                log::info!(
-                    "[RELOAD] manual R: mag {}/{}, reserve {}",
-                    self.demo_ammo, self.demo_ammo_max, self.demo_ammo_reserve
-                );
+        // Стрельба.
+        let lmb_down = input.mouse_down(MouseButton::Left);
+        let lmb_pressed = input.mouse_pressed(MouseButton::Left);
+        let w_opt = self.current_weapon().cloned();
+        if let Some(w) = w_opt {
+            let trigger = if w.auto { lmb_down } else { lmb_pressed };
+            let can_shoot = in_play
+                && !self.demo_paused
+                && self.campaign.stage != Stage::Victory
+                && self.weapon_raise_timer <= 0.0
+                && !self.show_character_sheet
+                && !self.show_inventory;
+
+            if can_shoot && trigger {
+                let rt_opt = self.current_runtime().cloned();
+                if let Some(rt) = rt_opt {
+                    if rt.can_fire() {
+                        if let Some(rtm) = self.current_runtime_mut() {
+                            rtm.mag = rtm.mag.saturating_sub(1);
+                            rtm.fire_cooldown = w.cooldown();
+                        }
+
+                        let spread_deg = if self.ads_active {
+                            w.spread_ads
+                        } else {
+                            w.spread_hip
+                        };
+                        let origin = self.camera.position();
+                        let base_dir = self.camera.forward();
+
+                        let total = self.total_attributes();
+                        let dmg_mult = total.ranged_damage_mult();
+                        let crit_chance = total.crit_chance();
+                        let crit_mult = total.crit_mult();
+
+                        for _ in 0..w.pellets.max(1) {
+                            let dir = apply_spread(base_dir, spread_deg);
+                            let is_crit = rand01_crit() < crit_chance;
+                            let mut damage = w.damage * dmg_mult;
+                            if is_crit { damage *= crit_mult; }
+                            world.send(ShotFired { origin, direction: dir, damage, is_crit });
+                        }
+
+                        let ads_mult = if self.ads_active { 0.5 } else { 1.0 };
+                        let kick_up = w.recoil_up * ads_mult
+                            + self.auto_fire_accumulator * 0.002;
+                        self.camera.add_recoil(kick_up);
+                        if w.recoil_side > 1e-6 {
+                            let sign = if rand01_side() > 0.5 { 1.0 } else { -1.0 };
+                            self.camera.yaw += sign * w.recoil_side * ads_mult;
+                        }
+
+                        self.auto_fire_accumulator =
+                            (self.auto_fire_accumulator + 0.6).min(1.5);
+                        self.weapon_recoil = (self.weapon_recoil + 0.35).min(1.0);
+                    }
+                }
             }
         }
 
-        // ============================================================
-        // Стрельба — ТОЛЬКО в Play
-        // ============================================================
-        let lmb = input.mouse_down(MouseButton::Left);
-        if in_play
-            && !self.demo_paused
-            && lmb
-            && !self.demo_reloading
-            && self.demo_fire_cooldown <= 0.0
-            && self.demo_ammo > 0
-            && self.campaign.stage != Stage::Victory
-        {
-            self.demo_ammo -= 1;
-            self.demo_fire_cooldown = 0.15;
-            log::debug!(
-                "[FIRE] mag {}/{}, reserve {}",
-                self.demo_ammo, self.demo_ammo_max, self.demo_ammo_reserve
-            );
-
-            let origin = self.camera.position();
-            let dir = self.camera.forward();
-            world.send(crate::engine::ShotFired {
-                origin,
-                direction: dir,
-            });
-
-            // === Weapon feedback (без тряски экрана) ===
-            //
-            // Раньше здесь были `camera.add_shake(0.015, 0.06)` и
-            // боковой `yaw += kick_side` — они превращали стрельбу
-            // в «дрожь». Оставлен только вертикальный recoil
-            // (ствол уводит вверх) — кинематографично и не трясёт.
-            //
-            // `pending_hit_stop` при выстреле тоже убран: микро-фриз
-            // времени ощущался как рывок. Остаётся только на kill
-            // (см. `on_kill`).
-            self.auto_fire_accumulator =
-                (self.auto_fire_accumulator + 0.6).min(1.5);
-            self.weapon_recoil = (self.weapon_recoil + 0.35).min(1.0);
-
-            let kick_up = 0.008 + self.auto_fire_accumulator * 0.006;
-            self.camera.add_recoil(kick_up);
-        }
-
-        // === Camera (editor) ===
+        // Camera (editor).
         if !input.play_mode && !input.editor_flying && !self.demo_paused {
-            let lmb = input.mouse_down(winit::event::MouseButton::Left) && !input.editor_captured;
+            let lmb = input.mouse_down(MouseButton::Left) && !input.editor_captured;
             if lmb {
                 let (dx, dy) = input.mouse_delta;
-                if self.dragging { self.camera.orbit(dx * 0.005, dy * 0.005); }
+                if self.dragging {
+                    self.camera.orbit(dx * 0.005, dy * 0.005);
+                }
                 self.dragging = true;
             } else {
                 self.dragging = false;
@@ -1783,16 +1733,18 @@ impl Game for FortressDemo {
             if input.key_down(KeyCode::KeyS) { pan.1 += speed; }
             if input.key_down(KeyCode::KeyA) { pan.0 -= speed; }
             if input.key_down(KeyCode::KeyD) { pan.0 += speed; }
-            if pan != (0.0, 0.0) { self.camera.pan(pan.0, pan.1); }
+            if pan != (0.0, 0.0) {
+                self.camera.pan(pan.0, pan.1);
+            }
         }
 
-        // === Campaign: playtime — только в Play ===
+        // Playtime.
         if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
             self.campaign.playtime += dt;
         }
         self.campaign.tick_dialog(dt);
 
-        // === AI target ===
+        // AI target.
         if input.play_mode {
             if let Some(t) = self.ai_target_entity {
                 let p = self.camera.position();
@@ -1801,13 +1753,11 @@ impl Game for FortressDemo {
                 }
                 world.insert(t, Visible(false));
             }
-        } else {
-            if let Some(t) = self.ai_target_entity {
-                world.insert(t, Visible(true));
-            }
+        } else if let Some(t) = self.ai_target_entity {
+            world.insert(t, Visible(true));
         }
 
-        // === Damage accumulator ===
+        // Damage accumulator (игрок получает урон через Health на AI-target).
         if let Some(t) = self.ai_target_entity {
             if let Some(h) = world.get_mut::<Health>(t) {
                 let damage = (self.last_target_hp - h.current).max(0.0);
@@ -1820,15 +1770,14 @@ impl Game for FortressDemo {
             }
         }
 
-        // === Triggers и стадии — только в Play ===
+        // Triggers + stages.
         if in_play {
             self.process_triggers(world);
             self.check_stage_transitions(world);
         }
 
-        // === Bell ===
-        let finished: Vec<Entity> = world
-            .read_events::<TimerFinished>()
+        // Bell (audible ding).
+        let finished: Vec<Entity> = world.read_events::<TimerFinished>()
             .map(|ev| ev.entity)
             .collect();
         for e in finished {
@@ -1842,15 +1791,13 @@ impl Game for FortressDemo {
             }
         }
 
-        // === Systems ===
+        // Systems.
         for sys in self.systems.iter_mut() {
             sys.update(world, dt);
         }
 
-        // bugfix #2: останавливаем ворота после MovementSystem.
         self.tick_gates(world);
 
-        // bugfix #5: события анимаций больше не отбрасываются.
         let anim_events = self.animation_runtime.advance_all(
             world, renderer,
             &self.animations, &self.skeletons, &self.animation_events,
@@ -1863,7 +1810,9 @@ impl Game for FortressDemo {
         true
     }
 
-    fn apply_postfx(&mut self, postfx: PostFx) { self.postfx = postfx; }
+    fn apply_postfx(&mut self, postfx: PostFx) {
+        self.postfx = postfx;
+    }
 
     fn take_hit_stop(&mut self) -> Option<(f32, f32)> {
         self.pending_hit_stop.take()
@@ -1872,6 +1821,7 @@ impl Game for FortressDemo {
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
         Some(Box::new(()))
     }
+
     fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
 
     fn on_pause_changed(&mut self, paused: bool) {
@@ -1891,8 +1841,11 @@ impl Game for FortressDemo {
             camera_yaw: f32,
             camera_pitch: f32,
             hp: f32,
-            ammo: u32,
-            ammo_reserve: u32,
+            current_weapon: usize,
+            weapon_runtimes: &'a [WeaponRuntime],
+            player_stats: &'a PlayerStats,
+            inventory: &'a Inventory,
+            equipment: &'a Equipment,
         }
 
         let snap = StateSnapshot {
@@ -1903,16 +1856,13 @@ impl Game for FortressDemo {
             camera_yaw: self.camera.yaw,
             camera_pitch: self.camera.pitch,
             hp: self.demo_health,
-            ammo: self.demo_ammo,
-            ammo_reserve: self.demo_ammo_reserve,
+            current_weapon: self.current_weapon,
+            weapon_runtimes: &self.weapon_runtimes,
+            player_stats: &self.player_stats,
+            inventory: &self.inventory,
+            equipment: &self.equipment,
         };
-        match ron::ser::to_string(&snap) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("save_game_state failed: {}", e);
-                None
-            }
-        }
+        ron::ser::to_string(&snap).ok()
     }
 
     fn load_game_state(&mut self, ron: &str) {
@@ -1925,9 +1875,11 @@ impl Game for FortressDemo {
             camera_yaw: f32,
             camera_pitch: f32,
             hp: f32,
-            ammo: u32,
-            #[serde(default)]
-            ammo_reserve: u32,
+            #[serde(default)] current_weapon: usize,
+            #[serde(default)] weapon_runtimes: Vec<WeaponRuntime>,
+            #[serde(default)] player_stats: PlayerStats,
+            #[serde(default)] inventory: Option<Inventory>,
+            #[serde(default)] equipment: Equipment,
         }
 
         match ron::from_str::<StateSnapshot>(ron) {
@@ -1942,17 +1894,31 @@ impl Game for FortressDemo {
                 self.camera.yaw = snap.camera_yaw;
                 self.camera.pitch = snap.camera_pitch;
                 self.demo_health = snap.hp;
-                self.demo_ammo = snap.ammo;
-                self.demo_ammo_reserve = snap.ammo_reserve;
-                self.demo_reloading = false;
-                self.demo_reload_timer = 0.0;
-                self.hud.push("📂 Game loaded");
-                log::info!(
-                    "Game state loaded: stage {:?}, kills {}, key {}",
-                    self.campaign.stage,
-                    self.campaign.kills_total,
-                    self.campaign.has_key_red,
+
+                if !snap.weapon_runtimes.is_empty()
+                    && snap.weapon_runtimes.len() == self.weapons.len()
+                {
+                    self.weapon_runtimes = snap.weapon_runtimes;
+                    for rt in self.weapon_runtimes.iter_mut() {
+                        rt.fire_cooldown = 0.0;
+                        rt.reloading = false;
+                        rt.reload_timer = 0.0;
+                    }
+                }
+                self.current_weapon = snap.current_weapon.min(
+                    self.weapons.len().saturating_sub(1),
                 );
+                self.weapon_raise_timer = 0.30;
+
+                self.player_stats = snap.player_stats;
+                if let Some(inv) = snap.inventory {
+                    self.inventory = inv;
+                }
+                self.equipment = snap.equipment;
+                self.demo_health_max = self.total_attributes().vitality as f32 * 10.0 + 100.0;
+                self.demo_health = self.demo_health.min(self.demo_health_max);
+
+                self.hud.push("📂 Game loaded");
             }
             Err(e) => {
                 log::error!("load_game_state parse failed: {}", e);
@@ -1969,21 +1935,76 @@ impl Game for FortressDemo {
         std::mem::take(&mut self.pending_quit_to_menu)
     }
 
-    fn on_kill(&mut self, _world: &mut World, _target: Entity) {
+    fn on_kill(&mut self, world: &mut World, target: Entity) {
         self.campaign.kills_total += 1;
         self.campaign.kills_in_stage += 1;
         self.hud.push(format!(
             "Kill #{} (stage: {}/{})",
             self.campaign.kills_total,
             self.campaign.kills_in_stage,
-            self.campaign.kills_required
+            self.campaign.kills_required,
         ));
 
-        // Лёгкий hit-stop без camera shake.
         let strength = (0.04 + self.auto_fire_accumulator * 0.02).min(0.08);
         self.pending_hit_stop = Some((strength, 0.12));
-
         self.auto_fire_accumulator = 0.0;
+
+        // RPG: XP.
+        let xp_gain = 25u32;
+        let levels = self.player_stats.gain_xp(xp_gain);
+        if levels > 0 {
+            let new_level = self.player_stats.experience.level;
+            let hp_before = self.demo_health;
+            self.demo_health_max = self.total_attributes().vitality as f32 * 10.0 + 100.0;
+            self.demo_health = self.demo_health_max;
+            self.hud.push(format!(
+                "⭐ LEVEL UP! → Lv {} · +{} HP · +{} stat points",
+                new_level,
+                (self.demo_health - hp_before).max(0.0) as i32,
+                levels * 2,
+            ));
+        }
+
+        // Loot: roll + spawn pickups.
+        let pos = world.get::<Transform>(target).map(|t| t.position).unwrap_or(Vec3::ZERO);
+        let target_name = world.get::<Name>(target).map(|n| n.0.clone()).unwrap_or_default();
+        let table_id = if target_name.contains("Boss") {
+            "enemy_boss"
+        } else if target_name.contains("Elite") || target_name.contains("Guard") {
+            "enemy_elite"
+        } else {
+            "enemy_patrol"
+        };
+
+        if let Some(table) = self.loot_registry.get(table_id).cloned() {
+            let drops = roll_loot(&table);
+            for (i, stack) in drops.iter().enumerate() {
+                let item = self.item_registry.get_by_id(&stack.item_id).cloned();
+                let (mesh, mat, tint) = match item.as_ref().map(|i| i.kind) {
+                    Some(ItemKind::Consumable) => ("cube", "emissive_cold", [0.5, 1.0, 0.5, 1.0]),
+                    Some(ItemKind::Armor) => ("cube", "arena_crate", [0.8, 0.5, 0.2, 1.0]),
+                    Some(ItemKind::Trinket) => ("sphere", "gold", [1.0, 0.9, 0.3, 1.0]),
+                    _ => ("cylinder", "gold", [1.0, 0.85, 0.3, 1.0]),
+                };
+
+                let e = world.spawn();
+                let offset = Vec3::new(
+                    (i as f32 - drops.len() as f32 * 0.5) * 0.7,
+                    0.5,
+                    ((i as f32 * 1.3) % 1.0 - 0.5) * 0.7,
+                );
+                world.insert(e, Name(format!("Pickup_{}_{}", stack.item_id, i)));
+                world.insert(e, Transform::at(pos + offset).with_scale(0.4));
+                world.insert(e, MeshHandle(mesh.into()));
+                world.insert(e, MaterialHandle(mat.into()));
+                world.insert(e, Tint(tint));
+                world.insert(e, Spinner::new(Vec3::Y, 2.0));
+                world.insert(e, Trigger::repeatable(1.5,
+                    TriggerAction::PlaySound("pickup".into())));
+                world.insert(e, GoldValue(stack.count));
+            }
+            log::info!("Loot: {} stacks dropped at {:?}", drops.len(), pos);
+        }
     }
 
     fn collect_draws(&mut self, world: &mut World, renderer: &Renderer) -> Vec<MeshDraw> {
@@ -1997,8 +2018,8 @@ impl Game for FortressDemo {
         let lod_dists = self.postfx.lod_distances;
 
         let mut new_prev: HashMap<Entity, glam::Mat4> = HashMap::new();
-
         let entities: Vec<_> = world.entities().to_vec();
+
         for e in entities {
             if let Some(v) = world.get::<Visible>(e) {
                 if !v.0 { continue; }
@@ -2016,14 +2037,15 @@ impl Game for FortressDemo {
             new_prev.insert(e, model);
 
             let Some(mesh) = renderer.meshes.get(&m.0) else { continue };
-
             let (world_center, world_radius) = mesh.world_bounds(&model);
 
             if self.show_culling {
                 let mut visible = true;
                 for p in &planes {
-                    let d = p.x * world_center.x + p.y * world_center.y
-                          + p.z * world_center.z + p.w;
+                    let d = p.x * world_center.x
+                          + p.y * world_center.y
+                          + p.z * world_center.z
+                          + p.w;
                     if d < -world_radius { visible = false; break; }
                 }
                 if !visible { continue; }
@@ -2031,25 +2053,25 @@ impl Game for FortressDemo {
 
             let dist = (world_center - cam_pos).length();
             let dist_eff = (dist - world_radius).max(0.0) / lod_bias;
-
             let lod_level = if mesh.lods.is_empty() { 0 }
                 else if dist_eff < lod_dists[0] { 0 }
                 else if dist_eff < lod_dists[1] || mesh.lods.len() < 1 { 1 }
                 else if dist_eff < lod_dists[2] || mesh.lods.len() < 2 { 2.min(mesh.lods.len()) }
                 else { 3.min(mesh.lods.len()) };
 
-            let mesh_name = if lod_level == 0 { m.0.clone() }
-                else { format!("{}__lod{}", m.0, lod_level - 1) };
+            let mesh_name = if lod_level == 0 {
+                m.0.clone()
+            } else {
+                format!("{}__lod{}", m.0, lod_level - 1)
+            };
 
             let material = renderer.materials.get(&mat.0)
                 .unwrap_or_else(|| renderer.materials_default());
             let blend = material.alpha_mode == AlphaMode::Blend;
             let double_sided = material.double_sided;
 
-            let color = world.get::<Tint>(e).map(|t| t.0)
-                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            let tiling_size = world.get::<TextureTiling>(e).map(|t| t.size)
-                .unwrap_or(1.0);
+            let color = world.get::<Tint>(e).map(|t| t.0).unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let tiling_size = world.get::<TextureTiling>(e).map(|t| t.size).unwrap_or(1.0);
 
             let (scale, _, _) = model.to_scale_rotation_translation();
             let scale_abs = scale.abs();
@@ -2095,10 +2117,12 @@ impl Game for FortressDemo {
         let mut batch = LineBatch::new();
 
         if self.show_grid {
-            batch.grid(120.0, 2.0, [0.15, 0.18, 0.22, 0.5], [0.35, 0.40, 0.48, 0.7], 5);
+            batch.grid(120.0, 2.0,
+                [0.15, 0.18, 0.22, 0.5], [0.35, 0.40, 0.48, 0.7], 5);
             batch.axes(4.0);
         }
 
+        // Пути AI (DebugPath).
         for (e, agent) in world.query::<AiAgent>() {
             if !world.has::<DebugPath>(e) { continue; }
             if agent.path.len() < 2 { continue; }
@@ -2111,6 +2135,7 @@ impl Game for FortressDemo {
             }
         }
 
+        // Конусы зрения.
         for (e, agent) in world.query::<AiAgent>() {
             let Some(t) = world.get::<Transform>(e) else { continue };
             let eye = t.position + Vec3::Y * 1.0;
@@ -2131,6 +2156,7 @@ impl Game for FortressDemo {
             batch.line(eye, eye + r * range, color);
         }
 
+        // Bounding-сферы выделенных.
         for &e in selected {
             if let (Some(_), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e)) {
                 if let Some(mesh) = renderer.meshes.get(&mh.0) {
@@ -2172,92 +2198,131 @@ impl Game for FortressDemo {
         _renderer: &Renderer,
         ui: &mut crate::ui::UiLayer,
     ) {
-        // bugfix #6: реальный dt вместо фиксированных 1/60.
         self.hud.tick(self.last_dt);
-
-        // === В редакторе игровой HUD не рисуем ===
-        if !self.last_play_mode {
-            return;
-        }
+        if !self.last_play_mode { return; }
 
         let is_victory = self.campaign.stage == Stage::Victory;
 
-        // === Debug overlay (левый верх) ===
         if self.demo_show_debug {
             self.hud.debug_overlay(ui, 60.0, world.len(), self.camera.position());
         }
 
-        // === Crosshair ===
-        if !is_victory {
-            self.hud.crosshair(ui, self.demo_ammo > 0);
+        // Crosshair (скрыт при ADS).
+        if !is_victory && self.ads_blend < 0.5 {
+            let has_ammo = self.current_runtime().map(|r| r.mag > 0).unwrap_or(false);
+            self.hud.crosshair(ui, has_ammo);
         }
 
-        // === Health (слева снизу) ===
+        // Health bar (слева снизу).
         self.hud.health_bar(ui, self.demo_health, self.demo_health_max);
 
-        // === Ammo (справа снизу). ЕДИНСТВЕННЫЙ блок ammo. ===
-        let ammo_text = format!(
-            "AMMO {}/{} · reserve {}",
-            self.demo_ammo, self.demo_ammo_max, self.demo_ammo_reserve
-        );
-        {
-            let size = 20.0;
+        // XP bar.
+        if !is_victory {
+            let sh = ui.screen_h();
+            let bar_w = 220.0;
+            let bar_h = 12.0;
+            let x = 24.0;
+            let y = sh - 24.0 - 22.0 - 6.0 - bar_h;
+            let frac = self.player_stats.experience.progress();
+
+            ui.rect(x - 6.0, y - 4.0, bar_w + 12.0, bar_h + 8.0, [0.0, 0.0, 0.0, 0.55]);
+            ui.bar(x, y, bar_w, bar_h, frac, [0.5, 0.7, 1.0, 1.0], [0.1, 0.1, 0.15, 0.9]);
+
+            let label = format!(
+                "Lv {} · {}/{} XP",
+                self.player_stats.experience.level,
+                self.player_stats.experience.xp,
+                self.player_stats.experience.xp_to_next,
+            );
+            ui.text_centered(x + bar_w * 0.5, y + bar_h * 0.5, &label, 10.0,
+                [0.9, 0.95, 1.0, 1.0]);
+        }
+
+        // Unspent points.
+        if self.player_stats.unspent_points > 0 && !is_victory && !self.show_character_sheet {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
-            let tw = ui.text_width(&ammo_text, size);
-            let pad = 12.0;
-            let box_w = tw + pad * 2.0;
-            let box_h = size + pad * 1.6;
+            let text = format!(
+                "⭐ {} unspent stat points — press Tab",
+                self.player_stats.unspent_points
+            );
+            let tw = ui.text_width(&text, 14.0);
+            let y = sh - 24.0 - 22.0 - 6.0 - 12.0 - 22.0;
+            ui.rect(sw * 0.5 - tw * 0.5 - 12.0, y - 4.0, tw + 24.0, 22.0,
+                [0.15, 0.1, 0.0, 0.75]);
+            ui.text_centered(sw * 0.5, y + 11.0, &text, 14.0, [1.0, 0.9, 0.5, 1.0]);
+        }
+
+        // Weapon + ammo panel (справа снизу).
+        if let (Some(w), Some(rt)) = (self.current_weapon(), self.current_runtime()) {
+            let weapon_name = w.name.clone();
+            let mag = rt.mag;
+            let reserve = rt.reserve;
+            let mag_size = w.mag_size;
+            let reloading = rt.reloading;
+            let reload_progress = rt.reload_progress(w);
+            let out_of_ammo = mag == 0 && reserve == 0;
+
+            let ammo_text = format!("{}/{} · reserve {}", mag, mag_size, reserve);
+            let size = 22.0;
+            let name_size = 14.0;
+            let sw = ui.screen_w();
+            let sh = ui.screen_h();
+            let pad = 14.0;
+
+            let ammo_w = ui.text_width(&ammo_text, size);
+            let name_w = ui.text_width(&weapon_name, name_size);
+            let box_w = ammo_w.max(name_w) + pad * 2.0;
+            let box_h = size + name_size + 12.0 + pad * 1.2;
             let x = sw - 24.0 - box_w;
             let y = sh - 24.0 - box_h;
 
-            let color = if self.demo_reloading {
-                [1.0, 0.85, 0.4, 1.0]
-            } else if self.demo_ammo == 0 && self.demo_ammo_reserve == 0 {
-                [1.0, 0.3, 0.3, 1.0]
-            } else if self.demo_ammo == 0 {
-                [1.0, 0.5, 0.4, 1.0]
-            } else {
-                [1.0, 1.0, 0.85, 1.0]
-            };
+            let color = if reloading { [1.0, 0.85, 0.4, 1.0] }
+                else if out_of_ammo { [1.0, 0.3, 0.3, 1.0] }
+                else if mag == 0 { [1.0, 0.5, 0.4, 1.0] }
+                else { [1.0, 1.0, 0.85, 1.0] };
 
-            ui.rect(x, y, box_w, box_h, [0.0, 0.0, 0.0, 0.55]);
-            ui.text(x + pad, y + (box_h - size) * 0.5, &ammo_text, size, color);
+            ui.rect(x, y, box_w, box_h, [0.0, 0.0, 0.0, 0.6]);
+            ui.rect_outline(x, y, box_w, box_h, 1.0, [0.5, 0.55, 0.65, 0.7]);
+            ui.text(x + pad, y + 4.0, &weapon_name, name_size, [0.75, 0.85, 1.0, 1.0]);
+            ui.text(x + pad, y + name_size + 6.0, &ammo_text, size, color);
 
-            if self.demo_reloading {
-                let progress = 1.0
-                    - (self.demo_reload_timer / self.demo_reload_duration).clamp(0.0, 1.0);
-                let bar_w = box_w;
+            if reloading {
                 let bar_h = 6.0;
                 let bar_y = y - bar_h - 6.0;
-
-                ui.rect(x, bar_y, bar_w, bar_h, [0.15, 0.15, 0.18, 0.9]);
-                ui.rect(x, bar_y, bar_w * progress, bar_h, [0.6, 0.9, 1.0, 1.0]);
-                ui.text_centered(
-                    x + box_w * 0.5,
-                    bar_y - 10.0,
-                    "RELOADING",
-                    11.0,
-                    [0.8, 0.9, 1.0, 1.0],
-                );
+                ui.rect(x, bar_y, box_w, bar_h, [0.15, 0.15, 0.18, 0.9]);
+                ui.rect(x, bar_y, box_w * reload_progress, bar_h, [0.6, 0.9, 1.0, 1.0]);
+                ui.text_centered(x + box_w * 0.5, bar_y - 10.0, "RELOADING",
+                    11.0, [0.8, 0.9, 1.0, 1.0]);
             }
         }
 
-        // === "OUT OF AMMO" в центре ===
-        if self.demo_ammo == 0 && self.demo_ammo_reserve == 0 && !is_victory {
-            ui.text_centered(
-                ui.screen_w() * 0.5,
-                ui.screen_h() * 0.5 + 60.0,
-                "OUT OF AMMO",
-                28.0,
-                [1.0, 0.3, 0.3, 0.9],
-            );
+        // OUT OF AMMO.
+        if let Some(rt) = self.current_runtime() {
+            if rt.mag == 0 && rt.reserve == 0 && !is_victory {
+                ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() * 0.5 + 60.0,
+                    "OUT OF AMMO", 28.0, [1.0, 0.3, 0.3, 0.9]);
+            }
         }
 
-        // === Notifications ===
+        // ADS vignette.
+        if self.ads_blend > 0.5 && !is_victory {
+            let sw = ui.screen_w();
+            let sh = ui.screen_h();
+            let cx = sw * 0.5;
+            let cy = sh * 0.5;
+            let r = 220.0;
+            let alpha = (self.ads_blend - 0.5) * 2.0 * 0.75;
+            ui.rect(0.0, 0.0, cx - r, sh, [0.0, 0.0, 0.0, alpha]);
+            ui.rect(cx + r, 0.0, cx - r, sh, [0.0, 0.0, 0.0, alpha]);
+            ui.rect(cx - r, 0.0, r * 2.0, cy - r, [0.0, 0.0, 0.0, alpha]);
+            ui.rect(cx - r, cy + r, r * 2.0, cy - r, [0.0, 0.0, 0.0, alpha]);
+        }
+
+        // Notifications.
         self.hud.notifications(ui);
 
-        // === Objective (top center) ===
+        // Objective (top center).
         if !is_victory {
             let sw = ui.screen_w();
             let size = 18.0;
@@ -2272,12 +2337,11 @@ impl Game for FortressDemo {
 
             ui.rect(x, y, box_w, box_h, [0.05, 0.07, 0.12, 0.75]);
             ui.rect_outline(x, y, box_w, box_h, 1.5, [0.5, 0.6, 0.85, 0.9]);
-
             ui.text_centered(sw * 0.5, y + 14.0, title, 14.0, [0.6, 0.75, 1.0, 1.0]);
             ui.text_centered(sw * 0.5, y + 38.0, obj, size, [1.0, 0.95, 0.75, 1.0]);
         }
 
-        // === Right top: kills + key ===
+        // Kills + key.
         {
             let sw = ui.screen_w();
             let size = 14.0;
@@ -2291,20 +2355,21 @@ impl Game for FortressDemo {
                     self.campaign.kills_total
                 );
                 let kw = ui.text_width(&kills_txt, size);
-                ui.rect(sw - kw - 40.0, y - 6.0, kw + 24.0, size + 12.0, [0.0, 0.0, 0.0, 0.55]);
+                ui.rect(sw - kw - 40.0, y - 6.0, kw + 24.0, size + 12.0,
+                    [0.0, 0.0, 0.0, 0.55]);
                 ui.text(sw - kw - 28.0, y, &kills_txt, size, [1.0, 0.85, 0.85, 1.0]);
                 y += size + 10.0;
             }
-
             if self.campaign.has_key_red {
                 let k = "🔑 Red Key";
                 let kww = ui.text_width(k, size);
-                ui.rect(sw - kww - 40.0, y - 6.0, kww + 24.0, size + 12.0, [0.0, 0.0, 0.0, 0.55]);
+                ui.rect(sw - kww - 40.0, y - 6.0, kww + 24.0, size + 12.0,
+                    [0.0, 0.0, 0.0, 0.55]);
                 ui.text(sw - kww - 28.0, y, k, size, [1.0, 0.4, 0.4, 1.0]);
             }
         }
 
-        // === Dialog ===
+        // Dialog.
         if let Some((text, ttl)) = &self.campaign.dialog {
             let alpha = ttl.min(1.0);
             let sw = ui.screen_w();
@@ -2321,30 +2386,24 @@ impl Game for FortressDemo {
             ui.text_centered(sw * 0.5, y + box_h * 0.5, text, size, [1.0, 1.0, 1.0, alpha]);
         }
 
-        // === Victory screen ===
+        // Victory screen.
         if is_victory {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
             ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.7]);
-
             ui.text_centered(sw * 0.5, sh * 0.3, "VICTORY", 64.0, [1.0, 0.85, 0.4, 1.0]);
-            ui.text_centered(
-                sw * 0.5,
-                sh * 0.42,
-                "The Fallen Citadel",
-                24.0,
-                [0.8, 0.85, 0.95, 1.0],
-            );
-
+            ui.text_centered(sw * 0.5, sh * 0.42, "The Fallen Citadel", 24.0,
+                [0.8, 0.85, 0.95, 1.0]);
             let stats = format!(
-                "Kills: {}  ·  Time: {:.1}s",
+                "Kills: {}  ·  Time: {:.1}s  ·  Level: {}",
                 self.campaign.kills_total,
-                self.campaign.victory_time.unwrap_or(0.0)
+                self.campaign.victory_time.unwrap_or(0.0),
+                self.player_stats.experience.level,
             );
             ui.text_centered(sw * 0.5, sh * 0.55, &stats, 20.0, [1.0, 1.0, 1.0, 1.0]);
         }
 
-        // === Pause menu ===
+        // Pause menu.
         if self.demo_paused {
             if self.save_slots_cache_dirty {
                 self.refresh_save_slots();
@@ -2362,13 +2421,8 @@ impl Game for FortressDemo {
             ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
 
             ui.text_centered(sw * 0.5, py + 30.0, "PAUSED", 28.0, [1.0, 0.9, 0.6, 1.0]);
-            ui.text_centered(
-                sw * 0.5,
-                py + 58.0,
-                self.campaign.stage.title(),
-                14.0,
-                [0.7, 0.75, 0.85, 1.0],
-            );
+            ui.text_centered(sw * 0.5, py + 58.0, self.campaign.stage.title(),
+                14.0, [0.7, 0.75, 0.85, 1.0]);
 
             let bw = 220.0;
             let bh = 36.0;
@@ -2378,28 +2432,30 @@ impl Game for FortressDemo {
                 self.demo_paused = false;
             }
             if ui.button(bx, py + 122.0, bw, bh, "Heal +25") {
-                self.demo_health = (self.demo_health + 25.0).min(self.demo_health_max);
+                self.heal(25.0);
                 self.hud.push("Healed +25");
             }
             if ui.button(bx, py + 162.0, bw, bh, "Refill Ammo") {
-                self.demo_ammo = self.demo_ammo_max;
-                self.demo_ammo_reserve = self.demo_ammo_reserve_max;
-                self.demo_reloading = false;
-                self.demo_reload_timer = 0.0;
-                self.hud.push("Ammo + reserve refilled");
+                for i in 0..self.weapons.len() {
+                    if let (Some(w), Some(rt)) = (
+                        self.weapons.get(i).cloned(),
+                        self.weapon_runtimes.get_mut(i),
+                    ) {
+                        rt.mag = w.mag_size;
+                        rt.reserve = w.start_reserve.max(rt.reserve);
+                        rt.reloading = false;
+                        rt.reload_timer = 0.0;
+                    }
+                }
+                self.hud.push("Ammo refilled");
             }
             if ui.button(bx, py + 202.0, bw, bh, "🏠 Quit to Main Menu") {
                 self.pending_quit_to_menu = true;
                 self.demo_paused = false;
             }
 
-            ui.text_centered(
-                sw * 0.5,
-                py + 258.0,
-                "SAVE / LOAD",
-                16.0,
-                [0.8, 0.85, 1.0, 1.0],
-            );
+            ui.text_centered(sw * 0.5, py + 258.0, "SAVE / LOAD", 16.0,
+                [0.8, 0.85, 1.0, 1.0]);
 
             let slot_w = 420.0;
             let slot_h = 32.0;
@@ -2413,10 +2469,7 @@ impl Game for FortressDemo {
                 let label = match header {
                     Some(h) => format!(
                         "Slot {}  ·  {}  ·  {} kills  ·  {:.0}s",
-                        slot + 1,
-                        h.stage_title,
-                        h.kills,
-                        h.playtime_secs,
+                        slot + 1, h.stage_title, h.kills, h.playtime_secs,
                     ),
                     None => format!("Slot {}  ·  — empty —", slot + 1),
                 };
@@ -2427,20 +2480,15 @@ impl Game for FortressDemo {
                 if ui.button(slot_x, y, btn_w, slot_h, "S") {
                     action = Some((*slot, "save"));
                 }
-                if header.is_some()
-                    && ui.button(slot_x + btn_w + gap, y, btn_w, slot_h, "L")
-                {
+                if header.is_some() && ui.button(slot_x + btn_w + gap, y, btn_w, slot_h, "L") {
                     action = Some((*slot, "load"));
                 }
-                if header.is_some()
-                    && ui.button(slot_x + (btn_w + gap) * 2.0, y, btn_w, slot_h, "X")
-                {
+                if header.is_some() && ui.button(slot_x + (btn_w + gap) * 2.0, y, btn_w, slot_h, "X") {
                     action = Some((*slot, "delete"));
                 }
 
                 let label_x = slot_x + (btn_w + gap) * 3.0;
                 ui.text(label_x, y + 8.0, &label, 12.0, [0.9, 0.9, 0.85, 1.0]);
-
                 y += slot_h + 4.0;
             }
 
@@ -2453,24 +2501,248 @@ impl Game for FortressDemo {
                 }
             }
 
-            ui.text_centered(
-                sw * 0.5,
-                py + ph - 18.0,
+            ui.text_centered(sw * 0.5, py + ph - 18.0,
                 "S = Save · L = Load · X = Delete",
-                11.0,
-                [0.6, 0.65, 0.75, 0.8],
-            );
+                11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = "Esc — пауза · ЛКМ — выстрел · Space — прыжок · R — перезарядка · F1 — debug · WASD — движение";
-            ui.text_centered(
-                ui.screen_w() * 0.5,
-                ui.screen_h() - 24.0,
-                text,
-                12.0,
-                [1.0, 1.0, 1.0, 0.5],
+            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
+            ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
+                text, 12.0, [1.0, 1.0, 1.0, 0.5]);
+        }
+
+        // Character Sheet (Tab).
+        if self.show_character_sheet && !self.demo_paused && !is_victory {
+            draw_character_sheet(ui, &mut self.player_stats);
+        }
+
+        // Inventory (I).
+        if self.show_inventory && !self.demo_paused && !is_victory {
+            let action = draw_inventory_ui(
+                ui,
+                &self.inventory,
+                &self.equipment,
+                &self.item_registry,
             );
+            match action {
+                InventoryAction::None => {}
+                InventoryAction::Equip(idx) => self.equip_from_slot(idx),
+                InventoryAction::Use(idx) => self.use_from_slot(idx),
+                InventoryAction::Drop(idx) => {
+                    if self.inventory.take_slot(idx).is_some() {
+                        self.hud.push("Item dropped");
+                    }
+                }
+            }
         }
     }
+}
+
+// ============================================================
+// Helpers — RNG
+// ============================================================
+
+fn rand01_side() -> f32 {
+    use std::cell::Cell;
+    thread_local! {
+        static S: Cell<u32> = const { Cell::new(0xC0FFEE) };
+    }
+    S.with(|s| {
+        let mut v = s.get();
+        v = v.wrapping_mul(1664525).wrapping_add(1013904223);
+        s.set(v);
+        ((v >> 8) & 0xFFFFFF) as f32 / 16777215.0
+    })
+}
+
+fn rand01_crit() -> f32 {
+    use std::cell::Cell;
+    thread_local! {
+        static S: Cell<u32> = const { Cell::new(0xBEEF_CAFE) };
+    }
+    S.with(|s| {
+        let mut v = s.get();
+        v = v.wrapping_mul(1664525).wrapping_add(1013904223);
+        s.set(v);
+        ((v >> 8) & 0xFFFFFF) as f32 / 16777215.0
+    })
+}
+
+// ============================================================
+// Character Sheet UI
+// ============================================================
+
+fn draw_character_sheet(ui: &mut crate::ui::UiLayer, stats: &mut PlayerStats) {
+    let sw = ui.screen_w();
+    let sh = ui.screen_h();
+    let pw = 460.0;
+    let ph = 360.0;
+    let px = sw * 0.5 - pw * 0.5;
+    let py = sh * 0.5 - ph * 0.5;
+
+    ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.5]);
+    ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
+    ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
+
+    ui.text_centered(sw * 0.5, py + 22.0, "CHARACTER", 24.0, [1.0, 0.9, 0.6, 1.0]);
+    let lvl = format!(
+        "Level {} · {} total XP · {} unspent",
+        stats.experience.level, stats.experience.total_xp, stats.unspent_points,
+    );
+    ui.text_centered(sw * 0.5, py + 50.0, &lvl, 12.0, [0.75, 0.8, 0.9, 1.0]);
+
+    ui.rect(px + 16.0, py + 68.0, pw - 32.0, 1.0, [0.4, 0.45, 0.55, 0.8]);
+
+    let mut y = py + 82.0;
+    let line_h = 46.0;
+    let mut action: Option<usize> = None;
+
+    for i in 0..5 {
+        let value = stats.attributes.get(i);
+        ui.text(px + 20.0, y + 6.0, STAT_NAMES[i], 16.0, [1.0, 1.0, 1.0, 1.0]);
+        let val_text = format!("{:>3}", value);
+        ui.text(px + 200.0, y + 6.0, &val_text, 16.0, [1.0, 0.95, 0.6, 1.0]);
+        ui.text(px + 20.0, y + 26.0, STAT_DESCRIPTIONS[i], 10.0, [0.6, 0.65, 0.75, 0.9]);
+        if stats.unspent_points > 0
+            && ui.button(px + pw - 60.0, y + 6.0, 40.0, 26.0, "+")
+        {
+            action = Some(i);
+        }
+        y += line_h;
+    }
+
+    if let Some(idx) = action {
+        stats.spend_point(idx);
+    }
+
+    ui.text_centered(sw * 0.5, py + ph - 22.0,
+        "Tab — close · Esc — pause", 11.0, [0.6, 0.65, 0.75, 0.8]);
+}
+
+// ============================================================
+// Inventory UI
+// ============================================================
+
+enum InventoryAction {
+    None,
+    Equip(usize),
+    Use(usize),
+    Drop(usize),
+}
+
+fn draw_inventory_ui(
+    ui: &mut crate::ui::UiLayer,
+    inv: &Inventory,
+    equipment: &Equipment,
+    registry: &ItemRegistry,
+) -> InventoryAction {
+    let sw = ui.screen_w();
+    let sh = ui.screen_h();
+    let pw = 620.0;
+    let ph = 460.0;
+    let px = sw * 0.5 - pw * 0.5;
+    let py = sh * 0.5 - ph * 0.5;
+
+    ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.5]);
+    ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
+    ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
+
+    let used = inv.slots.iter().filter(|s| s.is_some()).count();
+    ui.text_centered(sw * 0.5, py + 22.0, "INVENTORY", 24.0, [1.0, 0.9, 0.6, 1.0]);
+    ui.text_centered(sw * 0.5, py + 50.0,
+        &format!("{} / {} slots used", used, inv.capacity),
+        12.0, [0.75, 0.8, 0.9, 1.0]);
+
+    ui.rect(px + 16.0, py + 68.0, pw - 32.0, 1.0, [0.4, 0.45, 0.55, 0.8]);
+
+    // Equipment column.
+    let eq_x = px + 20.0;
+    let eq_y = py + 82.0;
+    ui.text(eq_x, eq_y, "EQUIPMENT", 14.0, [0.9, 0.9, 0.5, 1.0]);
+
+    let slots: [(&str, &Option<String>); 3] = [
+        ("Weapon",  &equipment.weapon_id),
+        ("Armor",   &equipment.armor_id),
+        ("Trinket", &equipment.trinket_id),
+    ];
+    let mut ey = eq_y + 22.0;
+    for (label, id_opt) in slots {
+        ui.rect(eq_x, ey, 240.0, 36.0, [0.08, 0.10, 0.14, 0.95]);
+        ui.rect_outline(eq_x, ey, 240.0, 36.0, 1.0, [0.4, 0.45, 0.55, 1.0]);
+        ui.text(eq_x + 8.0, ey + 10.0, label, 11.0, [0.7, 0.75, 0.85, 1.0]);
+
+        let name = id_opt.as_deref()
+            .and_then(|id| registry.get_by_id(id))
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "— empty —".to_string());
+        let color = id_opt.as_deref()
+            .and_then(|id| registry.get_by_id(id))
+            .map(|i| i.rarity.color())
+            .unwrap_or([0.5, 0.5, 0.5, 1.0]);
+        ui.text(eq_x + 70.0, ey + 10.0, &name, 13.0, color);
+        ey += 44.0;
+    }
+
+    // Items grid 5×4.
+    let grid_x = px + 280.0;
+    let grid_y = py + 82.0;
+    ui.text(grid_x, grid_y, "ITEMS", 14.0, [0.9, 0.9, 0.5, 1.0]);
+
+    let cell_w = 60.0;
+    let cell_h = 60.0;
+    let gap = 4.0;
+    let cols = 5;
+
+    let mut action = InventoryAction::None;
+
+    let input = ui.input();
+    let (mx, my) = input.mouse_pos;
+    let clicked = input.mouse_clicked;
+
+    for i in 0..inv.capacity {
+        let col = i % cols;
+        let row = i / cols;
+        let cx = grid_x + col as f32 * (cell_w + gap);
+        let cy = grid_y + 22.0 + row as f32 * (cell_h + gap);
+
+        ui.rect(cx, cy, cell_w, cell_h, [0.08, 0.10, 0.14, 0.95]);
+
+        let hovered = mx >= cx && mx < cx + cell_w && my >= cy && my < cy + cell_h;
+        let border = if hovered { [1.0, 0.9, 0.5, 1.0] } else { [0.35, 0.4, 0.5, 1.0] };
+        ui.rect_outline(cx, cy, cell_w, cell_h, 1.0, border);
+
+        if let Some(stack) = &inv.slots[i] {
+            let item = registry.get_by_id(&stack.item_id);
+            let (icon, name, color) = match item {
+                Some(it) => (it.kind.icon(), it.name.clone(), it.rarity.color()),
+                None => ("?", stack.item_id.clone(), [0.5, 0.5, 0.5, 1.0]),
+            };
+            ui.text_centered(cx + cell_w * 0.5, cy + 20.0, icon, 22.0, color);
+            let short: String = name.chars().take(9).collect();
+            ui.text_centered(cx + cell_w * 0.5, cy + cell_h - 14.0, &short, 9.0,
+                [0.9, 0.9, 0.9, 1.0]);
+            if stack.count > 1 {
+                ui.text(cx + cell_w - 18.0, cy + 4.0,
+                    &format!("{}", stack.count), 10.0, [1.0, 0.9, 0.5, 1.0]);
+            }
+            if hovered && clicked {
+                if let Some(it) = item {
+                    match it.kind {
+                        ItemKind::Consumable => action = InventoryAction::Use(i),
+                        ItemKind::Weapon
+                        | ItemKind::Armor
+                        | ItemKind::Trinket => action = InventoryAction::Equip(i),
+                        _ => action = InventoryAction::Drop(i),
+                    }
+                }
+            }
+        }
+    }
+
+    ui.text_centered(sw * 0.5, py + ph - 22.0,
+        "LMB on item: use / equip / drop · Tab: stats · I: close",
+        11.0, [0.6, 0.65, 0.75, 0.8]);
+
+    action
 }
 
 // ============================================================
@@ -2506,6 +2778,8 @@ fn add_materials(renderer: &mut Renderer) {
             .with_emissive([0.8, 1.5, 3.0]));
     renderer.add_material("flat_red",
         Material::new([1.0, 0.35, 0.35, 1.0]).with_metallic_roughness(0.0, 0.5));
+    renderer.add_material("flat_blue",
+        Material::new([0.35, 0.55, 1.0, 1.0]).with_metallic_roughness(0.0, 0.5));
     renderer.add_material("gold",
         Material::new([1.0, 0.85, 0.3, 1.0]).with_metallic_roughness(1.0, 0.25));
     renderer.add_material("glass",
@@ -2513,11 +2787,10 @@ fn add_materials(renderer: &mut Renderer) {
             .with_alpha_mode(AlphaMode::Blend));
     renderer.add_material("rpg_dungeon",
         Material::new([0.13, 0.11, 0.16, 1.0]).with_metallic_roughness(0.0, 0.95));
-
-    // === Зелень для деревьев (props::tree_*) ===
     renderer.add_material("foliage",
         Material::new([0.20, 0.45, 0.15, 1.0]).with_metallic_roughness(0.0, 0.95));
-    // === Кора для стволов ===
     renderer.add_material("bark",
         Material::new([0.30, 0.20, 0.12, 1.0]).with_metallic_roughness(0.0, 0.9));
+    renderer.add_material("ground",
+        Material::new([0.35, 0.38, 0.30, 1.0]).with_metallic_roughness(0.0, 0.95));
 }

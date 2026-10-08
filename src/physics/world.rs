@@ -1,10 +1,24 @@
+//! PhysicsWorld: пошаговая симуляция.
+//!
+//! ## Что нового
+//!
+//! * Angular dynamics (quaternion derivative, inertia tensor).
+//! * Sleep management — тела засыпают через 0.5 сек.
+//! * Kinematic support transfer — ящики на лифте двигаются.
+//! * Rotation-aware AABB (`world_aabb` с учётом `rotation`).
+//! * **step3-spatial-hash**: broad-phase через `SpatialHash2D`,
+//!   O(n²) → O(n) на реальных сценах.
+//! * Terrain collision: dynamic-тела получают вертикальный контакт
+//!   с heightmap.
+
 use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
 
 use crate::ecs::{Entity, World};
+use crate::engine::spatial_hash::SpatialHash2D;
 use crate::game::components::{Parent, Transform};
-use crate::render::terrain::Heightmap; // === TERRAIN ===
+use crate::render::terrain::Heightmap;
 
 use super::components::{BodyType, Collider, PhysicsMaterial, RigidBody};
 
@@ -72,7 +86,7 @@ impl PhysicsWorld {
     pub fn step(
         &mut self,
         world: &mut World,
-        terrain: Option<&Heightmap>, // === TERRAIN ===
+        terrain: Option<&Heightmap>,
         dt: f32,
     ) {
         if !self.enabled || dt <= 0.0 { return; }
@@ -116,11 +130,10 @@ impl PhysicsWorld {
             }
         }
 
-        // === TERRAIN: вертикальная коллизия с heightmap ===
+        // === Terrain: вертикальная коллизия с heightmap ===
+        //
         // Простейший heightfield-контакт: по нижней точке AABB тела
         // берём высоту ground, выталкиваем по +Y, гасим vertical velocity.
-        // Для инди-игр этого достаточно; для точного sliding по склону
-        // нужен contact normal из heightmap (следующий шаг).
         if let Some(hm) = terrain {
             for s in states.iter_mut() {
                 if s.body_type != BodyType::Dynamic { continue; }
@@ -141,7 +154,7 @@ impl PhysicsWorld {
             }
         }
 
-        // 2. Broad-phase.
+        // 2. Broad-phase (spatial hash).
         let pairs = broad_phase(&states);
         self.last_broad_pairs = pairs.len();
 
@@ -161,7 +174,7 @@ impl PhysicsWorld {
             }
         }
 
-        // 4b. Support transfer.
+        // 4b. Support transfer (kinematic → dynamic на платформе).
         for c in &contacts {
             let a_kin = states[c.a].body_type == BodyType::Kinematic;
             let b_kin = states[c.b].body_type == BodyType::Kinematic;
@@ -223,6 +236,10 @@ impl PhysicsWorld {
     }
 }
 
+// ============================================================
+// Rotation integration
+// ============================================================
+
 fn integrate_rotation(s: &mut BodyState, dt: f32) {
     if s.angular_velocity.length_squared() < 1e-10 { return; }
     let w = s.angular_velocity;
@@ -236,6 +253,10 @@ fn integrate_rotation(s: &mut BodyState, dt: f32) {
     );
     s.rotation = new_q.normalize();
 }
+
+// ============================================================
+// Inertia
+// ============================================================
 
 fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
     if mass < 1e-6 { return 0.0; }
@@ -256,6 +277,10 @@ fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
     };
     if i > 1e-8 { 1.0 / i } else { 0.0 }
 }
+
+// ============================================================
+// State collection
+// ============================================================
 
 fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
@@ -318,21 +343,59 @@ fn write_back(world: &mut World, states: &[BodyState]) {
     }
 }
 
+// ============================================================
+// Broad-phase (spatial hash)
+// ============================================================
+
+/// Broad-phase через spatial hash (XZ-сетка).
+///
+/// Раньше: O(n²) попарных проверок AABB. При 500 телах — 125 000
+/// проверок в кадр, из которых 99% отбрасывается.
+///
+/// Теперь:
+///   1. Строим spatial hash по центрам AABB (XZ).
+///   2. Для каждого тела — `query_aabb` в его XZ-границах.
+///   3. Фильтруем по реальному 3D-AABB и правилам (sleep, can_move).
+///
+/// `cell_size = 4.0` — эмпирика: тела типичного размера 0.5–2 м,
+/// 4 м даёт 2–8 тел на ячейку в плотных местах.
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
     let n = states.len();
+    if n < 2 { return Vec::new(); }
+
     let aabbs: Vec<(Vec3, Vec3)> = states.iter().map(global_aabb).collect();
+
+    let mut hash = SpatialHash2D::new(4.0);
+    for (i, (mn, mx)) in aabbs.iter().enumerate() {
+        let center = (*mn + *mx) * 0.5;
+        hash.insert(i as u32, center);
+    }
+
     let mut pairs = Vec::new();
+    let mut candidates: Vec<u32> = Vec::with_capacity(32);
+
     for i in 0..n {
-        for j in (i + 1)..n {
-            let si = &states[i];
+        let si = &states[i];
+        let (mn_i, mx_i) = aabbs[i];
+
+        candidates.clear();
+        hash.query_aabb(mn_i, mx_i, &mut candidates);
+
+        for &j_u32 in &candidates {
+            let j = j_u32 as usize;
+            if j <= i { continue; } // пару один раз
+
             let sj = &states[j];
+
             if !can_move(si.body_type) && !can_move(sj.body_type) { continue; }
             if si.sleeping && sj.sleeping { continue; }
+
             if aabb_overlap(aabbs[i], aabbs[j]) {
                 pairs.push((i, j));
             }
         }
     }
+
     pairs
 }
 
@@ -349,6 +412,10 @@ fn aabb_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
         && a.0.y <= b.1.y && a.1.y >= b.0.y
         && a.0.z <= b.1.z && a.1.z >= b.0.z
 }
+
+// ============================================================
+// Narrow-phase
+// ============================================================
 
 fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact> {
     match (a.collider, b.collider) {
@@ -447,6 +514,10 @@ fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Op
     let point = (point_a + point_b) * 0.5;
     Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
 }
+
+// ============================================================
+// Resolve (linear + angular)
+// ============================================================
 
 fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;

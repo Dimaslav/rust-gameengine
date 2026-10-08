@@ -1,5 +1,11 @@
 //! AI system: FSM, восприятие (зрение + слух), движение по navmesh,
 //! agent-agent collision.
+//!
+//! ## Оптимизация (step3-spatial-hash)
+//!
+//! `resolve_agent_collisions` использует `SpatialHash2D` вместо
+//! O(n²) попарных проверок. При 100 агентах было 5000 пар в кадр
+//! × 2 итерации; теперь — только соседи в радиусе 2R.
 
 use glam::Vec3;
 
@@ -10,11 +16,13 @@ use crate::game::ai::{
 use crate::game::components::{Health, Transform};
 use crate::physics::navmesh::{segment_clear, Navmesh};
 
+use super::spatial_hash::SpatialHash2D;
+
 pub struct AiTuning {
     pub repath_interval: f32,
     pub waypoint_tolerance: f32,
-    /// ИЗМЕНЕНО (agent-agent collision): радиус «личного пространства»
-    /// агента. Если два агента ближе 2*agent_radius — расталкиваются.
+    /// Радиус «личного пространства» агента. Если два агента ближе
+    /// 2*agent_radius — расталкиваются.
     pub agent_radius: f32,
     /// Сила расталкивания (множитель к перекрытию за кадр).
     pub push_strength: f32,
@@ -55,7 +63,7 @@ impl AiSystem {
             self.update_agent(world, e, target, &noises, navmesh, dt);
         }
 
-        // ИЗМЕНЕНО (agent-agent collision): расталкивание после всех FSM.
+        // Расталкивание после всех FSM.
         self.resolve_agent_collisions(world, dt);
     }
 
@@ -107,8 +115,7 @@ impl AiSystem {
             agent.time_since_seen += dt;
         }
 
-        // --- ИЗМЕНЕНО: Perception: слух ---
-        // Находим самый громкий шум в радиусе слышимости.
+        // --- Perception: слух ---
         let mut heard: Option<Vec3> = None;
         let mut heard_dist = f32::INFINITY;
         for n in noises {
@@ -146,18 +153,15 @@ impl AiSystem {
                 if sees {
                     agent.state = AiState::Chase;
                 } else if let Some(p) = heard {
-                    // Обновляем точку интереса.
                     agent.last_seen_pos = Some(p);
                     agent.state_timer = 0.0;
                 } else if let Some(lp) = agent.last_seen_pos {
-                    // Дошли до точки?
                     let d = (lp - agent_pos).length();
                     if d < self.tuning.waypoint_tolerance * 2.0 {
                         agent.last_seen_pos = None;
                         agent.state = if world.has::<PatrolPath>(e) { AiState::Patrol } else { AiState::Idle };
                     }
                 }
-                // Timeout — забываем.
                 if agent.state_timer > 8.0 {
                     agent.last_seen_pos = None;
                     agent.state = if world.has::<PatrolPath>(e) { AiState::Patrol } else { AiState::Idle };
@@ -171,7 +175,6 @@ impl AiSystem {
                     }
                 }
                 if !sees && agent.time_since_seen > agent.lose_target_time {
-                    // Переходим в Investigate к последней известной позиции.
                     if let Some(lp) = agent.last_seen_pos {
                         agent.state = AiState::Investigate;
                         agent.state_timer = 0.0;
@@ -347,45 +350,74 @@ impl AiSystem {
         else { agent.yaw += diff.signum() * step; }
     }
 
-    /// ИЗМЕНЕНО (agent-agent collision): расталкивание агентов.
+    /// Расталкивание агентов через spatial hash.
     ///
-    /// Простой O(n²) в пределах ограниченного радиуса. Для каждой
-    /// пары агентов, чьи XZ-проекции ближе 2*R, сдвигаем обоих
-    /// в стороны на половину перекрытия.
+    /// Раньше было O(n²): для каждой пары агентов проверялось
+    /// расстояние. При 100 агентах — 5000 пар в кадр × 2 итерации.
     ///
-    /// `dt` не используется явно — расталкивание per-frame, но
-    /// ограничено `push_strength`, чтобы не «выстреливать» тела.
-    /// Несколько итераций сглаживают ситуацию при 3+ агентах.
+    /// Теперь:
+    ///   1. Каждую итерацию строим spatial hash из позиций агентов.
+    ///   2. Для каждого агента делаем `query_radius` — получаем
+    ///      только соседей в пределах 2R.
+    ///   3. Расталкиваем только их. Итого — O(n·k), где k — среднее
+    ///      число соседей (обычно 3–8), а не O(n²).
     fn resolve_agent_collisions(&mut self, world: &mut World, _dt: f32) {
         let agents: Vec<Entity> = world.query::<AiAgent>().map(|(e, _)| e).collect();
         if agents.len() < 2 { return; }
 
         let r = self.tuning.agent_radius;
-        let r2 = (r * 2.0) * (r * 2.0);
+        let diameter = r * 2.0;
+        let r2 = diameter * diameter;
+
+        // Scratch-буферы, живут между итерациями.
+        let mut positions: Vec<(Entity, Vec3)> = Vec::with_capacity(agents.len());
+        let mut shifts: Vec<Vec3> = Vec::with_capacity(agents.len());
+        let mut neighbours: Vec<u32> = Vec::with_capacity(16);
+
+        // Ячейка ~2.5 диаметра: запрос радиуса R найдёт всех соседей,
+        // пересекающих границу ячейки, за один-два шага по сетке.
+        let mut hash = SpatialHash2D::new(diameter * 2.5);
 
         for _ in 0..self.tuning.push_iterations {
-            // Собираем позиции в локальный массив — избегаем
-            // borrow checker'а.
-            let mut positions: Vec<(Entity, Vec3)> = Vec::with_capacity(agents.len());
+            // 1. Собрать позиции
+            positions.clear();
             for &e in &agents {
                 if let Some(t) = world.get::<Transform>(e) {
                     positions.push((e, t.position));
                 }
             }
             let n = positions.len();
-            let mut shifts: Vec<Vec3> = vec![Vec3::ZERO; n];
+            if n < 2 { return; }
+
+            // 2. Построить spatial hash (индекс в `positions` как payload)
+            hash.clear();
+            for (i, (_e, p)) in positions.iter().enumerate() {
+                hash.insert(i as u32, *p);
+            }
+
+            // 3. Расталкивание
+            shifts.clear();
+            shifts.resize(n, Vec3::ZERO);
 
             for i in 0..n {
-                for j in (i + 1)..n {
-                    let pi = positions[i].1;
+                let pi = positions[i].1;
+                neighbours.clear();
+                hash.query_radius(pi, diameter, &mut neighbours);
+
+                for &j_u32 in &neighbours {
+                    let j = j_u32 as usize;
+                    if j <= i { continue; } // пару обрабатываем один раз
+
                     let pj = positions[j].1;
                     let dx = pj.x - pi.x;
                     let dz = pj.z - pi.z;
                     let d2 = dx * dx + dz * dz;
                     if d2 >= r2 || d2 < 1e-8 { continue; }
+
                     let d = d2.sqrt();
-                    let overlap = (r * 2.0) - d;
+                    let overlap = diameter - d;
                     if overlap <= 0.0 { continue; }
+
                     let inv_d = 1.0 / d;
                     let nx = dx * inv_d;
                     let nz = dz * inv_d;
@@ -395,6 +427,7 @@ impl AiSystem {
                 }
             }
 
+            // 4. Применить сдвиги
             for i in 0..n {
                 if shifts[i].length_squared() < 1e-8 { continue; }
                 let (e, _) = positions[i];
