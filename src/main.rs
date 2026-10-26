@@ -13,6 +13,7 @@ mod physics;
 mod render;
 mod scene;
 mod ui;
+mod scripting;
 
 use engine::run;
 
