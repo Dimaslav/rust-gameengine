@@ -6,6 +6,7 @@ pub mod decals;
 pub mod items;
 pub mod lights;
 pub mod rpg;
+pub mod viewmodel;
 pub mod stats;
 pub mod timers;
 pub mod weapons;

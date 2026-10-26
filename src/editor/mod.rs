@@ -1,15 +1,16 @@
-//! Редактор.
-
 pub mod camera_bookmarks;
 pub mod content_browser;
 pub mod gizmo;
 pub mod inspector_audio;
+pub mod layout;
 pub mod palette;
+pub mod panels;
 pub mod picking;
 pub mod placement;
 pub mod play;
+pub mod script_panel;
 pub mod settings;
-pub mod terrain_tool;   // === TERRAIN ===
+pub mod terrain_tool;
 pub mod ui;
 pub mod undo;
 
@@ -27,11 +28,16 @@ use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
 
 use gizmo::GizmoState;
+use layout::LayoutState;
 use palette::PaletteState;
 use play::PlayState;
 use settings::EditorSettings;
-use terrain_tool::TerrainTool;   // === TERRAIN ===
+use terrain_tool::TerrainTool;
 use undo::UndoStack;
+
+// ============================================================
+// Editor (верхний контейнер egui)
+// ============================================================
 
 pub struct Editor {
     pub egui_ctx: egui::Context,
@@ -41,53 +47,90 @@ pub struct Editor {
     pub state: EditorState,
 }
 
+// ============================================================
+// BoxSelect
+// ============================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct BoxSelect {
     pub start: (f32, f32),
     pub current: (f32, f32),
 }
 
+// ============================================================
+// EditorState
+// ============================================================
+//
+// Объединяет прежние `EditorState` (логика) и `UiState` (layout).
+// Поле `layout: LayoutState` заменяет `UiState::show_*_panel`,
+// а `command_palette_*` переехало сюда же из `UiState`.
+
 pub struct EditorState {
+    // --- Selection / hierarchy ---
     pub selected: Vec<Entity>,
     pub hierarchy_expanded: HashSet<Entity>,
     pub locked: HashSet<Entity>,
     pub solo: Option<Entity>,
     pub hint: Option<(String, f32)>,
 
+    // --- Files ---
     pub save_path: String,
     pub pending_action: Option<EditorAction>,
-    pub gizmo: GizmoState,
-    pub dirty_materials: Vec<(Entity, String, Material)>,
-    pub undo: UndoStack,
-    pub undo_requested: bool,
-    pub search_filter: String,
-    pub clipboard_transform: Option<Transform>,
-    pub play: PlayState,
-    pub palette: PaletteState,
 
-    /// === TERRAIN ===
+    // --- Tools ---
+    pub gizmo: GizmoState,
+    pub palette: PaletteState,
     pub terrain: TerrainTool,
 
+    // --- Materials ---
+    pub dirty_materials: Vec<(Entity, String, Material)>,
+
+    // --- Undo / play ---
+    pub undo: UndoStack,
+    pub undo_requested: bool,
+    pub play: PlayState,
+
+    // --- Search / box-select / context ---
+    pub search_filter: String,
+    pub clipboard_transform: Option<Transform>,
     pub box_select: Option<BoxSelect>,
     pub context_menu_pos: Option<(f32, f32)>,
 
+    // --- Rename ---
     pub renaming: Option<Entity>,
     pub rename_buffer: String,
 
+    // --- Prefabs ---
     pub prefabs_dir: String,
     pub prefab_list: Vec<PathBuf>,
     pub prefab_save_name: String,
 
+    // --- Fly ---
     pub flying: bool,
     pub fly_speed: f32,
     pub fly_sensitivity: f32,
 
+    // --- Clipboard ---
     pub clipboard_entities: Vec<EntitySnapshot>,
 
+    // --- Export ---
     pub fbx_export_path: String,
 
+    // --- Settings ---
     pub settings: EditorSettings,
+
+    // === Layout (заменяет бывший UiState) ===
+    pub layout: LayoutState,
+
+    // === Command palette (было в UiState) ===
+    pub command_palette_open: bool,
+    pub command_palette_query: String,
+    pub command_palette_selected: usize,
 }
+
+// ============================================================
+// EditorAction
+// ============================================================
 
 #[derive(Debug, Clone)]
 pub enum EditorAction {
@@ -138,13 +181,26 @@ pub enum EditorAction {
 
     // === TERRAIN ===
     TerrainRegenerate,
-    TerrainSaveFile,   // .r16
+    TerrainSaveFile,
     TerrainSavePNG,
     TerrainLoadFile,
+
+    // === SCRIPTING ===
+    ReloadScripts,
+    AttachScript { entity: Entity, script: String },
+    DetachScript(Entity),
+    SelectEntity(Entity),
 }
+
+// ============================================================
+// EditorState impl
+// ============================================================
 
 impl EditorState {
     pub fn new() -> Self {
+        let settings = EditorSettings::load("editor.ron");
+        let layout = LayoutState::from_settings(&settings);
+
         let mut s = Self {
             selected: Vec::new(),
             hierarchy_expanded: HashSet::new(),
@@ -154,30 +210,44 @@ impl EditorState {
 
             save_path: "scene.ron".to_string(),
             pending_action: None,
-            gizmo: GizmoState::default(),
-            dirty_materials: Vec::new(),
-            undo: UndoStack::new(),
-            undo_requested: false,
-            search_filter: String::new(),
-            clipboard_transform: None,
-            play: PlayState::default(),
-            palette: PaletteState::default(),
 
+            gizmo: GizmoState::default(),
+            palette: PaletteState::default(),
             terrain: TerrainTool::default(),
 
+            dirty_materials: Vec::new(),
+
+            undo: UndoStack::new(),
+            undo_requested: false,
+            play: PlayState::default(),
+
+            search_filter: String::new(),
+            clipboard_transform: None,
             box_select: None,
             context_menu_pos: None,
+
             renaming: None,
             rename_buffer: String::new(),
+
             prefabs_dir: "prefabs".to_string(),
             prefab_list: Vec::new(),
             prefab_save_name: String::new(),
+
             flying: false,
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
+
             clipboard_entities: Vec::new(),
+
             fbx_export_path: "scene.fbx".to_string(),
-            settings: EditorSettings::load("editor.ron"),
+
+            settings,
+
+            layout,
+
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
         };
 
         s.save_path = s.settings.save_path.clone();
@@ -194,16 +264,11 @@ impl EditorState {
         s
     }
 
-    pub fn collect_settings(
-        &self,
-        ui_show_renderer: bool,
-        ui_show_stats: bool,
-        ui_show_hierarchy: bool,
-        ui_show_inspector: bool,
-        ui_show_audio: bool,
-        left_panel_width: f32,
-        right_panel_width: f32,
-    ) -> EditorSettings {
+    /// Собрать текущие настройки для сохранения в `editor.ron`.
+    ///
+    /// В отличие от старой версии, layout (`show_*_panel`, ширины)
+    /// берётся из `self.layout`, а не из аргументов.
+    pub fn collect_settings(&self) -> EditorSettings {
         let mut s = self.settings.clone();
         s.save_path = self.save_path.clone();
         s.prefabs_dir = self.prefabs_dir.clone();
@@ -215,15 +280,14 @@ impl EditorState {
         s.palette_snap_to_grid = self.palette.snap_to_grid;
         s.palette_grid_step = self.palette.grid_step;
 
-        s.show_renderer_panel = ui_show_renderer;
-        s.show_stats_panel = ui_show_stats;
-        s.show_hierarchy_panel = ui_show_hierarchy;
-        s.show_inspector_panel = ui_show_inspector;
-        s.show_audio_panel = ui_show_audio;
-        s.left_panel_width = left_panel_width;
-        s.right_panel_width = right_panel_width;
+        self.layout.write_into_settings(&mut s);
+
         s
     }
+
+    // ============================================================
+    // Selection
+    // ============================================================
 
     pub fn is_selected(&self, e: Entity) -> bool {
         self.selected.contains(&e)
@@ -304,6 +368,10 @@ impl Default for EditorState {
         Self::new()
     }
 }
+
+// ============================================================
+// Editor impl
+// ============================================================
 
 impl Editor {
     pub fn new(

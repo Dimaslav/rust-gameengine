@@ -1,15 +1,5 @@
-//! Окно-инспектор для выбранной audio-entity.
-//!
-//! Вынесено отдельно от `editor::ui`, потому что `ui.rs` уже
-//! разросся. Вызывается из `editor_ui::draw`, если в выделении
-//! есть entity с компонентом `AudioSource`.
-//!
-//! Изменения сразу применяются к `World`, плюс preview через
-//! `EditorAction::PreviewSound` и «выбрать звук из файла» через
-//! `EditorAction::LoadSound`.
-
 use crate::ecs::{Entity, World};
-use crate::editor::ui::AudioSnapshot;
+use crate::editor::panels::AudioSnapshot;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::audio::{AudioBus, AudioSource};
 

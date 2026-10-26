@@ -1,20 +1,3 @@
-//! Weapon framework: data-driven оружие из RON.
-//!
-//! Каждый ствол — `.ron` файл в `assets/weapons/`. Движок загружает
-//! их при старте в `WeaponRegistry`. Рантайм-состояние (патроны в
-//! магазине, кулдаун, идёт ли перезарядка) хранится отдельно в
-//! `WeaponRuntime` — по одному на каждый ствол.
-//!
-//! Расчёт стрельбы:
-//!   * `spread_hip` или `spread_ads` — конус разброса в градусах.
-//!   * `pellets` — сколько лучей вылетает за один выстрел (1 для
-//!     всего кроме дробовика; 8–12 для shotgun).
-//!   * `damage` — урон **на одну дробинку**. Для дробовика это
-//!     маленький урон × 8 дробинок.
-//!   * `fire_rate` — выстрелов в секунду. `cooldown = 1.0 / fire_rate`.
-//!   * `recoil_up` / `recoil_side` — отдача в радианах. `recoil_side`
-//!     симметричный (±), умножается на случайный знак.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -100,12 +83,64 @@ pub struct Weapon {
     /// Сколько патронов даёт один ammo_pickup.
     #[serde(default = "default_ammo_pickup")]
     pub ammo_pickup: u32,
+
+    // ============================================================
+    // View-model
+    // ============================================================
+
+    /// Имя меша в `Renderer::meshes`. `None` → оружие невидимо.
+    #[serde(default)]
+    pub mesh: Option<String>,
+
+    /// Имя материала в `Renderer::materials`.
+    #[serde(default)]
+    pub material: Option<String>,
+
+    /// Масштаб меша. Меши `weapon_*` в `props.rs` нормализованы
+    /// примерно под 0.2 м в длину; если модель больше —
+    /// здесь можно подкрутить.
+    #[serde(default = "default_weapon_scale")]
+    pub scale: f32,
+
+    /// Позиция «на бедре» в camera-space (x=вправо, y=вверх, z=вперёд).
+    /// Использует знак, привычный из glTF/Unity: отрицательный z — перед
+    /// камерой. У нас наоборот: `update_viewmodel` берёт `-offset.z`.
+    #[serde(default = "default_hip_pos")]
+    pub hip_pos: [f32; 3],
+
+    /// Позиция в прицеле.
+    #[serde(default = "default_ads_pos")]
+    pub ads_pos: [f32; 3],
+
+    /// Углы Эйлера в радианах (XYZ) для hip-позиции.
+    #[serde(default)]
+    pub hip_rot: [f32; 3],
+
+    /// Углы Эйлера в радианах для ADS-позиции.
+    #[serde(default)]
+    pub ads_rot: [f32; 3],
+
+    /// Точка вылета пули и muzzle-flash, в camera-space.
+    /// Используется для спавна частиц и света.
+    #[serde(default = "default_muzzle_pos")]
+    pub muzzle_pos: [f32; 3],
+
+    /// Смещение отдачи при выстреле (метры). Сдвигает ствол
+    /// назад и вверх на короткое время.
+    #[serde(default = "default_kick_back")]
+    pub kick_back: f32,
 }
 
 fn default_reserve() -> u32 { 60 }
 fn default_ads_mult() -> f32 { 1.0 }
 fn default_pellets() -> u32 { 1 }
 fn default_ammo_pickup() -> u32 { 30 }
+
+fn default_weapon_scale() -> f32 { 1.0 }
+fn default_hip_pos() -> [f32; 3] { [0.22, -0.20, -0.45] }
+fn default_ads_pos() -> [f32; 3] { [0.0, -0.10, -0.30] }
+fn default_muzzle_pos() -> [f32; 3] { [0.0, 0.0, -0.55] }
+fn default_kick_back() -> f32 { 0.04 }
 
 impl Weapon {
     pub fn cooldown(&self) -> f32 {
@@ -228,6 +263,16 @@ impl WeaponRegistry {
                     spread_hip: 1.5, spread_ads: 0.3, ads_fov_mult: 0.85,
                     recoil_up: 0.010, recoil_side: 0.002,
                     pellets: 1, range: 100.0, ammo_pickup: 24,
+                    // === view-model ===
+                    mesh: Some("weapon_pistol".into()),
+                    material: Some("weapon_gunmetal".into()),
+                    scale: 1.0,
+                    hip_pos: [0.22, -0.20, -0.45],
+                    ads_pos: [0.0, -0.10, -0.30],
+                    hip_rot: [0.0, 0.0, 0.0],
+                    ads_rot: [0.0, 0.0, 0.0],
+                    muzzle_pos: [0.0, 0.03, -0.45],
+                    kick_back: 0.04,
                 },
                 Weapon {
                     id: "smg".into(), name: "SMG".into(),
@@ -237,6 +282,15 @@ impl WeaponRegistry {
                     spread_hip: 3.0, spread_ads: 1.2, ads_fov_mult: 0.9,
                     recoil_up: 0.006, recoil_side: 0.004,
                     pellets: 1, range: 60.0, ammo_pickup: 60,
+                    mesh: Some("weapon_smg".into()),
+                    material: Some("weapon_gunmetal".into()),
+                    scale: 1.0,
+                    hip_pos: [0.24, -0.22, -0.50],
+                    ads_pos: [0.0, -0.11, -0.32],
+                    hip_rot: [0.0, 0.0, 0.0],
+                    ads_rot: [0.0, 0.0, 0.0],
+                    muzzle_pos: [0.0, 0.03, -0.55],
+                    kick_back: 0.03,
                 },
                 Weapon {
                     id: "shotgun".into(), name: "Shotgun".into(),
@@ -246,6 +300,15 @@ impl WeaponRegistry {
                     spread_hip: 6.0, spread_ads: 3.5, ads_fov_mult: 1.0,
                     recoil_up: 0.030, recoil_side: 0.008,
                     pellets: 8, range: 25.0, ammo_pickup: 16,
+                    mesh: Some("weapon_shotgun".into()),
+                    material: Some("weapon_gunmetal".into()),
+                    scale: 1.0,
+                    hip_pos: [0.24, -0.24, -0.52],
+                    ads_pos: [0.0, -0.12, -0.35],
+                    hip_rot: [0.0, 0.0, 0.0],
+                    ads_rot: [0.0, 0.0, 0.0],
+                    muzzle_pos: [0.0, 0.03, -0.60],
+                    kick_back: 0.09,
                 },
                 Weapon {
                     id: "sniper".into(), name: "Sniper".into(),
@@ -255,6 +318,15 @@ impl WeaponRegistry {
                     spread_hip: 5.0, spread_ads: 0.0, ads_fov_mult: 0.35,
                     recoil_up: 0.060, recoil_side: 0.003,
                     pellets: 1, range: 500.0, ammo_pickup: 10,
+                    mesh: Some("weapon_sniper".into()),
+                    material: Some("weapon_gunmetal".into()),
+                    scale: 1.0,
+                    hip_pos: [0.24, -0.22, -0.55],
+                    ads_pos: [0.0, -0.075, -0.30],
+                    hip_rot: [0.0, 0.0, 0.0],
+                    ads_rot: [0.0, 0.0, 0.0],
+                    muzzle_pos: [0.0, 0.03, -0.70],
+                    kick_back: 0.12,
                 },
             ],
         }

@@ -15,8 +15,9 @@ use crate::editor::gizmo::{self, GizmoMode};
 use crate::editor::picking::PickableSet;
 use crate::editor::palette::PaletteItem;
 use crate::editor::placement;
+use crate::editor::panels;
 use crate::editor::terrain_tool::TerrainBrush;
-use crate::editor::ui::{self as editor_ui, AudioSnapshot, Stats, UiAssets, UiState};
+use crate::editor::panels::{AudioSnapshot, Stats, UiAssets};
 use crate::editor::{BoxSelect, Editor, EditorAction};
 use crate::game::ai::{NoiseEvent, NoiseKind};
 use crate::game::audio::{AudioBus, AudioSource};
@@ -36,6 +37,7 @@ use crate::render::{
     camera::CameraMode, Camera3D, EguiFrameData, GpuLight, GpuPointLight, LineBatch, LineVertex,
     MeshDraw, ParticleInstance, PostFx, Renderer,
 };
+use crate::scripting::{ScriptCommand, ScriptEvent, ScriptSystem};
 use glam::Vec3;
 
 use super::ai_system::AiSystem;
@@ -45,6 +47,10 @@ use super::collision_cache::ColliderCache;
 use super::input::Input;
 use super::particles::{self, Particle, MAX_PARTICLES};
 use super::time::Time;
+
+// ============================================================
+// Game trait
+// ============================================================
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
@@ -92,8 +98,6 @@ pub trait Game: 'static {
         None
     }
 
-    /// Игра запрашивает возврат в главное меню (например, игрок нажал
-    /// «Quit to Main Menu» в паузе). App прочитает это и переключит mode.
     fn take_quit_to_menu(&mut self) -> bool { false }
 }
 
@@ -110,8 +114,6 @@ pub struct ShotFired {
     pub is_crit: bool,
 }
 
-/// Событие: игрок подобрал предмет. `App` сам ничего не делает —
-/// игра читает событие и добавляет в инвентарь.
 #[derive(Debug, Clone)]
 pub struct ItemPickup {
     pub item_id: String,
@@ -119,7 +121,13 @@ pub struct ItemPickup {
 }
 
 #[derive(Clone, Copy)]
-struct Projectile { position: Vec3, velocity: Vec3, age: f32, max_age: f32, damage: f32 }
+struct Projectile {
+    position: Vec3,
+    velocity: Vec3,
+    age: f32,
+    max_age: f32,
+    damage: f32,
+}
 
 struct PlaySnapshot {
     scene_ron: String,
@@ -134,6 +142,10 @@ struct PlaySnapshot {
     game_state: Option<Box<dyn Any>>,
 }
 
+// ============================================================
+// App
+// ============================================================
+
 pub struct App<G: Game> {
     game: G,
     world: World,
@@ -142,7 +154,6 @@ pub struct App<G: Game> {
     window: Arc<Window>,
     renderer: Renderer,
     editor: Editor,
-    ui_state: UiState,
     mouse_press_pos: Option<(f32, f32)>,
     viewport_rect: Option<egui::Rect>,
     rmb_press_time: Option<Instant>,
@@ -157,18 +168,17 @@ pub struct App<G: Game> {
     was_paused: bool,
 
     pickable: Option<PickableSet>,
-    /// Кэш коллайдеров для player collision. Перестраивается в
-    /// `redraw` перед `update_player`, если мы в Play.
     collider_cache: Option<ColliderCache>,
 
     navmesh: Option<Navmesh>,
     ai_system: AiSystem,
 
+    scripts: ScriptSystem,
+
     footstep_timer: f32,
     pub asset_db: crate::assets::AssetDatabase,
     hot_reload: crate::assets::HotReload,
 
-    // === App-level state ===
     pub mode: AppMode,
     pub settings: AppSettings,
 }
@@ -179,15 +189,9 @@ impl<G: Game> Drop for App<G> {
             log::warn!("Failed to save settings.ron: {}", e);
         }
 
-        let mut s = self.editor.state.collect_settings(
-            self.ui_state.show_renderer_panel,
-            self.ui_state.show_stats_panel,
-            self.ui_state.show_hierarchy_panel,
-            self.ui_state.show_inspector_panel,
-            self.ui_state.show_audio_panel,
-            self.ui_state.left_panel_width,
-            self.ui_state.right_panel_width,
-        );
+        // Было: collect_settings(7 аргументов из UiState).
+        // Стало: без аргументов, всё в editor.state.layout.
+        let mut s = self.editor.state.collect_settings();
         s.postfx = self.game.postfx();
 
         if let Some(audio) = self.audio.as_ref() {
@@ -218,7 +222,8 @@ impl<G: Game> App<G> {
                 Window::default_attributes()
                     .with_title("Rust Engine 3D")
                     .with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
-            ).expect("create window failed"),
+            )
+            .expect("create window failed"),
         );
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         let mut world = World::new();
@@ -237,13 +242,27 @@ impl<G: Game> App<G> {
             input
         };
 
-        let editor = Editor::new(&window, &renderer.device, renderer.config.format, egui::ViewportId::ROOT);
+        let editor = Editor::new(
+            &window,
+            &renderer.device,
+            renderer.config.format,
+            egui::ViewportId::ROOT,
+        );
         let app_settings = AppSettings::load_or_default("settings.ron");
         let app_mode = AppMode::default();
+
+        let scripts = match ScriptSystem::new("assets/scripts") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("ScriptSystem init failed: {:#}", e);
+                ScriptSystem::new("__no_scripts__")
+                    .expect("fallback ScriptSystem failed")
+            }
+        };
+
         let mut app = Self {
             game, world, input, time: Time::new(),
             window: window.clone(), renderer, editor,
-            ui_state: UiState::new(),
             mouse_press_pos: None, viewport_rect: None,
             rmb_press_time: None, rmb_press_pos: None, rmb_dragged: false,
             particles: Vec::new(), projectiles: Vec::new(),
@@ -256,6 +275,7 @@ impl<G: Game> App<G> {
             collider_cache: None,
             navmesh: None,
             ai_system: AiSystem::new(),
+            scripts,
             footstep_timer: 0.0,
             asset_db,
             hot_reload: crate::assets::HotReload::new(),
@@ -279,7 +299,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // Применить начальные настройки к окну и аудио
         app.apply_settings_to_window(window.clone());
         app.apply_settings_to_audio();
 
@@ -600,7 +619,6 @@ impl<G: Game> App<G> {
 
         let terrain_ref = self.renderer.terrain.as_ref();
 
-        // ColliderCache: если ещё не построен — строим локально.
         let cache_local;
         let cache_ref: &ColliderCache = if let Some(c) = self.collider_cache.as_ref() {
             c
@@ -996,6 +1014,23 @@ impl<G: Game> App<G> {
         }
     }
 
+    fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) {
+        for cmd in commands {
+            match cmd {
+                ScriptCommand::PlaySound { sound, position: _ } => {
+                    if let Some(audio) = self.audio.as_mut() {
+                        audio.play(&sound);
+                    }
+                }
+                ScriptCommand::SendEvent { name } => {
+                    self.world.send(ScriptEvent::new(name.clone()));
+                    log::trace!("[script emit] {}", name);
+                }
+                ScriptCommand::Log { .. } => {}
+            }
+        }
+    }
+
     fn process_state_input(&mut self, elwt: &ActiveEventLoop) {
         self.input.map.clear_contexts();
         if self.editor.state.play.active {
@@ -1013,7 +1048,8 @@ impl<G: Game> App<G> {
 
         let egui_wants_keyboard = self.editor.egui_ctx.wants_keyboard_input();
         let esc_pressed = self.input.key_pressed(KeyCode::Escape);
-        let esc_free = esc_pressed && !egui_wants_keyboard && !self.ui_state.command_palette_open;
+        // ИЗМЕНЕНО: self.ui_state.command_palette_open → self.editor.state.command_palette_open
+        let esc_free = esc_pressed && !egui_wants_keyboard && !self.editor.state.command_palette_open;
 
         if esc_free {
             if self.editor.state.play.active {
@@ -1061,7 +1097,6 @@ impl<G: Game> App<G> {
         self.input.tick_begin_frame();
         self.game.camera_mut().update_shake(self.time.delta);
 
-        // === TERRAIN: flush dirty region (один раз за кадр) ===
         self.flush_terrain_dirty();
 
         let reloaded = self.hot_reload.tick(&mut self.asset_db, &mut self.renderer);
@@ -1159,11 +1194,6 @@ impl<G: Game> App<G> {
 
             self.update_elevator_ding();
 
-            // === ColliderCache: rebuild раз в кадр перед physics ===
-            //
-            // Нужен для `update_player` (игрок) и для kinematic
-            // support'а. Если сцена большая — этот rebuild O(n),
-            // но он замещает 4-5 O(n) обходов в capsule_hits.
             if self.editor.state.play.active {
                 let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
                 cache.build(&self.world);
@@ -1172,6 +1202,14 @@ impl<G: Game> App<G> {
             self.physics.step(&mut self.world, self.renderer.terrain.as_ref(), dt);
 
             self.ai_system.update(&mut self.world, self.navmesh.as_ref(), dt);
+
+            let script_commands = self.scripts.update(
+                &mut self.world,
+                &self.input,
+                dt,
+                self.time.elapsed,
+            );
+            self.apply_script_commands(script_commands);
 
             if self.editor.state.play.active {
                 self.input.editor_captured = false;
@@ -1196,7 +1234,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // === TERRAIN: обновить cursor_world для UI ===
         if !in_menu {
             self.update_terrain_cursor();
         }
@@ -1225,13 +1262,14 @@ impl<G: Game> App<G> {
             let shift = self.input.key_down(KeyCode::ShiftLeft) || self.input.key_down(KeyCode::ShiftRight);
 
             if ctrl && !shift && !alt && self.input.key_pressed(KeyCode::KeyP) {
-                self.ui_state.command_palette_open = true;
-                self.ui_state.command_palette_query.clear();
-                self.ui_state.command_palette_selected = 0;
+                // ИЗМЕНЕНО: self.ui_state.* → self.editor.state.*
+                self.editor.state.command_palette_open = true;
+                self.editor.state.command_palette_query.clear();
+                self.editor.state.command_palette_selected = 0;
             }
-            if self.ui_state.command_palette_open && self.input.key_pressed(KeyCode::Escape) {
-                self.ui_state.command_palette_open = false;
-                self.ui_state.command_palette_query.clear();
+            if self.editor.state.command_palette_open && self.input.key_pressed(KeyCode::Escape) {
+                self.editor.state.command_palette_open = false;
+                self.editor.state.command_palette_query.clear();
             }
             if ctrl && !shift && !alt {
                 for (i, key) in [
@@ -1348,12 +1386,11 @@ impl<G: Game> App<G> {
         };
 
         let egui_ctx = self.editor.egui_ctx.clone();
-        let ui_state = &mut self.ui_state;
         let editor_state = &mut self.editor.state;
         let world = &mut self.world;
         let asset_db = &mut self.asset_db;
+        let scripts_ref: &crate::scripting::ScriptSystem = &self.scripts;
 
-        // Меню рендерится ПОВЕРХ редактора, если мы в главном меню.
         let has_save = std::path::Path::new("saves/slot_0.ron").exists();
         let in_menu_for_ui = self.mode.is_menu();
 
@@ -1368,16 +1405,24 @@ impl<G: Game> App<G> {
                     ctx, mode_ref, settings_ref, has_save,
                 );
             } else {
-                let action = editor_ui::draw(
-                    ctx, ui_state, editor_state, world,
-                    &mut postfx, &stats, &assets, &audio_snapshot,
+                // ИЗМЕНЕНО: единый вызов panels::draw_all вместо editor_ui::draw
+                let action = panels::draw_all(
+                    ctx,
+                    editor_state,
+                    world,
+                    &mut postfx,
+                    &stats,
+                    &assets,
+                    &audio_snapshot,
                     asset_db,
+                    scripts_ref,
                 );
-                if let Some(a) = action { editor_state.pending_action = Some(a); }
+                if let Some(a) = action {
+                    editor_state.pending_action = Some(a);
+                }
             }
         });
 
-        // Применить действия меню.
         if in_menu_for_ui {
             if menu_actions.new_game {
                 self.mode = AppMode::InGame;
@@ -1411,7 +1456,6 @@ impl<G: Game> App<G> {
             }
         }
 
-        // === Проверить запрос на выход в главное меню от игры ===
         if self.game.take_quit_to_menu() {
             self.mode = AppMode::MainMenu;
             log::info!("Returning to main menu");
@@ -1694,6 +1738,12 @@ impl<G: Game> App<G> {
             if let Some(src) = self.world.get::<AudioSource>(e).cloned() {
                 let mut s = src;
                 s.playing = true;
+                self.world.insert(new_e, s);
+            }
+
+            if let Some(script) = self.world.get::<crate::scripting::ScriptComponent>(e).cloned() {
+                let mut s = script;
+                s.started = false;
                 self.world.insert(new_e, s);
             }
 
@@ -2276,7 +2326,48 @@ impl<G: Game> App<G> {
                 self.bake_navmesh();
             }
 
-            // === TERRAIN ===
+            EditorAction::ReloadScripts => {
+                let n = self.scripts.engine.reload_all();
+                log::info!("Scripting: manually reloaded {} scripts", n);
+                let entities: Vec<Entity> = self.world
+                    .query::<crate::scripting::ScriptComponent>()
+                    .map(|(e, _)| e)
+                    .collect();
+                for e in entities {
+                    if let Some(c) = self.world.get_mut::<crate::scripting::ScriptComponent>(e) {
+                        c.started = false;
+                    }
+                }
+            }
+            EditorAction::AttachScript { entity, script } => {
+                if self.world.entities().contains(&entity) {
+                    self.world.insert(
+                        entity,
+                        crate::scripting::ScriptComponent::new(script.clone()),
+                    );
+                    log::info!("Attached script '{}' to entity #{}", script, entity);
+                }
+            }
+            EditorAction::DetachScript(entity) => {
+                if self.world.entities().contains(&entity) {
+                    self.world.remove::<crate::scripting::ScriptComponent>(entity);
+                    log::info!("Detached script from entity #{}", entity);
+                }
+            }
+            EditorAction::SelectEntity(entity) => {
+                if self.world.entities().contains(&entity) {
+                    self.editor.state.select_single(entity);
+                    if let Some(center) = crate::editor::gizmo::group_center(
+                        &self.world, &[entity]
+                    ) {
+                        let radius = crate::editor::gizmo::group_radius(
+                            &self.world, &[entity], &self.renderer,
+                        );
+                        self.game.camera_mut().focus_on(center, radius);
+                    }
+                }
+            }
+
             EditorAction::TerrainRegenerate => {
                 if let Some(hm) = self.renderer.terrain.as_mut() {
                     hm.auto_bake_splat();
@@ -2322,7 +2413,7 @@ impl<G: Game> App<G> {
                     .add_filter("PNG", &["png"])
                     .add_filter("R16", &["r16"])
                     .pick_file();
-                let Some(path) = path else { return };
+                let Some(path) = path else { return; };
                 let ext = path.extension()
                     .and_then(|s| s.to_str())
                     .map(|s| s.to_lowercase())
