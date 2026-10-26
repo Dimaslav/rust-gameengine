@@ -7,7 +7,7 @@ default-run = "rust-engine"
 [dependencies]
 # --- Оконная система ---
 winit = "0.30"
-
+rhai = "1"
 # --- Графика (последняя 25.x) ---
 wgpu = "25"
 
@@ -39,6 +39,9 @@ ron = "0.8"
 egui = "0.32"
 egui-wgpu = "0.32"
 egui-winit = "0.32"
+
+# --- Редактор: thumbnails для Content Browser (используется в Шаге 3) ---
+egui_extras = { version = "0.32", features = ["image", "svg"] }
 
 # --- Аудио (дефолтные фичи, чтобы был cpal) ---
 rodio = "0.21"
