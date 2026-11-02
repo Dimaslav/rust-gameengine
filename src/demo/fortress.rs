@@ -2718,6 +2718,8 @@ impl Game for FortressDemo {
                 );
             }
         }
+    }      // ← ДОБАВЬ: закрывает fn collect_ui
+}          // ← ДОБАВЬ: закрывает impl Game for FortressDemo
 
 // ============================================================
 // Helpers — RNG
