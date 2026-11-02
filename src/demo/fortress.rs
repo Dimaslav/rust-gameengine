@@ -2328,10 +2328,7 @@ impl Game for FortressDemo {
         if self.player_stats.unspent_points > 0 && !is_victory && !self.show_character_sheet {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
-            let text = format!(
-                "⭐ {} unspent stat points — press Tab",
-                self.player_stats.unspent_points
-            );
+            let text = crate::t!("hud.unspent_points", count = self.player_stats.unspent_points);
             let tw = ui.text_width(&text, 14.0);
             let y = sh - 24.0 - 22.0 - 6.0 - 12.0 - 22.0;
             ui.rect(sw * 0.5 - tw * 0.5 - 12.0, y - 4.0, tw + 24.0, 22.0,
@@ -2349,7 +2346,7 @@ impl Game for FortressDemo {
             let reload_progress = rt.reload_progress(w);
             let out_of_ammo = mag == 0 && reserve == 0;
 
-            let ammo_text = format!("{}/{} · reserve {}", mag, mag_size, reserve);
+            let ammo_text = format!("{}/{} · {} {}", mag, mag_size, crate::t!("hud.reserve"), reserve);
             let size = 22.0;
             let name_size = 14.0;
             let sw = ui.screen_w();
@@ -2378,7 +2375,7 @@ impl Game for FortressDemo {
                 let bar_y = y - bar_h - 6.0;
                 ui.rect(x, bar_y, box_w, bar_h, [0.15, 0.15, 0.18, 0.9]);
                 ui.rect(x, bar_y, box_w * reload_progress, bar_h, [0.6, 0.9, 1.0, 1.0]);
-                ui.text_centered(x + box_w * 0.5, bar_y - 10.0, "RELOADING",
+                ui.text_centered(x + box_w * 0.5, bar_y - 10.0, crate::t!("hud.reloading"),
                     11.0, [0.8, 0.9, 1.0, 1.0]);
             }
         }
@@ -2387,7 +2384,7 @@ impl Game for FortressDemo {
         if let Some(rt) = self.current_runtime()
             && rt.mag == 0 && rt.reserve == 0 && !is_victory {
                 ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() * 0.5 + 60.0,
-                    "OUT OF AMMO", 28.0, [1.0, 0.3, 0.3, 0.9]);
+                    crate::t!("hud.out_of_ammo"), 28.0, [1.0, 0.3, 0.3, 0.9]);
             }
 
         // ADS vignette.
@@ -2476,8 +2473,8 @@ impl Game for FortressDemo {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
             ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.7]);
-            ui.text_centered(sw * 0.5, sh * 0.3, "VICTORY", 64.0, [1.0, 0.85, 0.4, 1.0]);
-            ui.text_centered(sw * 0.5, sh * 0.42, "The Fallen Citadel", 24.0,
+            ui.text_centered(sw * 0.5, sh * 0.3, crate::t!("victory.title"), 64.0, [1.0, 0.85, 0.4, 1.0]);
+            ui.text_centered(sw * 0.5, sh * 0.42, crate::t!("victory.subtitle"), 24.0,
                 [0.8, 0.85, 0.95, 1.0]);
             let stats = format!(
                 "Kills: {}  ·  Time: {:.1}s  ·  Level: {}",
@@ -2505,7 +2502,7 @@ impl Game for FortressDemo {
             ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
             ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
 
-            ui.text_centered(sw * 0.5, py + 30.0, "PAUSED", 28.0, [1.0, 0.9, 0.6, 1.0]);
+            ui.text_centered(sw * 0.5, py + 30.0, crate::t!("pause.title"), 28.0, [1.0, 0.9, 0.6, 1.0]);
             ui.text_centered(sw * 0.5, py + 58.0, self.campaign.stage.title(),
                 14.0, [0.7, 0.75, 0.85, 1.0]);
 
@@ -2513,14 +2510,14 @@ impl Game for FortressDemo {
             let bh = 36.0;
             let bx = sw * 0.5 - bw * 0.5;
 
-            if ui.button(bx, py + 82.0, bw, bh, "Resume") {
+            if ui.button(bx, py + 82.0, bw, bh, crate::t!("pause.resume")) {
                 self.demo_paused = false;
             }
-            if ui.button(bx, py + 122.0, bw, bh, "Heal +25") {
+            if ui.button(bx, py + 122.0, bw, bh, crate::t!("pause.heal")) {
                 self.heal(25.0);
-                self.hud.push("Healed +25");
+                self.hud.push(crate::t!("pause.healed"));
             }
-            if ui.button(bx, py + 162.0, bw, bh, "Refill Ammo") {
+            if ui.button(bx, py + 162.0, bw, bh, crate::t!("pause.refill_ammo")) {
                 for i in 0..self.weapons.len() {
                     if let (Some(w), Some(rt)) = (
                         self.weapons.get(i).cloned(),
@@ -2534,12 +2531,12 @@ impl Game for FortressDemo {
                 }
                 self.hud.push("Ammo refilled");
             }
-            if ui.button(bx, py + 202.0, bw, bh, "🏠 Quit to Main Menu") {
+            if ui.button(bx, py + 202.0, bw, bh, crate::t!("pause.quit_menu")) {
                 self.pending_quit_to_menu = true;
                 self.demo_paused = false;
             }
 
-            ui.text_centered(sw * 0.5, py + 258.0, "SAVE / LOAD", 16.0,
+            ui.text_centered(sw * 0.5, py + 258.0, crate::t!("pause.save_load"), 16.0,
                 [0.8, 0.85, 1.0, 1.0]);
 
             let slot_w = 420.0;
@@ -2587,10 +2584,10 @@ impl Game for FortressDemo {
             }
 
             ui.text_centered(sw * 0.5, py + ph - 18.0,
-                "S = Save · L = Load · X = Delete",
+                crate::t!("pause.hint"),
                 11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · E — говорить · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
+            let text = crate::t!("hud.controls_hint");
             ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
                 text, 12.0, [1.0, 1.0, 1.0, 0.5]);
         }
@@ -2714,7 +2711,7 @@ impl Game for FortressDemo {
                 let sh = ui.screen_h();
                 ui.text_centered(
                     sw * 0.5, sh * 0.5 + 50.0,
-                    "[E]  Talk", 18.0, [1.0, 0.9, 0.5, 1.0],
+                    crate::t!("hud.talk_hint"), 18.0, [1.0, 0.9, 0.5, 1.0],
                 );
             }
         }

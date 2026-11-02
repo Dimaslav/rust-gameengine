@@ -233,6 +233,9 @@ impl<G: Game> App<G> {
 
         let app_settings = AppSettings::load_or_default("settings.ron");
         let app_mode = AppMode::default();
+        
+                // === Locale ===
+        crate::game::locale::set_language(&app_settings.language);
 
         let scripts = match ScriptSystem::new("assets/scripts") {
             Ok(s) => s,

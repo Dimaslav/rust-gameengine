@@ -6,6 +6,7 @@ pub mod decals;
 pub mod dialogs;
 pub mod items;
 pub mod lights;
+pub mod locale;
 pub mod rpg;
 pub mod viewmodel;
 pub mod stats;

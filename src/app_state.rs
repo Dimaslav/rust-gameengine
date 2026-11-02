@@ -28,11 +28,26 @@ impl AppMode {
 // AppSettings
 // ============================================================
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)] pub window: WindowSettings,
     #[serde(default)] pub graphics: GraphicsSettings,
     #[serde(default)] pub audio: AudioSettings,
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+fn default_language() -> String { "ru".to_string() }
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            window: WindowSettings::default(),
+            graphics: GraphicsSettings::default(),
+            audio: AudioSettings::default(),
+            language: default_language(),
+        }
+    }
 }
 
 impl AppSettings {
