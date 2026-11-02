@@ -2621,38 +2621,81 @@ impl Game for FortressDemo {
         }
 
         // === Dialog UI ===
-        if let Some(session) = &self.dialog_session {
-            let clicked = crate::ui::DialogUi::draw(ui, session);
-            match clicked {
+        let dialog_click: Option<usize> = if let Some(session_ref) = self.dialog_session.as_ref() {
+            let ctx = crate::game::dialogs::DialogContext {
+                quest_manager: &self.quest_manager,
+                inventory: &self.inventory,
+                gold: self.campaign.gold,
+                player_level: self.player_stats.experience.level,
+                has_key_red: self.campaign.has_key_red,
+            };
+            crate::ui::DialogUi::draw(ui, session_ref, &ctx)
+        } else {
+            None
+        };
+
+        if self.dialog_session.is_some() {
+            match dialog_click {
                 Some(crate::ui::dialog::CLOSE_SENTINEL) => {
                     self.dialog_session = None;
                 }
                 Some(idx) => {
-                    if let Some(sess) = self.dialog_session.as_mut() {
-                        let (effects, ended) = sess.choose(idx);
-                        if ended { self.dialog_session = None; }
-                        for effect in effects {
-                            match effect {
-                                DialogEffect::StartQuest(qid) => {
-                                    self.quest_manager.start_quest(&qid);
-                                    self.hud.push(format!("📜 Quest started: {}", qid));
-                                }
-                                DialogEffect::GiveItem { id, count } => {
-                                    self.try_pickup(&id, count);
-                                }
-                                DialogEffect::GiveGold(amt) => {
-                                    self.campaign.gold += amt;
-                                    self.hud.push(format!("+{} Gold", amt));
-                                }
-                                DialogEffect::GiveXp(amt) => {
-                                    let levels = self.player_stats.gain_xp(amt);
-                                    self.hud.push(format!("+{} XP", amt));
-                                    if levels > 0 {
-                                        self.hud.push(format!(
-                                            "⭐ LEVEL UP → Lv {}",
-                                            self.player_stats.experience.level
-                                        ));
+                    let (effects, ended) = if let Some(sess) = self.dialog_session.as_mut() {
+                        sess.choose(idx)
+                    } else {
+                        (Vec::new(), false)
+                    };
+                    if ended {
+                        self.dialog_session = None;
+                    }
+                    for effect in effects {
+                        match effect {
+                            DialogEffect::StartQuest(qid) => {
+                                self.quest_manager.start_quest(&qid);
+                                self.hud.push(format!("📜 Quest started: {}", qid));
+                            }
+                            DialogEffect::CompleteQuest(qid) => {
+                                let rewards = self.quest_manager.complete_quest(&qid);
+                                if !rewards.is_empty() {
+                                    self.hud.push(format!("⭐ Quest completed: {}", qid));
+                                    for reward in rewards {
+                                        match reward {
+                                            Reward::Xp(amt) => {
+                                                let levels = self.player_stats.gain_xp(amt);
+                                                self.hud.push(format!("+{} XP", amt));
+                                                if levels > 0 {
+                                                    self.hud.push(format!(
+                                                        "⭐ LEVEL UP → Lv {}",
+                                                        self.player_stats.experience.level
+                                                    ));
+                                                }
+                                            }
+                                            Reward::Gold(amt) => {
+                                                self.campaign.gold += amt;
+                                                self.hud.push(format!("+{} Gold", amt));
+                                            }
+                                            Reward::Item { id, count } => {
+                                                self.try_pickup(&id, count);
+                                            }
+                                        }
                                     }
+                                }
+                            }
+                            DialogEffect::GiveItem { id, count } => {
+                                self.try_pickup(&id, count);
+                            }
+                            DialogEffect::GiveGold(amt) => {
+                                self.campaign.gold += amt;
+                                self.hud.push(format!("+{} Gold", amt));
+                            }
+                            DialogEffect::GiveXp(amt) => {
+                                let levels = self.player_stats.gain_xp(amt);
+                                self.hud.push(format!("+{} XP", amt));
+                                if levels > 0 {
+                                    self.hud.push(format!(
+                                        "⭐ LEVEL UP → Lv {}",
+                                        self.player_stats.experience.level
+                                    ));
                                 }
                             }
                         }
@@ -2661,7 +2704,7 @@ impl Game for FortressDemo {
                 None => {}
             }
         } else if self.last_play_mode && !self.demo_paused {
-            // Подсказка "E — Talk", если игрок смотрит на NPC.
+            // Подсказка "E — Talk".
             let cam_pos = self.camera.position();
             let cam_dir = self.camera.forward();
             if crate::game::dialogs::find_npc_in_front(
@@ -2675,8 +2718,6 @@ impl Game for FortressDemo {
                 );
             }
         }
-    }
-}
 
 // ============================================================
 // Helpers — RNG

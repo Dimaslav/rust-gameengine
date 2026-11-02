@@ -1,0 +1,13 @@
+(
+    id: "hunt_wolves",
+    title: "Очистить двор",
+    description: "Убей двух стражников во дворе и вернись к Elder'у.",
+    objectives: [
+        (Kill: (target_prefix: "Act1_Enemy_", count: 2)),
+    ],
+    rewards: [
+        Xp(100),
+        Gold(200),
+    ],
+    auto_complete: false,
+)

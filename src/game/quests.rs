@@ -1,7 +1,13 @@
+//! Data-driven квесты.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+// ============================================================
+// Определения
+// ============================================================
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QuestDef {
@@ -10,6 +16,14 @@ pub struct QuestDef {
     pub description: String,
     pub objectives: Vec<Objective>,
     pub rewards: Vec<Reward>,
+    /// `true` — награда выдаётся автоматически при выполнении.
+    /// `false` — игрок должен прийти к NPC и сдать квест через диалог.
+    #[serde(default = "default_auto_complete")]
+    pub auto_complete: bool,
+}
+
+fn default_auto_complete() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -25,9 +39,17 @@ pub enum Reward {
     Item { id: String, count: u32 },
 }
 
+// ============================================================
+// QuestManager
+// ============================================================
+
 pub struct QuestManager {
     pub registry: HashMap<String, QuestDef>,
-    pub active: HashMap<String, u32>, // quest_id -> progress
+    /// Активные квесты: `id → progress`.
+    pub active: HashMap<String, u32>,
+    /// Квесты, чьи цели выполнены, но не сданы (`auto_complete == false`).
+    pub objectives_done: HashSet<String>,
+    /// Сданные квесты (награда уже получена).
     pub completed: HashSet<String>,
 }
 
@@ -36,6 +58,7 @@ impl QuestManager {
         Self {
             registry: HashMap::new(),
             active: HashMap::new(),
+            objectives_done: HashSet::new(),
             completed: HashSet::new(),
         }
     }
@@ -47,7 +70,6 @@ impl QuestManager {
             log::warn!("Quests dir {} not found, skipping.", dir.display());
             return Ok(manager);
         }
-
         let entries = std::fs::read_dir(dir).context("read quests dir")?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -62,41 +84,92 @@ impl QuestManager {
     }
 
     pub fn start_quest(&mut self, id: &str) {
-        if self.registry.contains_key(id) && !self.completed.contains(id) && !self.active.contains_key(id) {
+        if self.registry.contains_key(id)
+            && !self.completed.contains(id)
+            && !self.active.contains_key(id)
+        {
             self.active.insert(id.to_string(), 0);
             log::info!("Quest started: {}", id);
         }
     }
 
-    /// Возвращает награды, если квест был завершен этим действием.
+    /// Возвращает награды **только для auto-complete квестов**.
+    /// Для квестов с `auto_complete: false` возвращается пустой Vec;
+    /// они переходят в `objectives_done`, и награда выдаётся через `complete_quest`.
     pub fn on_enemy_killed(&mut self, target_name: &str) -> Vec<Reward> {
-        let mut rewards = Vec::new();
-        let mut completed_quests = Vec::new();
+        let already_done: HashSet<String> = self.objectives_done.clone();
+        let mut newly_completed: Vec<String> = Vec::new();
+        let mut rewards: Vec<Reward> = Vec::new();
 
         for (qid, progress) in self.active.iter_mut() {
-            let def = &self.registry[qid];
+            if already_done.contains(qid) {
+                continue;
+            }
+            let Some(def) = self.registry.get(qid) else {
+                continue;
+            };
             for obj in &def.objectives {
                 if let Objective::Kill { target_prefix, count } = obj {
                     if target_name.starts_with(target_prefix) {
                         *progress += 1;
                         if *progress >= *count {
-                            completed_quests.push(qid.clone());
+                            newly_completed.push(qid.clone());
                         }
-                        break; // Only count once per kill per quest
+                        break;
                     }
                 }
             }
         }
 
-        for qid in completed_quests {
-            self.active.remove(&qid);
-            self.completed.insert(qid.clone());
-            if let Some(def) = self.registry.get(&qid) {
-                log::info!("Quest completed: {}", qid);
-                rewards.extend(def.rewards.clone());
+        for qid in newly_completed {
+            let auto = self.registry.get(&qid).map(|d| d.auto_complete).unwrap_or(true);
+            if auto {
+                self.active.remove(&qid);
+                self.completed.insert(qid.clone());
+                if let Some(def) = self.registry.get(&qid) {
+                    log::info!("Quest completed (auto): {}", qid);
+                    rewards.extend(def.rewards.clone());
+                }
+            } else {
+                self.objectives_done.insert(qid.clone());
+                log::info!("Quest objectives done (awaiting turn-in): {}", qid);
             }
         }
 
         rewards
+    }
+
+    /// Сдать квест. Возвращает награды, если квест был готов к сдаче.
+    pub fn complete_quest(&mut self, id: &str) -> Vec<Reward> {
+        if !self.objectives_done.contains(id) {
+            log::warn!("complete_quest: '{}' not ready for turn-in", id);
+            return vec![];
+        }
+        self.active.remove(id);
+        self.objectives_done.remove(id);
+        self.completed.insert(id.to_string());
+        if let Some(def) = self.registry.get(id) {
+            log::info!("Quest turned in: {}", id);
+            return def.rewards.clone();
+        }
+        vec![]
+    }
+
+    pub fn is_objectives_done(&self, id: &str) -> bool {
+        self.objectives_done.contains(id)
+    }
+
+    pub fn is_active(&self, id: &str) -> bool {
+        self.active.contains_key(id)
+    }
+
+    pub fn is_completed(&self, id: &str) -> bool {
+        self.completed.contains(id)
+    }
+}
+
+impl Default for QuestManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

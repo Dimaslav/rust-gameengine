@@ -1,35 +1,4 @@
 //! Диалоговый граф: структуры данных, загрузка из RON, состояние сессии.
-//!
-//! # Формат
-//!
-//! Диалоги хранятся в `assets/dialogs/*.ron`. Каждый — `DialogGraph`
-//! с узлами (`DialogNode`). Узел содержит реплику NPC и список опций.
-//!
-//! ```ron
-//! (
-//!     id: "elder",
-//!     speaker_name: "Elder",
-//!     start: "intro",
-//!     nodes: {
-//!         "intro": (
-//!             speaker: "Elder",
-//!             text: "Приветствую, путник.",
-//!             options: [
-//!                 (text: "Что мне сделать?", next: Some("quest_offer"), effect: []),
-//!                 (text: "Просто прохожу мимо.", next: None, effect: []),
-//!             ],
-//!         ),
-//!         "quest_offer": (
-//!             speaker: "Elder",
-//!             text: "Убей 5 волков.",
-//!             options: [
-//!                 (text: "Согласен.", next: Some("thanks"),
-//!                     effect: [StartQuest("act1_guards")]),
-//!             ],
-//!         ),
-//!     },
-//! )
-//! ```
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,9 +6,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ecs::Entity;
+use crate::game::items::Inventory;
+use crate::game::quests::QuestManager;
 
 // ============================================================
-// Компонент: NPC, у которого есть диалог
+// DialogNpc
 // ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +68,7 @@ impl DialogGraph {
 }
 
 // ============================================================
-// DialogNode
+// DialogNode / DialogOption
 // ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,17 +81,19 @@ pub struct DialogNode {
     pub on_enter: Vec<DialogEffect>,
 }
 
-// ============================================================
-// DialogOption
-// ============================================================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogOption {
     pub text: String,
-    /// `None` → конец диалога.
     #[serde(default)]
     pub next: Option<String>,
-    /// Условие показа (сейчас — reserved).
+    /// Условие показа. Синтаксис:
+    /// - `quest_active:<id>` — квест в процессе
+    /// - `quest_done:<id>` — квест завершён
+    /// - `quest_not_started:<id>` — ещё не начат
+    /// - `quest_objectives_done:<id>` — цели выполнены, ждёт сдачи
+    /// - `has_item:<id>` или `has_item:<id>:<count>` — предмет в инвентаре
+    /// - `has_key_red` — есть красный ключ
+    /// - `gold >= N`, `level >= N` — числовые проверки
     #[serde(default)]
     pub condition: Option<String>,
     #[serde(default)]
@@ -134,13 +107,89 @@ pub struct DialogOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DialogEffect {
     StartQuest(String),
+    CompleteQuest(String),
     GiveItem { id: String, count: u32 },
     GiveGold(u32),
     GiveXp(u32),
 }
 
 // ============================================================
-// DialogSession — runtime
+// DialogContext — состояние для проверки условий
+// ============================================================
+
+pub struct DialogContext<'a> {
+    pub quest_manager: &'a QuestManager,
+    pub inventory: &'a Inventory,
+    pub gold: u32,
+    pub player_level: u32,
+    pub has_key_red: bool,
+}
+
+impl<'a> DialogContext<'a> {
+    pub fn eval_condition(&self, cond: &str) -> bool {
+        let cond = cond.trim();
+        if cond.is_empty() {
+            return true;
+        }
+
+        // "kind:arg" — простые проверки
+        if let Some((kind, arg)) = cond.split_once(':') {
+            let arg = arg.trim();
+            return match kind.trim() {
+                "quest_active" => self.quest_manager.active.contains_key(arg),
+                "quest_done" => self.quest_manager.completed.contains(arg),
+                "quest_not_started" => {
+                    !self.quest_manager.active.contains_key(arg)
+                        && !self.quest_manager.completed.contains(arg)
+                }
+                "quest_objectives_done" => self.quest_manager.is_objectives_done(arg),
+                "has_item" => {
+                    let (id, count) = arg
+                        .split_once(':')
+                        .map(|(a, b)| (a.trim(), b.trim().parse::<u32>().unwrap_or(1)))
+                        .unwrap_or((arg, 1));
+                    self.inventory.count_of(id) >= count
+                }
+                _ => {
+                    log::warn!("unknown condition: {}", cond);
+                    false
+                }
+            };
+        }
+
+        // "field >= N"
+        if let Some((field, val)) = cond.split_once(">=") {
+            let v: i64 = val.trim().parse().unwrap_or(0);
+            return match field.trim() {
+                "gold" => self.gold as i64 >= v,
+                "level" => self.player_level as i64 >= v,
+                _ => false,
+            };
+        }
+
+        // "field <= N"
+        if let Some((field, val)) = cond.split_once("<=") {
+            let v: i64 = val.trim().parse().unwrap_or(0);
+            return match field.trim() {
+                "gold" => self.gold as i64 <= v,
+                "level" => self.player_level as i64 <= v,
+                _ => false,
+            };
+        }
+
+        // Boolean flag
+        match cond {
+            "has_key_red" => self.has_key_red,
+            _ => {
+                log::warn!("unknown condition: {}", cond);
+                false
+            }
+        }
+    }
+}
+
+// ============================================================
+// DialogSession
 // ============================================================
 
 pub struct DialogSession {
@@ -167,7 +216,23 @@ impl DialogSession {
         self.graph.node(&self.current_node)
     }
 
-    /// Выбрать опцию. Возвращает `(effect, ended)`. `ended == true` → закрыть диалог.
+    /// Список доступных опций: `(original_idx, &DialogOption)`.
+    pub fn available_options<'b>(&'b self, ctx: &DialogContext) -> Vec<(usize, &'b DialogOption)> {
+        let Some(node) = self.node() else {
+            return vec![];
+        };
+        node.options
+            .iter()
+            .enumerate()
+            .filter(|(_, opt)| {
+                opt.condition
+                    .as_deref()
+                    .map_or(true, |c| ctx.eval_condition(c))
+            })
+            .collect()
+    }
+
+    /// Выбор опции по **оригинальному** индексу (не по индексу в фильтрованном списке).
     pub fn choose(&mut self, idx: usize) -> (Vec<DialogEffect>, bool) {
         let Some(node) = self.node().cloned() else {
             return (Vec::new(), true);
@@ -195,8 +260,6 @@ impl DialogSession {
 // Поиск NPC перед игроком
 // ============================================================
 
-/// Простой поиск ближайшего NPC в направлении взгляда.
-/// Не проверяет стены (для демо — приемлемо).
 pub fn find_npc_in_front(
     world: &crate::ecs::World,
     cam_pos: glam::Vec3,
@@ -206,12 +269,18 @@ pub fn find_npc_in_front(
 ) -> Option<Entity> {
     let mut best: Option<(Entity, f32)> = None;
     for (e, _) in world.query::<DialogNpc>() {
-        let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
+        let Some(t) = world.get::<crate::game::components::Transform>(e) else {
+            continue;
+        };
         let to = t.position - cam_pos;
         let dist = to.length();
-        if dist > max_dist || dist < 1e-4 { continue; }
+        if dist > max_dist || dist < 1e-4 {
+            continue;
+        }
         let dot = to.normalize_or_zero().dot(cam_dir);
-        if dot < max_angle_cos { continue; }
+        if dot < max_angle_cos {
+            continue;
+        }
         if best.is_none_or(|(_, d)| dist < d) {
             best = Some((e, dist));
         }
