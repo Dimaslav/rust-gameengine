@@ -1,0 +1,12 @@
+(
+    id: "act1_guards",
+    title: "Пробуждение",
+    description: "Убей стражников у ворот.",
+    objectives: [
+        (Kill: (target_prefix: "Act1_Enemy_", count: 2)),
+    ],
+    rewards: [
+        Xp(50),
+        Gold(100),
+    ],
+)

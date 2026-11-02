@@ -414,7 +414,7 @@ impl<G: Game> App<G> {
         let Some(region) = self.editor.state.terrain.dirty_region.take() else { return };
         let brush = self.editor.state.terrain.brush;
         let tex_size = self.editor.state.terrain.texture_size;
-        let Some(hm) = self.renderer.terrain.as_ref() else { return };
+        let Some(hm) = self.renderer.terrain.as_ref() else { return; };
         let (x0, z0, x1, z1) = region.to_mesh_vertex_rect(hm.resolution);
         if let Some(mesh) = self.renderer.meshes.get_mut("terrain") {
             update_terrain_mesh_region(&self.renderer.queue, mesh, hm, x0, z0, x1, z1);
@@ -872,7 +872,6 @@ impl<G: Game> App<G> {
             self.input.map.push_context("editor");
             if self.editor.state.flying { self.input.map.push_context("fly"); }
         }
-        // ИЗМЕНЕНО (egui 0.37)
         let egui_wants_keyboard = self.editor.egui_ctx.egui_wants_keyboard_input();
         let esc_pressed = self.input.key_pressed(KeyCode::Escape);
         let esc_free = esc_pressed && !egui_wants_keyboard && !self.editor.state.command_palette_open;
@@ -921,6 +920,13 @@ impl<G: Game> App<G> {
             HotkeyAction::Save => { self.editor.state.pending_action = Some(EditorAction::Save); }
             HotkeyAction::LoadScene => { self.editor.state.pending_action = Some(EditorAction::Load); }
             HotkeyAction::NewScene => { self.editor.state.pending_action = Some(EditorAction::NewScene); }
+            
+            HotkeyAction::QuickSave => { self.editor.state.pending_action = Some(EditorAction::QuickSave); }
+            HotkeyAction::QuickLoad => { 
+                let path = self.editor.state.quick_save_path.clone();
+                self.editor.state.pending_action = Some(EditorAction::LoadPath(path)); 
+            }
+
             HotkeyAction::Undo => { self.editor.state.pending_action = Some(EditorAction::Undo); }
             HotkeyAction::Redo => { self.editor.state.pending_action = Some(EditorAction::Redo); }
             HotkeyAction::Copy => { self.editor.state.pending_action = Some(EditorAction::CopyEntity); }
@@ -982,9 +988,6 @@ impl<G: Game> App<G> {
         let mut ai_ms = 0.0f32;
         let mut scripts_ms = 0.0f32;
         
-        
-        
-
         self.time.tick();
         self.input.tick_begin_frame();
         self.game.camera_mut().update_shake(self.time.delta);
@@ -1224,7 +1227,6 @@ impl<G: Game> App<G> {
         let settings_ref = &mut self.settings;
         let mut menu_actions = game_menu::MenuActions::default();
 
-        // ИЗМЕНЕНО (egui 0.37): `run` → `run_ui`.
         let full_output = egui_ctx.run_ui(raw_input, |ctx| {
             if in_menu_for_ui {
                 menu_actions = game_menu::draw(ctx, mode_ref, settings_ref, has_save);
@@ -1284,6 +1286,51 @@ impl<G: Game> App<G> {
 
         self.game.apply_postfx(postfx);
         self.editor.egui_state.handle_platform_output(&self.window, full_output.platform_output);
+
+        // === DRAG AND DROP ASSETS ===
+        let egui_wants_pointer = self.editor.egui_ctx.egui_wants_pointer_input();
+        if !egui_wants_pointer {
+            if let Some(asset_id_arc) = egui::DragAndDrop::take_payload::<crate::assets::AssetId>(&self.editor.egui_ctx) {
+                let asset_id: crate::assets::AssetId = *asset_id_arc; // <- разыменование Arc<AssetId>
+                let (mx, my) = self.input.mouse_pos;
+                if self.in_viewport(mx, my) {
+                    let (origin, dir) = self.game.camera().ray_from_screen(
+                        mx, my, self.renderer.size.width as f32, self.renderer.size.height as f32,
+                    );
+                    if let Some(hit_pos) = crate::editor::placement::ray_ground_plane(origin, dir, 0.0) {
+                        if let Some(meta) = self.asset_db.get(asset_id) {
+                            // ...
+                            let path = meta.path.clone();
+                            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                            
+                            if ext == "gltf" || ext == "glb" {
+                                let prefix = format!("spawned_{}", asset_id);
+                                if let Ok(loaded) = crate::render::load_gltf_into(&mut self.renderer, &path, &prefix) {
+                                    let e = self.world.spawn();
+                                    self.world.insert(e, crate::game::components::Name(prefix));
+                                    self.world.insert(e, crate::game::components::Transform::at(hit_pos));
+                                    if let Some(inst) = loaded.instances.first() {
+                                        self.world.insert(e, crate::game::components::MeshHandle(inst.mesh_name.clone()));
+                                        self.world.insert(e, crate::game::components::MaterialHandle(inst.material_name.clone()));
+                                    }
+                                    self.editor.state.select_single(e);
+                                    log::info!("Spawned glTF from drag-drop: {}", path.display());
+                                }
+                            } else if ext == "ron" && path.to_string_lossy().ends_with(".prefab.ron") {
+                                if let Ok(prefab) = crate::scene::load_prefab_from_file(&path) {
+                                    let new_ents = crate::scene::instantiate_prefab(&mut self.world, &prefab, hit_pos);
+                                    if let Some(&first) = new_ents.first() {
+                                        self.editor.state.select_single(first);
+                                    }
+                                    log::info!("Spawned prefab from drag-drop: {}", path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // ===========================
 
         let clipped_primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -1644,6 +1691,20 @@ impl<G: Game> App<G> {
         use crate::game::components::{MaterialHandle, MeshHandle, Transform};
 
         match action {
+            EditorAction::QuickSave => {
+                let path = self.editor.state.quick_save_path.clone();
+                let spawn = Some(self.editor.state.play.saved_position);
+                let game_state = self.game.save_game_state();
+                if let Err(e) = crate::scene::save_scene_with_game_state_to_file(
+                    &self.world, &self.renderer, &path, spawn, game_state,
+                ) {
+                    log::error!("Quick Save failed: {}", e);
+                    self.editor.state.hud_hint("Quick Save Failed!");
+                } else {
+                    log::info!("Quick saved to {}", path);
+                    self.editor.state.hud_hint("Quick Saved!");
+                }
+            }
             EditorAction::TogglePlay => {
                 let was_active = self.editor.state.play.active;
                 if !was_active {
@@ -2145,7 +2206,6 @@ impl<G: Game> App<G> {
 
     fn on_window_event(&mut self, elwt: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         let consumed = self.editor.on_window_event(&self.window, &event);
-        // ИЗМЕНЕНО (egui 0.37)
         let wants_keyboard = self.editor.egui_ctx.egui_wants_keyboard_input();
         let in_play = self.editor.state.play.active;
         let in_menu = self.mode.is_menu();
@@ -2371,8 +2431,6 @@ impl<G: Game> App<G> {
             WindowEvent::MouseWheel { delta, .. } if !in_play && !in_menu => {
                 if !consumed {
                     let (mx, my) = self.input.mouse_pos;
-                    // ИСПРАВЛЕНО: проверяем, не находится ли курсор над панелью egui.
-                    // Если да — колесо крутит панель, а не камеру.
                     let wants_pointer = self.editor.egui_ctx.egui_wants_pointer_input();
                     if !wants_pointer && self.in_viewport(mx, my) {
                         let d = match delta {

@@ -1,0 +1,31 @@
+(
+    id: "blacksmith",
+    speaker_name: "Blacksmith",
+    start: "intro",
+    nodes: {
+        "intro": (
+            speaker: "Blacksmith",
+            text: "Ключ от подземелья спрятан у босса в самом низу.",
+            options: [
+                (text: "Как туда добраться?", next: Some("portal_info"), effect: []),
+                (text: "Дай мне зелье, если есть.", next: Some("give_potion"),
+                    effect: [GiveItem(id: "health_potion", count: 2)]),
+                (text: "Спасибо.", next: None, effect: []),
+            ],
+        ),
+        "portal_info": (
+            speaker: "Blacksmith",
+            text: "Порталом можно быстро туда добраться. Осторожнее — там темно и опасно.",
+            options: [
+                (text: "Понял.", next: None, effect: []),
+            ],
+        ),
+        "give_potion": (
+            speaker: "Blacksmith",
+            text: "Держи, это тебе пригодится.",
+            options: [
+                (text: "Благодарю!", next: None, effect: []),
+            ],
+        ),
+    },
+)

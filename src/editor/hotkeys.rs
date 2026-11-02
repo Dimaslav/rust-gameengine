@@ -39,6 +39,8 @@ pub enum HotkeyAction {
     Save,
     LoadScene,
     NewScene,
+    QuickSave, // <-- ДОБАВЛЕНО
+    QuickLoad, // <-- ДОБАВЛЕНО
 
     // --- Edit ---
     Undo,
@@ -80,6 +82,8 @@ impl HotkeyAction {
         HotkeyAction::Save,
         HotkeyAction::LoadScene,
         HotkeyAction::NewScene,
+        HotkeyAction::QuickSave,
+        HotkeyAction::QuickLoad,
         // Edit
         HotkeyAction::Undo,
         HotkeyAction::Redo,
@@ -127,7 +131,11 @@ impl HotkeyAction {
     /// Категория для группировки в UI.
     pub fn category(self) -> &'static str {
         match self {
-            HotkeyAction::Save | HotkeyAction::LoadScene | HotkeyAction::NewScene => "File",
+            HotkeyAction::Save
+            | HotkeyAction::LoadScene
+            | HotkeyAction::NewScene
+            | HotkeyAction::QuickSave
+            | HotkeyAction::QuickLoad => "File",
             HotkeyAction::Undo | HotkeyAction::Redo
             | HotkeyAction::Copy | HotkeyAction::Paste
             | HotkeyAction::Duplicate | HotkeyAction::Delete
@@ -149,6 +157,8 @@ impl HotkeyAction {
             HotkeyAction::Save => "Save Scene",
             HotkeyAction::LoadScene => "Load Scene",
             HotkeyAction::NewScene => "New Scene",
+            HotkeyAction::QuickSave => "Quick Save",
+            HotkeyAction::QuickLoad => "Quick Load",
             HotkeyAction::Undo => "Undo",
             HotkeyAction::Redo => "Redo",
             HotkeyAction::Copy => "Copy",
@@ -265,6 +275,8 @@ impl HotkeyMap {
             (Save, HotkeyBinding::ctrl(Key::from_keycode(KC::KeyS))),
             (LoadScene, HotkeyBinding::ctrl(Key::from_keycode(KC::KeyO))),
             (NewScene, HotkeyBinding::ctrl(Key::from_keycode(KC::KeyN))),
+            (QuickSave, HotkeyBinding::plain(Key::from_keycode(KC::F5))),
+            (QuickLoad, HotkeyBinding::plain(Key::from_keycode(KC::F9))),
 
             // Edit
             (Undo, HotkeyBinding::ctrl(Key::from_keycode(KC::KeyZ))),
@@ -280,8 +292,8 @@ impl HotkeyMap {
             // Camera
             (FocusSelected, HotkeyBinding::plain(Key::from_keycode(KC::KeyF))),
 
-            // Play
-            (TogglePlay, HotkeyBinding::plain(Key::from_keycode(KC::F9))),
+            // Play (F9 сдвинут на F10, так как F9 теперь QuickLoad)
+            (TogglePlay, HotkeyBinding::plain(Key::from_keycode(KC::F10))),
 
             // Gizmo
             (GizmoTranslate, HotkeyBinding::plain(Key::from_keycode(KC::Digit1))),

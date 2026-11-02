@@ -3,6 +3,7 @@ pub mod animation;
 pub mod audio;
 pub mod components;
 pub mod decals;
+pub mod dialogs;
 pub mod items;
 pub mod lights;
 pub mod rpg;
@@ -10,6 +11,7 @@ pub mod viewmodel;
 pub mod stats;
 pub mod timers;
 pub mod weapons;
+pub mod quests;
 
 pub use ai::{
     AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath,

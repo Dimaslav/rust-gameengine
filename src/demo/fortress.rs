@@ -14,10 +14,13 @@
 //!   Loot tables (RON) → автопикап через Trigger с именем `Pickup_*`.
 //! * AI: AiAgent + PatrolPath + noise events (шаги/выстрелы).
 //! * Save/Load: 4 слота, автосейв на чекпоинтах, быстрый save/load из паузы.
+//! * Quests: data-driven (`assets/quests/*.ron`), через `QuestManager`.
+//! * Dialog: data-driven (`assets/dialogs/*.ron`), через `DialogSession`.
 //!
 //! ## Управление
 //! ЛКМ — огонь, ПКМ — ADS, R — перезарядка, 1..4 — выбор ствола,
-//! Tab — Character Sheet, I — Inventory, Esc — пауза.
+//! Tab — Character Sheet, I — Inventory, E — Talk (когда прицел на NPC),
+//! Esc — пауза.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -33,6 +36,7 @@ use crate::game::animation::{AnimationEventTriggered, AnimationEvents, Animation
 use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::*;
 use crate::game::decals::Decal;
+use crate::game::dialogs::{DialogEffect, DialogGraph, DialogNpc, DialogSession};
 use crate::game::items::{
     roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
 };
@@ -41,6 +45,7 @@ use crate::game::lights::{DirectionalLight, PointLight};
 use crate::game::stats::{PlayerStats, STAT_DESCRIPTIONS, STAT_NAMES};
 use crate::game::timers::{Timer, TimerFinished, TimerSystem};
 use crate::game::weapons::{apply_spread, Weapon, WeaponRegistry, WeaponRuntime};
+use crate::game::quests::{QuestManager, Reward};
 use crate::physics::{Collider, RigidBody};
 use crate::render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GpuLight, GpuPointLight,
@@ -185,6 +190,27 @@ impl CampaignState {
 }
 
 // ============================================================
+// Helper: спавн NPC с диалогом
+// ============================================================
+
+fn spawn_dialog_npc(
+    world: &mut World,
+    name: impl Into<String>,
+    pos: Vec3,
+    dialog_id: impl Into<String>,
+) -> Entity {
+    let e = world.spawn();
+    world.insert(e, Name(name.into()));
+    world.insert(e, Transform::at(pos).with_scale(1.0));
+    world.insert(e, MeshHandle("capsule".into()));
+    world.insert(e, MaterialHandle("gold".into()));
+    world.insert(e, DialogNpc { dialog_id: dialog_id.into() });
+    world.insert(e, Collider::capsule(0.4, 1.8));
+    world.insert(e, RigidBody::static_body());
+    e
+}
+
+// ============================================================
 // FortressDemo
 // ============================================================
 
@@ -246,6 +272,11 @@ pub struct FortressDemo {
     last_play_mode: bool,
     hud: Hud,
     campaign: CampaignState,
+    quest_manager: QuestManager,
+
+    // === Dialog ===
+    dialogs: HashMap<String, DialogGraph>,
+    dialog_session: Option<DialogSession>,
 
     // === Save / Load ===
     save_manager: crate::scene::SaveManager,
@@ -267,6 +298,15 @@ pub struct FortressDemo {
 
 impl FortressDemo {
     pub fn new() -> Self {
+        let mut quest_manager = QuestManager::new();
+        if let Ok(qm) = QuestManager::load_from_dir("assets/quests") {
+            quest_manager = qm;
+        }
+        quest_manager.start_quest("act1_guards");
+
+        let dialogs = DialogGraph::load_from_dir("assets/dialogs").unwrap_or_default();
+        log::info!("dialogs: {} graphs loaded", dialogs.len());
+
         Self {
             camera: Camera3D::new(16.0 / 9.0),
             systems: vec![
@@ -323,6 +363,10 @@ impl FortressDemo {
             last_play_mode: false,
             hud: Hud::new(),
             campaign: CampaignState::new(),
+            quest_manager,
+
+            dialogs,
+            dialog_session: None,
 
             save_manager: crate::scene::SaveManager::new("saves"),
             pending_world_request: None,
@@ -648,6 +692,10 @@ impl FortressDemo {
 
         blood_decal(world, c + Vec3::new(-3.0, 0.02, 2.0), 1.5, 0.7);
         blood_decal(world, c + Vec3::new( 4.0, 0.02, -4.0), 1.8, 0.8);
+
+        // === NPC с диалогами ===
+        spawn_dialog_npc(world, "npc_elder", c + Vec3::new(-7.0, 0.9, -7.0), "elder");
+        spawn_dialog_npc(world, "npc_blacksmith", c + Vec3::new(7.0, 0.9, -7.0), "blacksmith");
     }
 
     fn build_act2(&mut self, world: &mut World) {
@@ -986,7 +1034,7 @@ impl FortressDemo {
         world.insert(sun, Transform::at(Vec3::new(0.0, 40.0, 0.0)));
         let mut l = DirectionalLight::sun();
         l.direction = Vec3::new(0.45, 1.0, 0.35);
-        l.intensity = 1.1; // ИЗМЕНЕНО: было 2.4, теперь свет мягче
+        l.intensity = 1.1;
         l.color = [1.0, 0.95, 0.85];
         world.insert(sun, l);
 
@@ -994,7 +1042,7 @@ impl FortressDemo {
         world.insert(fill, Name("Fill".into()));
         world.insert(fill, Transform::at(Vec3::new(0.0, 10.0, 0.0)));
         let mut f = DirectionalLight::fill();
-        f.intensity = 0.15; // ИЗМЕНЕНО: было 0.35
+        f.intensity = 0.15;
         world.insert(fill, f);
     }
 
@@ -1658,7 +1706,8 @@ impl Game for FortressDemo {
                 && self.campaign.stage != Stage::Victory
                 && self.weapon_raise_timer <= 0.0
                 && !self.show_character_sheet
-                && !self.show_inventory;
+                && !self.show_inventory
+                && self.dialog_session.is_none();
 
             if can_shoot && trigger {
                 let rt_opt = self.current_runtime().cloned();
@@ -1780,6 +1829,26 @@ impl Game for FortressDemo {
                 }
                 if let Some(t) = world.get_mut::<Timer>(e) {
                     t.restart();
+                }
+            }
+        }
+
+        // === Dialog: interact with E ===
+        if in_play && !self.demo_paused && self.dialog_session.is_none() {
+            if input.key_pressed(KeyCode::KeyE) {
+                let cam_pos = self.camera.position();
+                let cam_dir = self.camera.forward();
+                if let Some(npc_e) = crate::game::dialogs::find_npc_in_front(
+                    world, cam_pos, cam_dir, 3.0, 0.85,
+                ) {
+                    if let Some(npc) = world.get::<DialogNpc>(npc_e).cloned() {
+                        if let Some(graph) = self.dialogs.get(&npc.dialog_id).cloned() {
+                            if let Some(session) = DialogSession::new(graph, npc_e) {
+                                log::info!("Dialog started: {} with NPC #{}", npc.dialog_id, npc_e);
+                                self.dialog_session = Some(session);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1931,6 +2000,33 @@ impl Game for FortressDemo {
     fn on_kill(&mut self, world: &mut World, target: Entity) {
         self.campaign.kills_total += 1;
         self.campaign.kills_in_stage += 1;
+
+        let target_name = world.get::<Name>(target).map(|n| n.0.clone()).unwrap_or_default();
+
+        // === ОБРАБОТКА КВЕСТОВ ===
+        let rewards = self.quest_manager.on_enemy_killed(&target_name);
+        if !rewards.is_empty() {
+            self.hud.push("⭐ Quest Completed!");
+            for reward in rewards {
+                match reward {
+                    Reward::Xp(amt) => {
+                        let levels = self.player_stats.gain_xp(amt);
+                        self.hud.push(format!("+{} XP", amt));
+                        if levels > 0 {
+                            self.hud.push(format!("⭐ LEVEL UP! → Lv {}", self.player_stats.experience.level));
+                        }
+                    }
+                    Reward::Gold(amt) => {
+                        self.campaign.gold += amt;
+                        self.hud.push(format!("+{} Gold", amt));
+                    }
+                    Reward::Item { id, count } => {
+                        self.try_pickup(&id, count);
+                    }
+                }
+            }
+        }
+
         self.hud.push(format!(
             "Kill #{} (stage: {}/{})",
             self.campaign.kills_total,
@@ -1960,7 +2056,6 @@ impl Game for FortressDemo {
 
         // Loot: roll + spawn pickups.
         let pos = world.get::<Transform>(target).map(|t| t.position).unwrap_or(Vec3::ZERO);
-        let target_name = world.get::<Name>(target).map(|n| n.0.clone()).unwrap_or_default();
         let table_id = if target_name.contains("Boss") {
             "enemy_boss"
         } else if target_name.contains("Elite") || target_name.contains("Guard") {
@@ -2028,7 +2123,7 @@ impl Game for FortressDemo {
             let prev_model = self.prev_world_matrices.get(&e).copied().unwrap_or(model);
             new_prev.insert(e, model);
 
-            let Some(mesh) = renderer.meshes.get(&m.0) else { continue };
+            let Some(mesh) = renderer.meshes.get(&m.0) else { continue; };
             let (world_center, world_radius) = mesh.world_bounds(&model);
 
             if self.show_culling {
@@ -2070,9 +2165,7 @@ impl Game for FortressDemo {
             let local_extent = (mesh.aabb_max - mesh.aabb_min).abs();
             let we = local_extent * scale_abs;
             let tile = tiling_size.max(0.001);
-            
-            // ИСПРАВЛЕНО: используем 3D-масштаб для корректного наложения текстур
-            // на грани куба, чтобы избежать растяжения.
+
             let sx = if we.x < 0.001 { 1.0 } else { we.x / tile };
             let sy = if we.y < 0.001 { 1.0 } else { we.y / tile };
             let sz = if we.z < 0.001 { 1.0 } else { we.z / tile };
@@ -2201,7 +2294,7 @@ impl Game for FortressDemo {
         }
 
         // Crosshair (скрыт при ADS).
-        if !is_victory && self.ads_blend < 0.5 {
+        if !is_victory && self.ads_blend < 0.5 && self.dialog_session.is_none() {
             let has_ammo = self.current_runtime().map(|r| r.mag > 0).unwrap_or(false);
             self.hud.crosshair(ui, has_ammo);
         }
@@ -2497,7 +2590,7 @@ impl Game for FortressDemo {
                 "S = Save · L = Load · X = Delete",
                 11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
+            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · E — говорить · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
             ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
                 text, 12.0, [1.0, 1.0, 1.0, 0.5]);
         }
@@ -2524,6 +2617,62 @@ impl Game for FortressDemo {
                         self.hud.push("Item dropped");
                     }
                 }
+            }
+        }
+
+        // === Dialog UI ===
+        if let Some(session) = &self.dialog_session {
+            let clicked = crate::ui::DialogUi::draw(ui, session);
+            match clicked {
+                Some(crate::ui::dialog::CLOSE_SENTINEL) => {
+                    self.dialog_session = None;
+                }
+                Some(idx) => {
+                    if let Some(sess) = self.dialog_session.as_mut() {
+                        let (effects, ended) = sess.choose(idx);
+                        if ended { self.dialog_session = None; }
+                        for effect in effects {
+                            match effect {
+                                DialogEffect::StartQuest(qid) => {
+                                    self.quest_manager.start_quest(&qid);
+                                    self.hud.push(format!("📜 Quest started: {}", qid));
+                                }
+                                DialogEffect::GiveItem { id, count } => {
+                                    self.try_pickup(&id, count);
+                                }
+                                DialogEffect::GiveGold(amt) => {
+                                    self.campaign.gold += amt;
+                                    self.hud.push(format!("+{} Gold", amt));
+                                }
+                                DialogEffect::GiveXp(amt) => {
+                                    let levels = self.player_stats.gain_xp(amt);
+                                    self.hud.push(format!("+{} XP", amt));
+                                    if levels > 0 {
+                                        self.hud.push(format!(
+                                            "⭐ LEVEL UP → Lv {}",
+                                            self.player_stats.experience.level
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        } else if self.last_play_mode && !self.demo_paused {
+            // Подсказка "E — Talk", если игрок смотрит на NPC.
+            let cam_pos = self.camera.position();
+            let cam_dir = self.camera.forward();
+            if crate::game::dialogs::find_npc_in_front(
+                world, cam_pos, cam_dir, 3.0, 0.85,
+            ).is_some() {
+                let sw = ui.screen_w();
+                let sh = ui.screen_h();
+                ui.text_centered(
+                    sw * 0.5, sh * 0.5 + 50.0,
+                    "[E]  Talk", 18.0, [1.0, 0.9, 0.5, 1.0],
+                );
             }
         }
     }

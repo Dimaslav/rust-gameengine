@@ -45,9 +45,6 @@ pub fn draw_window(
             });
             ui.separator();
 
-            // ИЗМЕНЕНО (borrow checker): клонируем AssetMeta в локальный
-            // Vec, чтобы не держать `&db` во время замыкания ниже, где
-            // используется `&mut db`.
             let mut groups: BTreeMap<&'static str, Vec<AssetMeta>> = BTreeMap::new();
             for meta in db.iter() {
                 groups.entry(meta.kind.name()).or_default().push(meta.clone());
@@ -126,72 +123,80 @@ fn draw_card(
     let stem = meta.stem();
     let kind = meta.kind;
     let full_path = meta.path.to_string_lossy().into_owned();
+    let asset_id = meta.id;
 
     ensure_thumbnail(ctx, thumbnails, &stem, kind, &full_path);
 
     let card_size = egui::vec2(CARD_SIZE, CARD_SIZE + CARD_NAME_HEIGHT);
-    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+        let drag_id = egui::Id::unique(("asset_drag", asset_id));
+    
+    // ИЗМЕНЕНО: оборачиваем в dnd_drag_source
+    let response = ui.dnd_drag_source(drag_id, asset_id, |ui| {
+        let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
 
-    let hovered = response.hovered();
-    let bg = if hovered {
-        egui::Color32::from_rgb(50, 55, 68)
-    } else {
-        egui::Color32::from_rgb(32, 35, 44)
-    };
-    let border = if hovered {
-        egui::Color32::from_rgb(120, 170, 230)
-    } else {
-        egui::Color32::from_rgb(60, 66, 80)
-    };
+        let hovered = response.hovered();
+        let bg = if hovered {
+            egui::Color32::from_rgb(50, 55, 68)
+        } else {
+            egui::Color32::from_rgb(32, 35, 44)
+        };
+        let border = if hovered {
+            egui::Color32::from_rgb(120, 170, 230)
+        } else {
+            egui::Color32::from_rgb(60, 66, 80)
+        };
 
-    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(
-        rect,
-        egui::CornerRadius::same(4),
-        egui::Stroke::new(1.0, border),
-        egui::StrokeKind::Inside,
-    );
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), bg);
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
 
-    let thumb_rect = egui::Rect::from_min_size(
-        rect.min + egui::vec2(4.0, 4.0),
-        egui::vec2(CARD_SIZE - 8.0, CARD_SIZE - 8.0),
-    );
+        let thumb_rect = egui::Rect::from_min_size(
+            rect.min + egui::vec2(4.0, 4.0),
+            egui::vec2(CARD_SIZE - 8.0, CARD_SIZE - 8.0),
+        );
 
-    match thumbnails.get(&stem) {
-        Some(ThumbnailState::Loaded(handle)) => {
-            let painter = ui.painter_at(thumb_rect);
-            painter.image(
-                handle.id(),
-                thumb_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+        match thumbnails.get(&stem) {
+            Some(ThumbnailState::Loaded(handle)) => {
+                let painter = ui.painter_at(thumb_rect);
+                painter.image(
+                    handle.id(),
+                    thumb_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            Some(ThumbnailState::Failed) | Some(ThumbnailState::NoSource) | None => {
+                let icon = kind.icon();
+                let font_id = egui::FontId::proportional(40.0);
+                ui.painter().text(
+                    thumb_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icon,
+                    font_id,
+                    egui::Color32::from_rgb(200, 210, 230),
+                );
+            }
         }
-        Some(ThumbnailState::Failed) | Some(ThumbnailState::NoSource) | None => {
-            let icon = kind.icon();
-            let font_id = egui::FontId::proportional(40.0);
-            ui.painter().text(
-                thumb_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                icon,
-                font_id,
-                egui::Color32::from_rgb(200, 210, 230),
-            );
-        }
-    }
 
-    let name_rect = egui::Rect::from_min_size(
-        rect.min + egui::vec2(0.0, CARD_SIZE),
-        egui::vec2(CARD_SIZE, CARD_NAME_HEIGHT),
-    );
-    let text = truncate(&stem, 14);
-    ui.painter().text(
-        name_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        &text,
-        egui::FontId::proportional(11.0),
-        egui::Color32::from_rgb(220, 225, 235),
-    );
+        let name_rect = egui::Rect::from_min_size(
+            rect.min + egui::vec2(0.0, CARD_SIZE),
+            egui::vec2(CARD_SIZE, CARD_NAME_HEIGHT),
+        );
+        let text = truncate(&stem, 14);
+        ui.painter().text(
+            name_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &text,
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(220, 225, 235),
+        );
+
+        response
+    }).response;
 
     response
         .clone()
@@ -245,8 +250,6 @@ fn ensure_thumbnail(
 
     match load_thumbnail_from_file(full_path) {
         Ok((w, h, rgba)) => {
-            // ИЗМЕНЕНО (egui 0.37): ColorImage::from_rgba_unmultiplied
-            // теперь принимает [usize; 2], не [u32; 2].
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 &rgba,

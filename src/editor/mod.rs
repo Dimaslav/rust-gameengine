@@ -119,6 +119,7 @@ pub struct EditorState {
     pub hint: Option<(String, f32)>,
 
     pub save_path: String,
+    pub quick_save_path: String, // <-- ДОБАВЛЕНО
     pub pending_action: Option<EditorAction>,
 
     pub gizmo: GizmoState,
@@ -179,6 +180,7 @@ pub struct EditorState {
 #[derive(Debug, Clone)]
 pub enum EditorAction {
     Save,
+    QuickSave, // <-- ДОБАВЛЕНО
     Load,
     AddCube,
     AddSphere,
@@ -272,6 +274,7 @@ impl EditorState {
             hint: None,
 
             save_path: "scene.ron".to_string(),
+            quick_save_path: "saves/quick.ron".to_string(),
             pending_action: None,
 
             gizmo: GizmoState::default(),
@@ -493,8 +496,6 @@ impl Editor {
             None,
         );
 
-        // ИЗМЕНЕНО (egui-wgpu 0.37): `Renderer::new` теперь принимает
-        // `RendererOptions` вместо `Option<...> + u32 + bool`.
         let egui_renderer = EguiRenderer::new(
             device,
             surface_format,
