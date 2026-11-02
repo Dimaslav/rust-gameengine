@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::ecs::Entity;
 use crate::game::items::Inventory;
@@ -40,25 +40,62 @@ impl DialogGraph {
         Ok(graph)
     }
 
-    pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<HashMap<String, DialogGraph>> {
+    /// Загружает все `.ron` из папки с учётом языка.
+    ///
+    /// Приоритет: `<name>.<lang>.ron` > `<name>.ron`.
+    /// Если английского файла нет — используется базовый (русский).
+    pub fn load_from_dir(
+        dir: impl AsRef<Path>,
+        lang: &str,
+    ) -> Result<HashMap<String, DialogGraph>> {
         let dir = dir.as_ref();
         let mut out = HashMap::new();
         if !dir.exists() {
             log::warn!("dialogs: dir '{}' не существует, диалоги отключены", dir.display());
             return Ok(out);
         }
-        for entry in std::fs::read_dir(dir)?.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("ron") {
-                match Self::load_from_file(&path) {
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("ron"))
+            .collect();
+        files.sort();
+
+        // Сначала грузим локализованные версии (приоритет)
+        let suffix = format!(".{}.ron", lang);
+        let mut loaded_ids: HashSet<String> = HashSet::new();
+
+        for path in &files {
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if filename.ends_with(&suffix) {
+                match Self::load_from_file(path) {
                     Ok(g) => {
-                        log::info!("dialog loaded: '{}' ({} nodes)", g.id, g.nodes.len());
+                        log::info!("dialog loaded: '{}' [{}] ({} nodes)", g.id, lang, g.nodes.len());
+                        loaded_ids.insert(g.id.clone());
                         out.insert(g.id.clone(), g);
                     }
                     Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
                 }
             }
         }
+
+        // Потом грузим базовые (fallback)
+        for path in &files {
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !filename.ends_with(&suffix) {
+                match Self::load_from_file(path) {
+                    Ok(g) => {
+                        if !loaded_ids.contains(&g.id) {
+                            log::info!("dialog loaded: '{}' [fallback] ({} nodes)", g.id, g.nodes.len());
+                            out.insert(g.id.clone(), g);
+                        }
+                    }
+                    Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
+                }
+            }
+        }
+
         Ok(out)
     }
 
@@ -132,7 +169,6 @@ impl<'a> DialogContext<'a> {
             return true;
         }
 
-        // "kind:arg" — простые проверки
         if let Some((kind, arg)) = cond.split_once(':') {
             let arg = arg.trim();
             return match kind.trim() {
@@ -157,7 +193,6 @@ impl<'a> DialogContext<'a> {
             };
         }
 
-        // "field >= N"
         if let Some((field, val)) = cond.split_once(">=") {
             let v: i64 = val.trim().parse().unwrap_or(0);
             return match field.trim() {
@@ -167,7 +202,6 @@ impl<'a> DialogContext<'a> {
             };
         }
 
-        // "field <= N"
         if let Some((field, val)) = cond.split_once("<=") {
             let v: i64 = val.trim().parse().unwrap_or(0);
             return match field.trim() {
@@ -177,7 +211,6 @@ impl<'a> DialogContext<'a> {
             };
         }
 
-        // Boolean flag
         match cond {
             "has_key_red" => self.has_key_red,
             _ => {

@@ -1,26 +1,4 @@
 //! "The Fallen Citadel" — 5-актовая сюжетная кампания.
-//!
-//! ## Акты
-//! * I   — Пробуждение: арена, 2 стражника, ворота на восток.
-//! * II  — Двор: периметр, снайперы на башнях, красный ключ в сокровищнице.
-//! * III — Лобби: портал в подземелье, элитный гвардеец.
-//! * IV  — Подземелье: кристаллы, волки, босс за северными воротами.
-//! * V   — Побег: короткий коридор, exit_zone → Victory.
-//!
-//! ## Ключевые фичи
-//! * Weapon framework: 4 ствола, ADS, pellet-система, hit-stop.
-//! * RPG: Attributes + XP + Level Up + Character Sheet (Tab).
-//! * Items: Inventory (20 слотов), Equipment (weapon/armor/trinket),
-//!   Loot tables (RON) → автопикап через Trigger с именем `Pickup_*`.
-//! * AI: AiAgent + PatrolPath + noise events (шаги/выстрелы).
-//! * Save/Load: 4 слота, автосейв на чекпоинтах, быстрый save/load из паузы.
-//! * Quests: data-driven (`assets/quests/*.ron`), через `QuestManager`.
-//! * Dialog: data-driven (`assets/dialogs/*.ron`), через `DialogSession`.
-//!
-//! ## Управление
-//! ЛКМ — огонь, ПКМ — ADS, R — перезарядка, 1..4 — выбор ствола,
-//! Tab — Character Sheet, I — Inventory, E — Talk (когда прицел на NPC),
-//! Esc — пауза.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -228,7 +206,6 @@ pub struct FortressDemo {
     animation_runtime: AnimationRuntime,
     animation_events: AnimationEvents,
 
-    // === Campaign scene refs ===
     bell_entity: Option<Entity>,
     ai_target_entity: Option<Entity>,
     boss_entity: Option<Entity>,
@@ -238,14 +215,12 @@ pub struct FortressDemo {
     gate_boss: Option<Entity>,
     navmesh_bake_requested: bool,
 
-    // === Player state ===
     demo_health: f32,
     demo_health_max: f32,
     demo_paused: bool,
     demo_show_debug: bool,
     last_target_hp: f32,
 
-    // === Weapons ===
     weapons: WeaponRegistry,
     current_weapon: usize,
     weapon_runtimes: Vec<WeaponRuntime>,
@@ -257,18 +232,15 @@ pub struct FortressDemo {
     ads_blend: f32,
     base_fov: f32,
 
-    // === RPG ===
     player_stats: PlayerStats,
     show_character_sheet: bool,
 
-    // === Items ===
     inventory: Inventory,
     equipment: Equipment,
     item_registry: ItemRegistry,
     loot_registry: LootRegistry,
     show_inventory: bool,
 
-    // === Meta ===
     last_play_mode: bool,
     hud: Hud,
     campaign: CampaignState,
@@ -276,6 +248,7 @@ pub struct FortressDemo {
 
     // === Dialog ===
     dialogs: HashMap<String, DialogGraph>,
+    current_dialog_lang: String,
     dialog_session: Option<DialogSession>,
 
     // === Save / Load ===
@@ -304,8 +277,9 @@ impl FortressDemo {
         }
         quest_manager.start_quest("act1_guards");
 
-        let dialogs = DialogGraph::load_from_dir("assets/dialogs").unwrap_or_default();
-        log::info!("dialogs: {} graphs loaded", dialogs.len());
+        let initial_lang = crate::game::locale::current_id().unwrap_or_else(|| "ru".to_string());
+        let dialogs = DialogGraph::load_from_dir("assets/dialogs", &initial_lang).unwrap_or_default();
+        log::info!("dialogs: {} graphs loaded [{}]", dialogs.len(), initial_lang);
 
         Self {
             camera: Camera3D::new(16.0 / 9.0),
@@ -366,6 +340,7 @@ impl FortressDemo {
             quest_manager,
 
             dialogs,
+            current_dialog_lang: initial_lang,
             dialog_session: None,
 
             save_manager: crate::scene::SaveManager::new("saves"),
@@ -600,7 +575,6 @@ impl FortressDemo {
     // ============================================================
 
     fn build(&mut self, world: &mut World) {
-        // Terrain root (без Collider, чтобы не блокировать капсулу игрока).
         let terrain_e = world.spawn();
         world.insert(terrain_e, Name("Terrain".into()));
         world.insert(terrain_e, Transform::at(Vec3::ZERO));
@@ -623,7 +597,6 @@ impl FortressDemo {
     }
 
     fn build_bridges(&mut self, world: &mut World) {
-        // Act1 ↔ Act2
         static_box(world, "Bridge_Act1_Act2", "arena_floor",
             Vec3::new(-40.0, 0.0, 0.0), Vec3::new(20.0, 0.5, 8.0),
             Vec3::splat(0.5), 2.0);
@@ -636,7 +609,6 @@ impl FortressDemo {
         torch(world, "Bridge_A1A2_Torch1", Vec3::new(-45.0, 3.0, 0.0));
         torch(world, "Bridge_A1A2_Torch2", Vec3::new(-35.0, 3.0, 0.0));
 
-        // Act2 ↔ Act3
         static_box(world, "Bridge_Act2_Act3", "arena_floor",
             Vec3::new(35.0, 0.0, 0.0), Vec3::new(10.0, 0.5, 8.0),
             Vec3::splat(0.5), 2.0);
@@ -693,7 +665,6 @@ impl FortressDemo {
         blood_decal(world, c + Vec3::new(-3.0, 0.02, 2.0), 1.5, 0.7);
         blood_decal(world, c + Vec3::new( 4.0, 0.02, -4.0), 1.8, 0.8);
 
-        // === NPC с диалогами ===
         spawn_dialog_npc(world, "npc_elder", c + Vec3::new(-7.0, 0.9, -7.0), "elder");
         spawn_dialog_npc(world, "npc_blacksmith", c + Vec3::new(7.0, 0.9, -7.0), "blacksmith");
     }
@@ -735,7 +706,6 @@ impl FortressDemo {
             torch(world, format!("Act2_Torch_{}", side), *center + Vec3::Y * 7.2);
         }
 
-        // 8 колонн по кругу.
         let col_r = 12.0;
         for i in 0..8 {
             let a = i as f32 / 8.0 * std::f32::consts::TAU;
@@ -746,7 +716,6 @@ impl FortressDemo {
                 Some(Collider::aabb(Vec3::splat(0.4))));
         }
 
-        // Алтарь.
         for i in 0..3u32 {
             let r = 5.0 - i as f32 * 1.3;
             let y = i as f32 * 0.5 + 0.25;
@@ -1074,7 +1043,6 @@ impl FortressDemo {
     }
 
     fn build_decorations(&mut self, world: &mut World) {
-        // Act1
         for i in 0..3 {
             crate_box(world, format!("Act1_Crate_{}", i),
                 Vec3::new(-66.0 + i as f32 * 0.8, 0.5, -6.0), 1.0);
@@ -1091,7 +1059,6 @@ impl FortressDemo {
                 Quat::IDENTITY, Vec3::ONE, None);
         }
 
-        // Act2
         let trees = [
             (Vec3::new(-40.0, 0.0, -40.0), "tree_pine_a"),
             (Vec3::new( 40.0, 0.0, -40.0), "tree_pine_b"),
@@ -1111,14 +1078,12 @@ impl FortressDemo {
                 Vec3::new(24.0, 0.6 + (i / 2) as f32 * 0.9, 26.0));
         }
 
-        // Act3
         for i in 0..5 {
             static_mesh(world, format!("Act3_Col_{}", i), "column_fluted", "arena_column",
                 Vec3::new(-12.0 + i as f32 * 6.0, 2.5, -9.0),
                 Quat::IDENTITY, Vec3::new(0.6, 5.0, 0.6), None);
         }
 
-        // Act4
         let pillars = [
             (Vec3::new(-8.0, 0.0, 0.0), "pillar_ruined_a"),
             (Vec3::new( 8.0, 0.0, 0.0), "pillar_ruined_b"),
@@ -1169,7 +1134,6 @@ impl FortressDemo {
     }
 
     fn on_trigger(&mut self, world: &mut World, e: Entity, name: &str) {
-        // Auto-pickup: имя = "Pickup_<item_id>_<idx>".
         if let Some(rest) = name.strip_prefix("Pickup_")
             && let Some((item_id, _idx)) = rest.rsplit_once('_') {
                 let count = world.get::<GoldValue>(e).map(|g| g.0).unwrap_or(1);
@@ -1308,7 +1272,6 @@ impl FortressDemo {
             Stage::Act5 | Stage::Victory => {}
         }
 
-        // Обновляем ссылки при подмене World.
         if self.gate_1.is_none_or(|e| !world.entities().contains(&e)) {
             self.gate_1 = Self::find_by_name(world, "gate_east_1");
         }
@@ -1348,7 +1311,7 @@ impl FortressDemo {
 }
 
 // ============================================================
-// Default PostFx (тёплый «RAGE-стиль»)
+// Default PostFx
 // ============================================================
 
 fn default_postfx() -> PostFx {
@@ -1398,7 +1361,6 @@ impl Game for FortressDemo {
     ) {
         log::info!("FortressDemo: AssetDatabase {} assets", assets.len());
 
-        // Примитивы.
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
         renderer.add_mesh("ground", Mesh::plane(&renderer.device, 200.0, 1));
@@ -1408,7 +1370,6 @@ impl Game for FortressDemo {
         renderer.add_mesh("cone", Mesh::cone(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("capsule", Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
-        // Пропсы.
         use crate::render::props;
         renderer.add_mesh("crate_detail",    props::crate_detail(&renderer.device));
         renderer.add_mesh("barrel_detail",   props::barrel_detail(&renderer.device));
@@ -1434,7 +1395,6 @@ impl Game for FortressDemo {
         renderer.add_mesh("weapon_rack",     props::weapon_rack(&renderer.device));
         renderer.add_mesh("skull",           props::skull(&renderer.device));
 
-        // Процедурные текстуры.
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
             for x in 0..64 {
@@ -1463,7 +1423,6 @@ impl Game for FortressDemo {
         }
         renderer.load_texture_rgba("arena_blood", &blood, 64, 64).expect("blood");
 
-        // Weapons.
         let registry = WeaponRegistry::load_from_dir("assets/weapons")
             .ok()
             .filter(|r| !r.is_empty())
@@ -1477,7 +1436,6 @@ impl Game for FortressDemo {
         log::info!("weapons: {} loaded", registry.len());
         self.weapons = registry;
 
-        // Items.
         self.item_registry = ItemRegistry::load_from_dir("assets/items")
             .ok()
             .filter(|r| !r.is_empty())
@@ -1487,7 +1445,6 @@ impl Game for FortressDemo {
             });
         log::info!("items: {} loaded", self.item_registry.len());
 
-        // Loot.
         self.loot_registry = LootRegistry::load_from_dir("assets/loot")
             .ok()
             .filter(|r| !r.is_empty())
@@ -1499,7 +1456,6 @@ impl Game for FortressDemo {
 
         add_materials(renderer);
 
-        // Terrain.
         let heightmap = crate::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
         let terrain_mesh = crate::render::terrain::generate_terrain_mesh(&renderer.device, &heightmap);
         renderer.add_mesh("terrain", terrain_mesh);
@@ -1511,7 +1467,6 @@ impl Game for FortressDemo {
                 .with_texture("terrain_tex"));
         renderer.terrain = Some(heightmap);
 
-        // Опционально — анимированная модель.
         if let Ok(loaded) = crate::render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             self.skeletons = loaded.skeletons;
             self.animations = loaded.animations;
@@ -1541,10 +1496,19 @@ impl Game for FortressDemo {
         renderer: &mut Renderer,
         dt: f32,
     ) -> bool {
+        // === Language change detection ===
+        if let Some(lang) = crate::game::locale::current_id() {
+            if lang != self.current_dialog_lang {
+                log::info!("Language changed to '{}', reloading dialogs...", lang);
+                self.dialogs = DialogGraph::load_from_dir("assets/dialogs", &lang).unwrap_or_default();
+                self.current_dialog_lang = lang;
+                self.dialog_session = None;
+            }
+        }
+
         let in_play = input.play_mode;
         self.last_play_mode = in_play;
 
-        // RPG: max_hp зависит от Vitality + экипировки.
         let total_attrs = self.total_attributes();
         let max_hp = 100.0 + total_attrs.vitality as f32 * 10.0;
         self.demo_health_max = max_hp;
@@ -1552,7 +1516,6 @@ impl Game for FortressDemo {
             self.demo_health = self.demo_health_max;
         }
 
-        // Панели (только в Play).
         if in_play && !self.demo_paused {
             if input.key_pressed(KeyCode::Tab) {
                 self.show_character_sheet = !self.show_character_sheet;
@@ -1575,7 +1538,6 @@ impl Game for FortressDemo {
         }
         self.auto_fire_accumulator = (self.auto_fire_accumulator - dt * 2.0).max(0.0);
 
-        // Build once.
         if !self.built {
             self.built = true;
             self.build(world);
@@ -1585,7 +1547,6 @@ impl Game for FortressDemo {
             self.camera.pitch = 0.75;
         }
 
-        // Play-mode enter.
         if input.play_mode && !self.was_in_play_mode {
             let p = self.camera.first_person_pos;
             let looks_default = p.x.abs() < 1.0 && (p.z - 45.0).abs() < 1.0;
@@ -1599,12 +1560,10 @@ impl Game for FortressDemo {
             self.ads_active = false;
             self.auto_fire_accumulator = 0.0;
             self.weapon_raise_timer = 0.30;
-            log::info!("Play entered at ({:.1}, {:.1}, {:.1})",
-                p.x, p.y, p.z);
+            log::info!("Play entered at ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z);
         }
         self.was_in_play_mode = input.play_mode;
 
-        // Autosave / manual save.
         if self.pending_autosave {
             self.pending_autosave = false;
             self.save_slot(0, world, renderer);
@@ -1613,7 +1572,6 @@ impl Game for FortressDemo {
             self.save_slot(slot, world, renderer);
         }
 
-        // Misc input.
         if input.pressed("reload_shaders")
             && let Err(e) = renderer.reload_shaders() {
                 log::error!("Shader reload: {}", e);
@@ -1628,7 +1586,6 @@ impl Game for FortressDemo {
             self.demo_show_debug = !self.demo_show_debug;
         }
 
-        // Weapon tick + switch 1/2/3/4.
         self.weapon_raise_timer = (self.weapon_raise_timer - dt).max(0.0);
         {
             let n = self.weapons.len().min(self.weapon_runtimes.len());
@@ -1646,7 +1603,6 @@ impl Game for FortressDemo {
             if input.key_pressed(KeyCode::Digit4) { self.switch_weapon(3); }
         }
 
-        // ADS.
         let rmb = input.mouse_down(MouseButton::Right);
         let want_ads = in_play && !self.demo_paused && rmb
             && self.weapon_raise_timer <= 0.0
@@ -1663,7 +1619,6 @@ impl Game for FortressDemo {
             self.camera.fov_y = self.base_fov * fov_mult;
         }
 
-        // Синхронизация HUD-полей.
         let (rt_reloading, rt_reload_timer, rt_fire_cd) = self
             .current_runtime()
             .map(|rt| (rt.reloading, rt.reload_timer, rt.fire_cooldown))
@@ -1672,7 +1627,6 @@ impl Game for FortressDemo {
         self.demo_reload_timer = rt_reload_timer;
         self.demo_fire_cooldown = rt_fire_cd;
 
-        // Reload (auto + R).
         if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
             let w_opt = self.current_weapon().cloned();
             let rt_opt = self.current_runtime().cloned();
@@ -1695,7 +1649,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // Стрельба.
         let lmb_down = input.mouse_down(MouseButton::Left);
         let lmb_pressed = input.mouse_pressed(MouseButton::Left);
         let w_opt = self.current_weapon().cloned();
@@ -1755,7 +1708,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // Camera (editor).
         if !input.play_mode && !input.editor_flying && !self.demo_paused {
             let lmb = input.mouse_down(MouseButton::Left) && !input.editor_captured;
             if lmb {
@@ -1781,13 +1733,11 @@ impl Game for FortressDemo {
             }
         }
 
-        // Playtime.
         if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
             self.campaign.playtime += dt;
         }
         self.campaign.tick_dialog(dt);
 
-        // AI target.
         if input.play_mode {
             if let Some(t) = self.ai_target_entity {
                 let p = self.camera.position();
@@ -1800,7 +1750,6 @@ impl Game for FortressDemo {
             world.insert(t, Visible(true));
         }
 
-        // Damage accumulator (игрок получает урон через Health на AI-target).
         if let Some(t) = self.ai_target_entity
             && let Some(h) = world.get_mut::<Health>(t) {
                 let damage = (self.last_target_hp - h.current).max(0.0);
@@ -1812,13 +1761,11 @@ impl Game for FortressDemo {
                 self.last_target_hp = self.demo_health_max;
             }
 
-        // Triggers + stages.
         if in_play {
             self.process_triggers(world);
             self.check_stage_transitions(world);
         }
 
-        // Bell (audible ding).
         let finished: Vec<Entity> = world.read_events::<TimerFinished>()
             .map(|ev| ev.entity)
             .collect();
@@ -1853,7 +1800,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // Systems.
         for sys in self.systems.iter_mut() {
             sys.update(world, dt);
         }
@@ -2003,7 +1949,6 @@ impl Game for FortressDemo {
 
         let target_name = world.get::<Name>(target).map(|n| n.0.clone()).unwrap_or_default();
 
-        // === ОБРАБОТКА КВЕСТОВ ===
         let rewards = self.quest_manager.on_enemy_killed(&target_name);
         if !rewards.is_empty() {
             self.hud.push("⭐ Quest Completed!");
@@ -2038,7 +1983,6 @@ impl Game for FortressDemo {
         self.pending_hit_stop = Some((strength, 0.12));
         self.auto_fire_accumulator = 0.0;
 
-        // RPG: XP.
         let xp_gain = 25u32;
         let levels = self.player_stats.gain_xp(xp_gain);
         if levels > 0 {
@@ -2054,7 +1998,6 @@ impl Game for FortressDemo {
             ));
         }
 
-        // Loot: roll + spawn pickups.
         let pos = world.get::<Transform>(target).map(|t| t.position).unwrap_or(Vec3::ZERO);
         let table_id = if target_name.contains("Boss") {
             "enemy_boss"
@@ -2209,7 +2152,6 @@ impl Game for FortressDemo {
             batch.axes(4.0);
         }
 
-        // Пути AI (DebugPath).
         for (e, agent) in world.query::<AiAgent>() {
             if !world.has::<DebugPath>(e) { continue; }
             if agent.path.len() < 2 { continue; }
@@ -2222,7 +2164,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // Конусы зрения.
         for (e, agent) in world.query::<AiAgent>() {
             let Some(t) = world.get::<Transform>(e) else { continue };
             let eye = t.position + Vec3::Y * 1.0;
@@ -2243,7 +2184,6 @@ impl Game for FortressDemo {
             batch.line(eye, eye + r * range, color);
         }
 
-        // Bounding-сферы выделенных.
         for &e in selected {
             if let (Some(_), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e))
                 && let Some(mesh) = renderer.meshes.get(&mh.0) {
@@ -2293,16 +2233,13 @@ impl Game for FortressDemo {
             self.hud.debug_overlay(ui, 60.0, world.len(), self.camera.position());
         }
 
-        // Crosshair (скрыт при ADS).
         if !is_victory && self.ads_blend < 0.5 && self.dialog_session.is_none() {
             let has_ammo = self.current_runtime().map(|r| r.mag > 0).unwrap_or(false);
             self.hud.crosshair(ui, has_ammo);
         }
 
-        // Health bar (слева снизу).
         self.hud.health_bar(ui, self.demo_health, self.demo_health_max);
 
-        // XP bar.
         if !is_victory {
             let sh = ui.screen_h();
             let bar_w = 220.0;
@@ -2324,11 +2261,13 @@ impl Game for FortressDemo {
                 [0.9, 0.95, 1.0, 1.0]);
         }
 
-        // Unspent points.
         if self.player_stats.unspent_points > 0 && !is_victory && !self.show_character_sheet {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
-            let text = crate::t!("hud.unspent_points", count = self.player_stats.unspent_points);
+            let text = format!(
+                "⭐ {} unspent stat points — press Tab",
+                self.player_stats.unspent_points
+            );
             let tw = ui.text_width(&text, 14.0);
             let y = sh - 24.0 - 22.0 - 6.0 - 12.0 - 22.0;
             ui.rect(sw * 0.5 - tw * 0.5 - 12.0, y - 4.0, tw + 24.0, 22.0,
@@ -2336,7 +2275,6 @@ impl Game for FortressDemo {
             ui.text_centered(sw * 0.5, y + 11.0, &text, 14.0, [1.0, 0.9, 0.5, 1.0]);
         }
 
-        // Weapon + ammo panel (справа снизу).
         if let (Some(w), Some(rt)) = (self.current_weapon(), self.current_runtime()) {
             let weapon_name = w.name.clone();
             let mag = rt.mag;
@@ -2346,7 +2284,7 @@ impl Game for FortressDemo {
             let reload_progress = rt.reload_progress(w);
             let out_of_ammo = mag == 0 && reserve == 0;
 
-            let ammo_text = format!("{}/{} · {} {}", mag, mag_size, crate::t!("hud.reserve"), reserve);
+            let ammo_text = format!("{}/{} · reserve {}", mag, mag_size, reserve);
             let size = 22.0;
             let name_size = 14.0;
             let sw = ui.screen_w();
@@ -2375,19 +2313,17 @@ impl Game for FortressDemo {
                 let bar_y = y - bar_h - 6.0;
                 ui.rect(x, bar_y, box_w, bar_h, [0.15, 0.15, 0.18, 0.9]);
                 ui.rect(x, bar_y, box_w * reload_progress, bar_h, [0.6, 0.9, 1.0, 1.0]);
-                ui.text_centered(x + box_w * 0.5, bar_y - 10.0, crate::t!("hud.reloading"),
+                ui.text_centered(x + box_w * 0.5, bar_y - 10.0, "RELOADING",
                     11.0, [0.8, 0.9, 1.0, 1.0]);
             }
         }
 
-        // OUT OF AMMO.
         if let Some(rt) = self.current_runtime()
             && rt.mag == 0 && rt.reserve == 0 && !is_victory {
                 ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() * 0.5 + 60.0,
-                    crate::t!("hud.out_of_ammo"), 28.0, [1.0, 0.3, 0.3, 0.9]);
+                    "OUT OF AMMO", 28.0, [1.0, 0.3, 0.3, 0.9]);
             }
 
-        // ADS vignette.
         if self.ads_blend > 0.5 && !is_victory {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
@@ -2401,10 +2337,8 @@ impl Game for FortressDemo {
             ui.rect(cx - r, cy + r, r * 2.0, cy - r, [0.0, 0.0, 0.0, alpha]);
         }
 
-        // Notifications.
         self.hud.notifications(ui);
 
-        // Objective (top center).
         if !is_victory {
             let sw = ui.screen_w();
             let size = 18.0;
@@ -2423,7 +2357,6 @@ impl Game for FortressDemo {
             ui.text_centered(sw * 0.5, y + 38.0, obj, size, [1.0, 0.95, 0.75, 1.0]);
         }
 
-        // Kills + key.
         {
             let sw = ui.screen_w();
             let size = 14.0;
@@ -2451,7 +2384,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // Dialog.
         if let Some((text, ttl)) = &self.campaign.dialog {
             let alpha = ttl.min(1.0);
             let sw = ui.screen_w();
@@ -2468,13 +2400,12 @@ impl Game for FortressDemo {
             ui.text_centered(sw * 0.5, y + box_h * 0.5, text, size, [1.0, 1.0, 1.0, alpha]);
         }
 
-        // Victory screen.
         if is_victory {
             let sw = ui.screen_w();
             let sh = ui.screen_h();
             ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.7]);
-            ui.text_centered(sw * 0.5, sh * 0.3, crate::t!("victory.title"), 64.0, [1.0, 0.85, 0.4, 1.0]);
-            ui.text_centered(sw * 0.5, sh * 0.42, crate::t!("victory.subtitle"), 24.0,
+            ui.text_centered(sw * 0.5, sh * 0.3, "VICTORY", 64.0, [1.0, 0.85, 0.4, 1.0]);
+            ui.text_centered(sw * 0.5, sh * 0.42, "The Fallen Citadel", 24.0,
                 [0.8, 0.85, 0.95, 1.0]);
             let stats = format!(
                 "Kills: {}  ·  Time: {:.1}s  ·  Level: {}",
@@ -2485,7 +2416,6 @@ impl Game for FortressDemo {
             ui.text_centered(sw * 0.5, sh * 0.55, &stats, 20.0, [1.0, 1.0, 1.0, 1.0]);
         }
 
-        // Pause menu.
         if self.demo_paused {
             if self.save_slots_cache_dirty {
                 self.refresh_save_slots();
@@ -2502,7 +2432,7 @@ impl Game for FortressDemo {
             ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
             ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
 
-            ui.text_centered(sw * 0.5, py + 30.0, crate::t!("pause.title"), 28.0, [1.0, 0.9, 0.6, 1.0]);
+            ui.text_centered(sw * 0.5, py + 30.0, "PAUSED", 28.0, [1.0, 0.9, 0.6, 1.0]);
             ui.text_centered(sw * 0.5, py + 58.0, self.campaign.stage.title(),
                 14.0, [0.7, 0.75, 0.85, 1.0]);
 
@@ -2510,14 +2440,14 @@ impl Game for FortressDemo {
             let bh = 36.0;
             let bx = sw * 0.5 - bw * 0.5;
 
-            if ui.button(bx, py + 82.0, bw, bh, crate::t!("pause.resume")) {
+            if ui.button(bx, py + 82.0, bw, bh, "Resume") {
                 self.demo_paused = false;
             }
-            if ui.button(bx, py + 122.0, bw, bh, crate::t!("pause.heal")) {
+            if ui.button(bx, py + 122.0, bw, bh, "Heal +25") {
                 self.heal(25.0);
-                self.hud.push(crate::t!("pause.healed"));
+                self.hud.push("Healed +25");
             }
-            if ui.button(bx, py + 162.0, bw, bh, crate::t!("pause.refill_ammo")) {
+            if ui.button(bx, py + 162.0, bw, bh, "Refill Ammo") {
                 for i in 0..self.weapons.len() {
                     if let (Some(w), Some(rt)) = (
                         self.weapons.get(i).cloned(),
@@ -2531,12 +2461,12 @@ impl Game for FortressDemo {
                 }
                 self.hud.push("Ammo refilled");
             }
-            if ui.button(bx, py + 202.0, bw, bh, crate::t!("pause.quit_menu")) {
+            if ui.button(bx, py + 202.0, bw, bh, "🏠 Quit to Main Menu") {
                 self.pending_quit_to_menu = true;
                 self.demo_paused = false;
             }
 
-            ui.text_centered(sw * 0.5, py + 258.0, crate::t!("pause.save_load"), 16.0,
+            ui.text_centered(sw * 0.5, py + 258.0, "SAVE / LOAD", 16.0,
                 [0.8, 0.85, 1.0, 1.0]);
 
             let slot_w = 420.0;
@@ -2584,20 +2514,18 @@ impl Game for FortressDemo {
             }
 
             ui.text_centered(sw * 0.5, py + ph - 18.0,
-                crate::t!("pause.hint"),
+                "S = Save · L = Load · X = Delete",
                 11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = crate::t!("hud.controls_hint");
+            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · E — говорить · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
             ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
                 text, 12.0, [1.0, 1.0, 1.0, 0.5]);
         }
 
-        // Character Sheet (Tab).
         if self.show_character_sheet && !self.demo_paused && !is_victory {
             draw_character_sheet(ui, &mut self.player_stats);
         }
 
-        // Inventory (I).
         if self.show_inventory && !self.demo_paused && !is_victory {
             let action = draw_inventory_ui(
                 ui,
@@ -2701,7 +2629,6 @@ impl Game for FortressDemo {
                 None => {}
             }
         } else if self.last_play_mode && !self.demo_paused {
-            // Подсказка "E — Talk".
             let cam_pos = self.camera.position();
             let cam_dir = self.camera.forward();
             if crate::game::dialogs::find_npc_in_front(
@@ -2711,12 +2638,12 @@ impl Game for FortressDemo {
                 let sh = ui.screen_h();
                 ui.text_centered(
                     sw * 0.5, sh * 0.5 + 50.0,
-                    crate::t!("hud.talk_hint"), 18.0, [1.0, 0.9, 0.5, 1.0],
+                    "[E]  Talk", 18.0, [1.0, 0.9, 0.5, 1.0],
                 );
             }
         }
-    }      // ← ДОБАВЬ: закрывает fn collect_ui
-}          // ← ДОБАВЬ: закрывает impl Game for FortressDemo
+    }
+}
 
 // ============================================================
 // Helpers — RNG
@@ -2835,7 +2762,6 @@ fn draw_inventory_ui(
 
     ui.rect(px + 16.0, py + 68.0, pw - 32.0, 1.0, [0.4, 0.45, 0.55, 0.8]);
 
-    // Equipment column.
     let eq_x = px + 20.0;
     let eq_y = py + 82.0;
     ui.text(eq_x, eq_y, "EQUIPMENT", 14.0, [0.9, 0.9, 0.5, 1.0]);
@@ -2863,7 +2789,6 @@ fn draw_inventory_ui(
         ey += 44.0;
     }
 
-    // Items grid 5×4.
     let grid_x = px + 280.0;
     let grid_y = py + 82.0;
     ui.text(grid_x, grid_y, "ITEMS", 14.0, [0.9, 0.9, 0.5, 1.0]);
