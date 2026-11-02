@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Game binaries (release artifacts)
+/dist/
+*.pak
+
+# Saves и настройки (пользовательские, не коммитим)
+/saves/
+settings.ron
+editor.ron
+input.ron
+crash.log
+clippy_baseline.txt
+tests_baseline.txt
+
+# Asset meta (генерируются AssetDatabase-ом при скане)
+assets/**/*.meta
+!assets/**/*.prefab.ron
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store

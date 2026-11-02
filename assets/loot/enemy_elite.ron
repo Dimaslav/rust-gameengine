@@ -1,0 +1,8 @@
+(
+    id: "enemy_elite",
+    entries: [
+        (item_id: "gold_coin", chance: 1.0, min_count: 10, max_count: 30),
+        (item_id: "health_potion", chance: 0.5, min_count: 1, max_count: 2),
+        (item_id: "leather_armor", chance: 0.15, min_count: 1, max_count: 1),
+    ],
+)

@@ -1,0 +1,9 @@
+(
+    id: "gold_coin",
+    name: "Gold Coin",
+    kind: Misc,
+    rarity: Common,
+    description: "Universal currency",
+    max_stack: 9999,
+    sell_price: 0,
+)

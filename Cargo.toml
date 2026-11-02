@@ -1,0 +1,65 @@
+[package]
+name = "rust-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+default-run = "rust-engine"
+
+[dependencies]
+# --- Оконная система ---
+winit = "0.30.13"
+rhai = "1.27.0"
+
+# --- Графика ---
+wgpu = "30.0.1"
+
+# --- Асинхронный запуск ---
+pollster = "1.0.1"
+
+# --- Сериализация / математика / утилиты ---
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = { version = "0.34.2", features = ["bytemuck", "serde"] }
+log = "0.4.34"
+env_logger = "0.11.11"
+
+# --- Картинки / HDR / EXR ---
+image = { version = "0.25.10", default-features = false, features = [
+    "png", "jpeg", "gif", "webp", "bmp", "tiff", "tga", "dds",
+    "hdr", "exr", "ico", "pnm", "qoi", "ff",
+    "avif",
+    "rayon",
+] }
+
+# --- zlib для FBX binary ---
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+
+# --- Ошибки / glTF / serde / ron ---
+anyhow = "1.0.104"
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+ron = "0.12.2"
+
+# --- UI ---
+egui = { version = "0.37.0", features = ["default_fonts"] }
+egui-wgpu = "0.37.0"
+egui-winit = "0.37.0"
+
+# --- Редактор: thumbnails для Content Browser ---
+egui_extras = { version = "0.37.0", features = ["image", "svg"] }
+
+# --- Аудио ---
+rodio = "0.21"
+
+# --- Нативный диалог выбора файлов ---
+rfd = "0.17.2"
+
+# --- Принудительная синхронизация версии windows для wgpu-hal и gpu-allocator ---
+windows = "0.62.2"
+
+[[bin]]
+name = "rust-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "packer"
+path = "src/bin/packer.rs"
