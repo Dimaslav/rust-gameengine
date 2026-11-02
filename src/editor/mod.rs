@@ -7,6 +7,7 @@ pub mod panels;
 pub mod picking;
 pub mod placement;
 pub mod play;
+pub mod scene_validation;
 pub mod settings;
 pub mod terrain_tool;
 pub mod theme;
@@ -30,6 +31,7 @@ use hotkeys::{HotkeyAction, HotkeyMap};
 use layout::{LayoutState, OutlinerFilter, Workspace, WorkspaceLayouts};
 use palette::PaletteState;
 use play::PlayState;
+use scene_validation::SceneIssue;
 use settings::EditorSettings;
 use terrain_tool::TerrainTool;
 use theme::Theme;
@@ -119,7 +121,7 @@ pub struct EditorState {
     pub hint: Option<(String, f32)>,
 
     pub save_path: String,
-    pub quick_save_path: String, // <-- ДОБАВЛЕНО
+    pub quick_save_path: String,
     pub pending_action: Option<EditorAction>,
 
     pub gizmo: GizmoState,
@@ -171,6 +173,9 @@ pub struct EditorState {
 
     pub hotkeys: HotkeyMap,
     pub hotkey_capture: Option<HotkeyAction>,
+
+    pub show_validation_panel: bool,
+    pub validation_issues: Vec<SceneIssue>,
 }
 
 // ============================================================
@@ -180,7 +185,7 @@ pub struct EditorState {
 #[derive(Debug, Clone)]
 pub enum EditorAction {
     Save,
-    QuickSave, // <-- ДОБАВЛЕНО
+    QuickSave,
     Load,
     AddCube,
     AddSphere,
@@ -234,6 +239,14 @@ pub enum EditorAction {
     AttachScript { entity: Entity, script: String },
     DetachScript(Entity),
     SelectEntity(Entity),
+
+    // === Scene Validation ===
+    ValidateScene,
+    SelectEntities(Vec<Entity>),
+    DeleteEntities(Vec<Entity>),
+    RemoveParent(Vec<Entity>),
+    ReplaceMissingMesh(Vec<Entity>, String),
+    ReplaceMissingMaterial(Vec<Entity>, String),
 }
 
 // ============================================================
@@ -326,6 +339,9 @@ impl EditorState {
 
             hotkeys: initial_hotkeys,
             hotkey_capture: None,
+
+            show_validation_panel: false,
+            validation_issues: Vec::new(),
         };
 
         s.save_path = s.settings.save_path.clone();

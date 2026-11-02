@@ -219,6 +219,14 @@ pub fn draw(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Scene Validation
+                let clicked = ui
+                    .toggle_value(&mut state.show_validation_panel, "🔍")
+                    .on_hover_text("Scene Validation")
+                    .clicked();
+                if clicked && state.show_validation_panel {
+                    *action = Some(EditorAction::ValidateScene);
+                }
                 ui.toggle_value(&mut state.layout.show_renderer_panel, "Renderer");
                 ui.toggle_value(&mut state.layout.show_inspector_panel, "Inspector");
                 ui.toggle_value(&mut state.layout.show_hierarchy_panel, "Hierarchy");

@@ -10,6 +10,7 @@ pub mod overlays;
 pub mod palette;
 pub mod renderer;
 pub mod right_panel;
+pub mod scene_validation;
 pub mod scripts;
 pub mod settings_panel;
 pub mod stats;
@@ -43,7 +44,6 @@ pub struct Stats {
     pub sel_vertices: usize,
     pub extra_lines: Vec<(String, String)>,
 
-    // === Этап 0 ===
     pub update_ms: f32,
     pub physics_ms: f32,
     pub ai_ms: f32,
@@ -101,16 +101,12 @@ pub fn draw_all(
         command_palette::draw(ctx, state, &mut action);
     }
 
-    // ИСПРАВЛЕНО: в egui 0.37 SidePanel и TopBottomPanel удалены.
-    // Мы создаём корневой Area, заполняем его размером экрана и 
-    // последовательно вырезаем из него панели через Panel::top/left/right.
     egui::Area::new(egui::Id::unique("editor_root_area"))
         .fixed_pos(egui::pos2(0.0, 0.0))
         .order(egui::Order::Background)
         .show(ctx, |ui| {
             ui.set_min_size(ui.ctx().content_rect().size());
 
-            // 1. Верхние панели
             top_bar::draw(ui, state, stats, &mut action);
 
             if !state.play.active {
@@ -122,13 +118,11 @@ pub fn draw_all(
                 }
             }
 
-            // 2. Боковые панели
             if !state.play.active {
                 left_panel::draw(ui, state, world, assets, stats, &mut action);
                 right_panel::draw(ui, state, world, assets, postfx, &mut action);
             }
 
-            // 3. CentralPanel забирает всё оставшееся место (вьюпорт)
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |_ui| {});
@@ -158,6 +152,7 @@ pub fn draw_all(
     state.layout.show_script_panel = show_scripts;
 
     settings_panel::draw_window(ctx, state, stats);
+    scene_validation::draw_window(ctx, state, world, &mut action);
 
     if state.play.active && state.play.paused {
         overlays::draw_pause_overlay(ctx, state, &mut action);

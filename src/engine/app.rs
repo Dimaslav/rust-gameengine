@@ -165,7 +165,6 @@ pub struct App<G: Game> {
     pub mode: AppMode,
     pub settings: AppSettings,
 
-    // === Этап 0: CPU budget ===
     last_collect_ms: f32,
     last_render_ms: f32,
     last_egui_ms: f32,
@@ -233,8 +232,8 @@ impl<G: Game> App<G> {
 
         let app_settings = AppSettings::load_or_default("settings.ron");
         let app_mode = AppMode::default();
-        
-                // === Locale ===
+
+        // === Locale ===
         crate::game::locale::set_language(&app_settings.language);
 
         let scripts = match ScriptSystem::new("assets/scripts") {
@@ -923,11 +922,11 @@ impl<G: Game> App<G> {
             HotkeyAction::Save => { self.editor.state.pending_action = Some(EditorAction::Save); }
             HotkeyAction::LoadScene => { self.editor.state.pending_action = Some(EditorAction::Load); }
             HotkeyAction::NewScene => { self.editor.state.pending_action = Some(EditorAction::NewScene); }
-            
+
             HotkeyAction::QuickSave => { self.editor.state.pending_action = Some(EditorAction::QuickSave); }
-            HotkeyAction::QuickLoad => { 
+            HotkeyAction::QuickLoad => {
                 let path = self.editor.state.quick_save_path.clone();
-                self.editor.state.pending_action = Some(EditorAction::LoadPath(path)); 
+                self.editor.state.pending_action = Some(EditorAction::LoadPath(path));
             }
 
             HotkeyAction::Undo => { self.editor.state.pending_action = Some(EditorAction::Undo); }
@@ -990,7 +989,7 @@ impl<G: Game> App<G> {
         let mut physics_ms = 0.0f32;
         let mut ai_ms = 0.0f32;
         let mut scripts_ms = 0.0f32;
-        
+
         self.time.tick();
         self.input.tick_begin_frame();
         self.game.camera_mut().update_shake(self.time.delta);
@@ -1293,39 +1292,71 @@ impl<G: Game> App<G> {
         // === DRAG AND DROP ASSETS ===
         let egui_wants_pointer = self.editor.egui_ctx.egui_wants_pointer_input();
         if !egui_wants_pointer {
-            if let Some(asset_id_arc) = egui::DragAndDrop::take_payload::<crate::assets::AssetId>(&self.editor.egui_ctx) {
-                let asset_id: crate::assets::AssetId = *asset_id_arc; // <- разыменование Arc<AssetId>
+            if let Some(asset_id_arc) =
+                egui::DragAndDrop::take_payload::<crate::assets::AssetId>(&self.editor.egui_ctx)
+            {
+                let asset_id: crate::assets::AssetId = *asset_id_arc;
                 let (mx, my) = self.input.mouse_pos;
                 if self.in_viewport(mx, my) {
                     let (origin, dir) = self.game.camera().ray_from_screen(
-                        mx, my, self.renderer.size.width as f32, self.renderer.size.height as f32,
+                        mx, my,
+                        self.renderer.size.width as f32,
+                        self.renderer.size.height as f32,
                     );
                     if let Some(hit_pos) = crate::editor::placement::ray_ground_plane(origin, dir, 0.0) {
                         if let Some(meta) = self.asset_db.get(asset_id) {
-                            // ...
                             let path = meta.path.clone();
                             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                            
+
                             if ext == "gltf" || ext == "glb" {
                                 let prefix = format!("spawned_{}", asset_id);
-                                if let Ok(loaded) = crate::render::load_gltf_into(&mut self.renderer, &path, &prefix) {
+                                if let Ok(loaded) = crate::render::load_gltf_into(
+                                    &mut self.renderer, &path, &prefix,
+                                ) {
                                     let e = self.world.spawn();
                                     self.world.insert(e, crate::game::components::Name(prefix));
-                                    self.world.insert(e, crate::game::components::Transform::at(hit_pos));
+                                    self.world.insert(
+                                        e,
+                                        crate::game::components::Transform::at(hit_pos),
+                                    );
                                     if let Some(inst) = loaded.instances.first() {
-                                        self.world.insert(e, crate::game::components::MeshHandle(inst.mesh_name.clone()));
-                                        self.world.insert(e, crate::game::components::MaterialHandle(inst.material_name.clone()));
+                                        self.world.insert(
+                                            e,
+                                            crate::game::components::MeshHandle(
+                                                inst.mesh_name.clone(),
+                                            ),
+                                        );
+                                        self.world.insert(
+                                            e,
+                                            crate::game::components::MaterialHandle(
+                                                inst.material_name.clone(),
+                                            ),
+                                        );
                                     }
                                     self.editor.state.select_single(e);
-                                    log::info!("Spawned glTF from drag-drop: {}", path.display());
+                                    log::info!(
+                                        "Spawned glTF from drag-drop: {}",
+                                        path.display()
+                                    );
                                 }
-                            } else if ext == "ron" && path.to_string_lossy().ends_with(".prefab.ron") {
-                                if let Ok(prefab) = crate::scene::load_prefab_from_file(&path) {
-                                    let new_ents = crate::scene::instantiate_prefab(&mut self.world, &prefab, hit_pos);
+                            } else if ext == "ron"
+                                && path.to_string_lossy().ends_with(".prefab.ron")
+                            {
+                                if let Ok(prefab) =
+                                    crate::scene::load_prefab_from_file(&path)
+                                {
+                                    let new_ents = crate::scene::instantiate_prefab(
+                                        &mut self.world,
+                                        &prefab,
+                                        hit_pos,
+                                    );
                                     if let Some(&first) = new_ents.first() {
                                         self.editor.state.select_single(first);
                                     }
-                                    log::info!("Spawned prefab from drag-drop: {}", path.display());
+                                    log::info!(
+                                        "Spawned prefab from drag-drop: {}",
+                                        path.display()
+                                    );
                                 }
                             }
                         }
@@ -2203,6 +2234,81 @@ impl<G: Game> App<G> {
                     }
                     Err(e) => log::error!("Terrain: load failed: {}", e),
                 }
+            }
+
+            // === Scene Validation ===
+            EditorAction::ValidateScene => {
+                let issues = crate::editor::scene_validation::validate_scene(
+                    &self.world, &self.renderer,
+                );
+                let errors = issues.iter().filter(|i| i.severity == crate::editor::scene_validation::IssueSeverity::Error).count();
+                let warnings = issues.iter().filter(|i| i.severity == crate::editor::scene_validation::IssueSeverity::Warning).count();
+                log::info!(
+                    "Scene validation: {} issues ({} errors, {} warnings)",
+                    issues.len(), errors, warnings,
+                );
+                self.editor.state.validation_issues = issues;
+                self.editor.state.show_validation_panel = true;
+            }
+
+            EditorAction::SelectEntities(entities) => {
+                let valid: Vec<Entity> = entities.into_iter()
+                    .filter(|e| self.world.entities().contains(e))
+                    .collect();
+                self.editor.state.selected = valid;
+            }
+
+            EditorAction::DeleteEntities(entities) => {
+                let valid: Vec<Entity> = entities.into_iter()
+                    .filter(|e| self.world.entities().contains(e))
+                    .collect();
+                if valid.is_empty() { return; }
+                let gs = self.game.save_game_state();
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
+                for e in &valid {
+                    self.world.despawn(*e);
+                }
+                self.editor.state.selected.retain(|e| self.world.entities().contains(e));
+                let issues = crate::editor::scene_validation::validate_scene(
+                    &self.world, &self.renderer,
+                );
+                self.editor.state.validation_issues = issues;
+            }
+
+            EditorAction::RemoveParent(entities) => {
+                for e in &entities {
+                    if self.world.entities().contains(e) {
+                        self.world.remove::<Parent>(*e);
+                    }
+                }
+                let issues = crate::editor::scene_validation::validate_scene(
+                    &self.world, &self.renderer,
+                );
+                self.editor.state.validation_issues = issues;
+            }
+
+            EditorAction::ReplaceMissingMesh(entities, mesh_name) => {
+                for e in &entities {
+                    if self.world.entities().contains(e) {
+                        self.world.insert(*e, MeshHandle(mesh_name.clone()));
+                    }
+                }
+                let issues = crate::editor::scene_validation::validate_scene(
+                    &self.world, &self.renderer,
+                );
+                self.editor.state.validation_issues = issues;
+            }
+
+            EditorAction::ReplaceMissingMaterial(entities, mat_name) => {
+                for e in &entities {
+                    if self.world.entities().contains(e) {
+                        self.world.insert(*e, MaterialHandle(mat_name.clone()));
+                    }
+                }
+                let issues = crate::editor::scene_validation::validate_scene(
+                    &self.world, &self.renderer,
+                );
+                self.editor.state.validation_issues = issues;
             }
         }
     }
