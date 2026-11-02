@@ -1,0 +1,12 @@
+(
+    id: "amulet_of_protection",
+    name: "Amulet of Protection",
+    kind: Trinket,
+    rarity: Uncommon,
+    description: "+3 Vitality, +2 Luck",
+    bonus_vitality: 3,
+    bonus_luck: 2,
+    sell_price: 120,
+    max_stack: 1,
+    equippable: true,
+)

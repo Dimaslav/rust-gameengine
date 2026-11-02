@@ -1,0 +1,12 @@
+(
+    id: "ancient_tome",
+    name: "Ancient Tome",
+    kind: Trinket,
+    rarity: Epic,
+    description: "+5 Intelligence, +2 Luck",
+    bonus_intelligence: 5,
+    bonus_luck: 2,
+    sell_price: 500,
+    max_stack: 1,
+    equippable: true,
+)

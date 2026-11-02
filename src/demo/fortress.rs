@@ -667,6 +667,9 @@ impl FortressDemo {
 
         spawn_dialog_npc(world, "npc_elder", c + Vec3::new(-7.0, 0.9, -7.0), "elder");
         spawn_dialog_npc(world, "npc_blacksmith", c + Vec3::new(7.0, 0.9, -7.0), "blacksmith");
+
+        // === Новые враги (по одному на арене, чтобы можно было протестировать) ===
+        enemy(world, "Act1_Archer", c + Vec3::new(-9.0, 0.0, 8.0), EnemyKind::Archer, None);
     }
 
     fn build_act2(&mut self, world: &mut World) {
@@ -773,6 +776,14 @@ impl FortressDemo {
         ] {
             blood_decal(world, c + Vec3::new(x, 0.02, z), s, a);
         }
+
+        // === Новые враги (типы) ===
+        enemy(world, "Act2_Mage_1", c + Vec3::new(-20.0, 0.0, 0.0), EnemyKind::Mage, None);
+        enemy(world, "Act2_Mage_2", c + Vec3::new(20.0, 0.0, 0.0), EnemyKind::Mage, None);
+        enemy(world, "Act2_Assassin_1",
+            c + Vec3::new(0.0, 0.0, 20.0), EnemyKind::Assassin, None);
+        enemy(world, "Act2_Tank_1",
+            c + Vec3::new(0.0, 0.0, -20.0), EnemyKind::Tank, None);
     }
 
     fn build_treasure_room(&mut self, world: &mut World, center: Vec3, half: f32) {
@@ -881,6 +892,14 @@ impl FortressDemo {
         enemy(world, "Act4_Wolf_1", c + Vec3::new(-10.0, 0.0, 5.0), EnemyKind::Patrol, None);
         enemy(world, "Act4_Wolf_2", c + Vec3::new( 10.0, 0.0, 5.0), EnemyKind::Patrol, None);
         enemy(world, "Act4_Wolf_3", c + Vec3::new(  0.0, 0.0, -10.0), EnemyKind::Patrol, None);
+        enemy(world, "Act4_Mage",
+            c + Vec3::new(-15.0, 0.0, -15.0), EnemyKind::Mage, None);
+        enemy(world, "Act4_Archer",
+            c + Vec3::new(15.0, 0.0, -15.0), EnemyKind::Archer, None);
+        enemy(world, "Act4_Assassin",
+            c + Vec3::new(0.0, 0.0, 15.0), EnemyKind::Assassin, None);
+        enemy(world, "Act4_Tank",
+            c + Vec3::new(-15.0, 0.0, 15.0), EnemyKind::Tank, None);        
 
         chest(world, "Act4_Chest_A", c + Vec3::new(-14.0, 0.25, 14.0), 750);
         chest(world, "Act4_Chest_B", c + Vec3::new( 14.0, 0.25, 14.0), 1000);
@@ -1601,6 +1620,10 @@ impl Game for FortressDemo {
             if input.key_pressed(KeyCode::Digit2) { self.switch_weapon(1); }
             if input.key_pressed(KeyCode::Digit3) { self.switch_weapon(2); }
             if input.key_pressed(KeyCode::Digit4) { self.switch_weapon(3); }
+            if input.key_pressed(KeyCode::Digit5) { self.switch_weapon(4); }
+            if input.key_pressed(KeyCode::Digit6) { self.switch_weapon(5); }
+            if input.key_pressed(KeyCode::Digit7) { self.switch_weapon(6); }
+            if input.key_pressed(KeyCode::Digit8) { self.switch_weapon(7); }
         }
 
         let rmb = input.mouse_down(MouseButton::Right);
@@ -2001,7 +2024,13 @@ impl Game for FortressDemo {
         let pos = world.get::<Transform>(target).map(|t| t.position).unwrap_or(Vec3::ZERO);
         let table_id = if target_name.contains("Boss") {
             "enemy_boss"
-        } else if target_name.contains("Elite") || target_name.contains("Guard") {
+        } else if target_name.contains("Elite")
+            || target_name.contains("Guard")
+            || target_name.contains("Tank")
+            || target_name.contains("Mage")
+            || target_name.contains("Archer")
+            || target_name.contains("Assassin")
+        {
             "enemy_elite"
         } else {
             "enemy_patrol"

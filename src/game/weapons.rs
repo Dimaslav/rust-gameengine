@@ -12,6 +12,10 @@ pub enum WeaponKind {
     SMG,
     Shotgun,
     Sniper,
+    Revolver,
+    Rifle,
+    LMG,
+    DMR,
 }
 
 impl WeaponKind {
@@ -21,6 +25,10 @@ impl WeaponKind {
             Self::SMG => "SMG",
             Self::Shotgun => "Shotgun",
             Self::Sniper => "Sniper",
+            Self::Revolver => "Revolver",
+            Self::Rifle => "Rifle",
+            Self::LMG => "LMG",
+            Self::DMR => "DMR",
         }
     }
 }
@@ -52,7 +60,6 @@ pub struct Weapon {
     pub reload_time: f32,
 
     /// Автоматический огонь (удержание ЛКМ).
-    /// `false` — по одному клику.
     pub auto: bool,
 
     /// Разброс от бедра в градусах.
@@ -61,7 +68,7 @@ pub struct Weapon {
     /// Разброс в прицеле (ПКМ) в градусах.
     pub spread_ads: f32,
 
-    /// FOV множитель в ADS. 1.0 = без изменения, 0.5 = zoom ×2.
+    /// FOV множитель в ADS.
     #[serde(default = "default_ads_mult")]
     pub ads_fov_mult: f32,
 
@@ -69,11 +76,11 @@ pub struct Weapon {
     #[serde(default)]
     pub recoil_up: f32,
 
-    /// Отдача по горизонтали в радианах (симметричная).
+    /// Отдача по горизонтали в радианах.
     #[serde(default)]
     pub recoil_side: f32,
 
-    /// Сколько дробинок вылетает за выстрел. 1 для всего кроме shotgun.
+    /// Сколько дробинок вылетает за выстрел.
     #[serde(default = "default_pellets")]
     pub pellets: u32,
 
@@ -88,45 +95,30 @@ pub struct Weapon {
     // View-model
     // ============================================================
 
-    /// Имя меша в `Renderer::meshes`. `None` → оружие невидимо.
     #[serde(default)]
     pub mesh: Option<String>,
 
-    /// Имя материала в `Renderer::materials`.
     #[serde(default)]
     pub material: Option<String>,
 
-    /// Масштаб меша. Меши `weapon_*` в `props.rs` нормализованы
-    /// примерно под 0.2 м в длину; если модель больше —
-    /// здесь можно подкрутить.
     #[serde(default = "default_weapon_scale")]
     pub scale: f32,
 
-    /// Позиция «на бедре» в camera-space (x=вправо, y=вверх, z=вперёд).
-    /// Использует знак, привычный из glTF/Unity: отрицательный z — перед
-    /// камерой. У нас наоборот: `update_viewmodel` берёт `-offset.z`.
     #[serde(default = "default_hip_pos")]
     pub hip_pos: [f32; 3],
 
-    /// Позиция в прицеле.
     #[serde(default = "default_ads_pos")]
     pub ads_pos: [f32; 3],
 
-    /// Углы Эйлера в радианах (XYZ) для hip-позиции.
     #[serde(default)]
     pub hip_rot: [f32; 3],
 
-    /// Углы Эйлера в радианах для ADS-позиции.
     #[serde(default)]
     pub ads_rot: [f32; 3],
 
-    /// Точка вылета пули и muzzle-flash, в camera-space.
-    /// Используется для спавна частиц и света.
     #[serde(default = "default_muzzle_pos")]
     pub muzzle_pos: [f32; 3],
 
-    /// Смещение отдачи при выстреле (метры). Сдвигает ствол
-    /// назад и вверх на короткое время.
     #[serde(default = "default_kick_back")]
     pub kick_back: f32,
 }
@@ -251,7 +243,8 @@ impl WeaponRegistry {
     }
 
     /// Fallback: если папка `assets/weapons/` пуста — регистрируем
-    /// встроенный набор из 4 стволов.
+    /// встроенный набор из 4 стволов. Новые стволы (revolver/rifle/lmg/dmr)
+    /// загружаются только из `.ron` файлов.
     pub fn default_set() -> Self {
         Self {
             weapons: vec![
@@ -263,7 +256,6 @@ impl WeaponRegistry {
                     spread_hip: 1.5, spread_ads: 0.3, ads_fov_mult: 0.85,
                     recoil_up: 0.010, recoil_side: 0.002,
                     pellets: 1, range: 100.0, ammo_pickup: 24,
-                    // === view-model ===
                     mesh: Some("weapon_pistol".into()),
                     material: Some("weapon_gunmetal".into()),
                     scale: 1.0,
@@ -342,7 +334,6 @@ impl WeaponRegistry {
 // Spread helper
 // ============================================================
 
-/// Простой thread-local LCG для случайного разброса.
 fn rand01() -> f32 {
     use std::cell::Cell;
     thread_local! {
@@ -357,9 +348,6 @@ fn rand01() -> f32 {
 }
 
 /// Случайное направление в конусе `spread_deg` вокруг `dir`.
-///
-/// Возвращает нормализованный вектор. `spread_deg == 0` → возвращает
-/// `dir` как есть.
 pub fn apply_spread(dir: glam::Vec3, spread_deg: f32) -> glam::Vec3 {
     use glam::Vec3;
     if spread_deg <= 1e-6 { return dir; }
@@ -367,12 +355,10 @@ pub fn apply_spread(dir: glam::Vec3, spread_deg: f32) -> glam::Vec3 {
     let rad = spread_deg.to_radians();
     let cos_max = rad.cos();
 
-    // Случайная точка в единичном конусе вокруг (0, 0, 1).
     let cos_t = 1.0 - rand01() * (1.0 - cos_max);
     let sin_t = (1.0 - cos_t * cos_t).sqrt();
     let phi = rand01() * std::f32::consts::TAU;
 
-    // Локальный ортонормированный базис вокруг `dir`.
     let up = if dir.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
     let t1 = up.cross(dir).normalize_or(Vec3::X);
     let t2 = dir.cross(t1);

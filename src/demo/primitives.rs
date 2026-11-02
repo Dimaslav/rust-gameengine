@@ -14,12 +14,6 @@ use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 // ============================================================
 
 /// Компонент «ворота едут вверх до open_y».
-///
-/// bugfix #2: раньше `open_gate` записывал `Velocity::new(0, 4, 0)`,
-/// а `MovementSystem` двигал объект каждый кадр без остановки —
-/// ворота уходили в бесконечность. Теперь рядом с `Velocity` кладётся
-/// `GateMotion`; отдельная система (`stop_gate_if_reached` в
-/// FortressDemo) сбрасывает velocity при достижении `open_y`.
 #[derive(Debug, Clone, Copy)]
 pub struct GateMotion {
     pub open_y: f32,
@@ -141,9 +135,6 @@ pub fn floor_tile(
 // ОСВЕЩЕНИЕ И ДЕКОР
 // ============================================================
 
-/// Стойка с факелом. Возвращает entity основания; свет — отдельная
-/// сущность в позиции чаши (pos + Y * 1.55). Игровой код обычно не
-/// трогает свет, но при желании можно найти по имени `<name>_Light`.
 pub fn torch(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     let name: String = name.into();
 
@@ -183,7 +174,6 @@ pub fn crystal(world: &mut World, name: impl Into<String>, pos: Vec3, color: [f3
 pub fn brazier(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     let name: String = name.into();
 
-    // Детализированная жаровня (3 ножки + чаша) растёт от y = 0 вверх.
     let bowl = world.spawn();
     world.insert(bowl, Name(format!("{}_Brazier", name)));
     world.insert(bowl, Transform::at(pos).with_scale(1.0));
@@ -255,9 +245,6 @@ pub fn rune_decal(world: &mut World, pos: Vec3, size: f32, color: [f32; 4]) -> E
 // ПРОПСЫ
 // ============================================================
 
-/// Детализированный ящик (доски + угловые стойки + металлические
-/// полосы). Геометрия вписана в [-0.5, 0.5] по всем осям, поэтому
-/// `Transform.scale = size` даёт куб со стороной `size`.
 pub fn crate_box(world: &mut World, name: impl Into<String>, pos: Vec3, size: f32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
@@ -284,8 +271,6 @@ pub fn dynamic_crate(world: &mut World, name: impl Into<String>, pos: Vec3, size
     e
 }
 
-/// Детализированная бочка (пузатая, с 3 обручами). Меш растёт из
-/// центра: [-0.5, +0.5] по Y, радиус ~0.5.
 pub fn barrel(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
@@ -299,8 +284,6 @@ pub fn barrel(world: &mut World, name: impl Into<String>, pos: Vec3) -> Entity {
     e
 }
 
-/// Детализированный сундук (корпус + крышка + металлические полосы +
-/// замок). Меш растёт от центра: X [-0.5, 0.5], Y [-0.5, 0.3], Z [-0.4, 0.4].
 pub fn chest(world: &mut World, name: impl Into<String>, pos: Vec3, gold: u32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
@@ -534,7 +517,7 @@ pub fn stop_gate_if_reached(world: &mut World, gate: Entity) -> bool {
 }
 
 // ============================================================
-// AI
+// AI — 8 типов врагов
 // ============================================================
 
 pub enum EnemyKind {
@@ -542,6 +525,10 @@ pub enum EnemyKind {
     Sniper,
     Boss,
     Elite,
+    Mage,
+    Assassin,
+    Tank,
+    Archer,
 }
 
 impl EnemyKind {
@@ -567,6 +554,30 @@ impl EnemyKind {
                 2.2, [0.85, 0.3, 0.85], 0.8,
                 120.0, 18.0, 0.7,
             ),
+            // Маг: медленный, но атакует с дистанции
+            EnemyKind::Mage => (
+                2.0, 25.0, 70f32.to_radians(), 20.0,
+                8.0, [0.5, 0.55, 1.0], 0.9,
+                80.0, 20.0, 1.8,
+            ),
+            // Убийца: очень быстрый, слабый, но злой
+            EnemyKind::Assassin => (
+                6.5, 20.0, 50f32.to_radians(), 30.0,
+                1.2, [0.3, 0.3, 0.4], 0.6,
+                45.0, 18.0, 0.5,
+            ),
+            // Танк: очень медленный, очень живучий
+            EnemyKind::Tank => (
+                1.2, 14.0, 55f32.to_radians(), 15.0,
+                2.0, [0.5, 0.5, 0.5], 1.8,
+                250.0, 22.0, 1.5,
+            ),
+            // Лучник: стреляет с большого расстояния
+            EnemyKind::Archer => (
+                2.8, 30.0, 55f32.to_radians(), 25.0,
+                10.0, [0.4, 0.6, 0.3], 0.75,
+                70.0, 20.0, 1.5,
+            ),
         }
     }
 
@@ -576,6 +587,10 @@ impl EnemyKind {
             EnemyKind::Sniper => "gold",
             EnemyKind::Boss => "arena_marker",
             EnemyKind::Elite => "flat_red",
+            EnemyKind::Mage => "emissive_cold",
+            EnemyKind::Assassin => "rpg_dungeon",
+            EnemyKind::Tank => "arena_column",
+            EnemyKind::Archer => "bark",
         }
     }
 

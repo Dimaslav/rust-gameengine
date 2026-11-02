@@ -1,8 +1,13 @@
 (
     id: "enemy_boss",
     entries: [
-        (item_id: "gold_coin", chance: 1.0, min_count: 100, max_count: 250),
+        (item_id: "gold_coin", chance: 1.0, min_count: 200, max_count: 500),
         (item_id: "lucky_charm", chance: 1.0, min_count: 1, max_count: 1),
-        (item_id: "leather_armor", chance: 0.8, min_count: 1, max_count: 1),
+        (item_id: "plate_armor", chance: 1.0, min_count: 1, max_count: 1),
+        (item_id: "ring_of_power", chance: 1.0, min_count: 1, max_count: 1),
+        (item_id: "ancient_tome", chance: 0.5, min_count: 1, max_count: 1),
+        (item_id: "steel_sword", chance: 1.0, min_count: 1, max_count: 1),
+        (item_id: "map_fragment", chance: 1.0, min_count: 2, max_count: 3),
+        (item_id: "ruby_gem", chance: 0.8, min_count: 3, max_count: 5),
     ],
 )
