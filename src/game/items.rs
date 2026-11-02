@@ -68,7 +68,9 @@ impl ItemKind {
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Rarity {
+    #[default]
     Common,
     Uncommon,
     Rare,
@@ -98,9 +100,6 @@ impl Rarity {
     }
 }
 
-impl Default for Rarity {
-    fn default() -> Self { Self::Common }
-}
 
 // ============================================================
 // Item — data-driven
@@ -442,14 +441,13 @@ impl Inventory {
         if item.is_stackable() {
             for slot in self.slots.iter_mut() {
                 if remaining == 0 { break; }
-                if let Some(s) = slot {
-                    if s.item_id == stack.item_id && s.count < max_stack {
+                if let Some(s) = slot
+                    && s.item_id == stack.item_id && s.count < max_stack {
                         let can_add = max_stack - s.count;
                         let add = can_add.min(remaining);
                         s.count += add;
                         remaining -= add;
                     }
-                }
             }
         }
 

@@ -308,7 +308,7 @@ impl InputMap {
         if !self.is_action_active(action) { return false; }
         let Some(list) = self.bindings.get(action) else { return false };
         list.iter().any(|b| match b {
-            Binding::Key(k) => k.to_keycode().map_or(false, |kc| input.key_pressed(kc)),
+            Binding::Key(k) => k.to_keycode().is_some_and(|kc| input.key_pressed(kc)),
             Binding::Mouse(m) => input.mouse_pressed(m.to_winit()),
         })
     }
@@ -317,7 +317,7 @@ impl InputMap {
         if !self.is_action_active(action) { return false; }
         let Some(list) = self.bindings.get(action) else { return false };
         list.iter().any(|b| match b {
-            Binding::Key(k) => k.to_keycode().map_or(false, |kc| input.key_down(kc)),
+            Binding::Key(k) => k.to_keycode().is_some_and(|kc| input.key_down(kc)),
             Binding::Mouse(m) => input.mouse_down(m.to_winit()),
         })
     }
@@ -326,7 +326,7 @@ impl InputMap {
         if !self.is_action_active(action) { return false; }
         let Some(list) = self.bindings.get(action) else { return false };
         list.iter().any(|b| match b {
-            Binding::Key(k) => k.to_keycode().map_or(false, |kc| input.key_released(kc)),
+            Binding::Key(k) => k.to_keycode().is_some_and(|kc| input.key_released(kc)),
             Binding::Mouse(m) => input.mouse_released(m.to_winit()),
         })
     }

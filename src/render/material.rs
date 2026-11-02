@@ -3,15 +3,14 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum AlphaMode {
+    #[default]
     Opaque,
     Mask,
     Blend,
 }
 
-impl Default for AlphaMode {
-    fn default() -> Self { Self::Opaque }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WrapMode { Repeat, ClampToEdge, MirroredRepeat }

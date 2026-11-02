@@ -1097,11 +1097,10 @@ impl FortressDemo {
 
     fn tick_gates(&mut self, world: &mut World) {
         for gate in [self.gate_1, self.gate_2, self.gate_4, self.gate_boss] {
-            if let Some(g) = gate {
-                if world.entities().contains(&g) && stop_gate_if_reached(world, g) {
+            if let Some(g) = gate
+                && world.entities().contains(&g) && stop_gate_if_reached(world, g) {
                     log::info!("Gate #{} stopped at open_y", g);
                 }
-            }
         }
     }
 
@@ -1123,14 +1122,13 @@ impl FortressDemo {
 
     fn on_trigger(&mut self, world: &mut World, e: Entity, name: &str) {
         // Auto-pickup: имя = "Pickup_<item_id>_<idx>".
-        if let Some(rest) = name.strip_prefix("Pickup_") {
-            if let Some((item_id, _idx)) = rest.rsplit_once('_') {
+        if let Some(rest) = name.strip_prefix("Pickup_")
+            && let Some((item_id, _idx)) = rest.rsplit_once('_') {
                 let count = world.get::<GoldValue>(e).map(|g| g.0).unwrap_or(1);
                 self.try_pickup(item_id, count);
                 world.despawn(e);
                 return;
             }
-        }
 
         if name == "key_red" {
             self.campaign.has_key_red = true;
@@ -1193,7 +1191,6 @@ impl FortressDemo {
 
         if name == "exit_zone" && self.campaign.stage != Stage::Victory {
             self.trigger_victory();
-            return;
         }
     }
 
@@ -1264,19 +1261,19 @@ impl FortressDemo {
         }
 
         // Обновляем ссылки при подмене World.
-        if self.gate_1.map_or(true, |e| !world.entities().contains(&e)) {
+        if self.gate_1.is_none_or(|e| !world.entities().contains(&e)) {
             self.gate_1 = Self::find_by_name(world, "gate_east_1");
         }
-        if self.gate_2.map_or(true, |e| !world.entities().contains(&e)) {
+        if self.gate_2.is_none_or(|e| !world.entities().contains(&e)) {
             self.gate_2 = Self::find_by_name(world, "gate_east_2");
         }
-        if self.gate_4.map_or(true, |e| !world.entities().contains(&e)) {
+        if self.gate_4.is_none_or(|e| !world.entities().contains(&e)) {
             self.gate_4 = Self::find_by_name(world, "gate_north_4");
         }
-        if self.gate_boss.map_or(true, |e| !world.entities().contains(&e)) {
+        if self.gate_boss.is_none_or(|e| !world.entities().contains(&e)) {
             self.gate_boss = Self::find_by_name(world, "gate_boss");
         }
-        if self.boss_entity.map_or(true, |e| !world.entities().contains(&e)) {
+        if self.boss_entity.is_none_or(|e| !world.entities().contains(&e)) {
             self.boss_entity = Self::find_by_name(world, "Boss_Dungeon");
         }
     }
@@ -1569,11 +1566,10 @@ impl Game for FortressDemo {
         }
 
         // Misc input.
-        if input.pressed("reload_shaders") {
-            if let Err(e) = renderer.reload_shaders() {
+        if input.pressed("reload_shaders")
+            && let Err(e) = renderer.reload_shaders() {
                 log::error!("Shader reload: {}", e);
             }
-        }
         let ctrl = input.key_down(KeyCode::ControlLeft) || input.key_down(KeyCode::ControlRight);
         let alt = input.key_down(KeyCode::AltLeft) || input.key_down(KeyCode::AltRight);
         if !ctrl && !alt {
@@ -1633,12 +1629,11 @@ impl Game for FortressDemo {
             let w_opt = self.current_weapon().cloned();
             let rt_opt = self.current_runtime().cloned();
             if let (Some(w), Some(rt)) = (w_opt, rt_opt) {
-                if !rt.reloading && rt.mag == 0 && rt.reserve > 0 {
-                    if let Some(rtm) = self.current_runtime_mut() {
+                if !rt.reloading && rt.mag == 0 && rt.reserve > 0
+                    && let Some(rtm) = self.current_runtime_mut() {
                         rtm.start_reload(&w);
                         self.hud.push(format!("Reloading {}…", w.name));
                     }
-                }
                 if input.key_pressed(KeyCode::KeyR) && !rt.reloading {
                     if rt.mag >= w.mag_size {
                         self.hud.push("Magazine full");
@@ -1667,8 +1662,8 @@ impl Game for FortressDemo {
 
             if can_shoot && trigger {
                 let rt_opt = self.current_runtime().cloned();
-                if let Some(rt) = rt_opt {
-                    if rt.can_fire() {
+                if let Some(rt) = rt_opt
+                    && rt.can_fire() {
                         if let Some(rtm) = self.current_runtime_mut() {
                             rtm.mag = rtm.mag.saturating_sub(1);
                             rtm.fire_cooldown = w.cooldown();
@@ -1708,7 +1703,6 @@ impl Game for FortressDemo {
                             (self.auto_fire_accumulator + 0.6).min(1.5);
                         self.weapon_recoil = (self.weapon_recoil + 0.35).min(1.0);
                     }
-                }
             }
         }
 
@@ -1758,8 +1752,8 @@ impl Game for FortressDemo {
         }
 
         // Damage accumulator (игрок получает урон через Health на AI-target).
-        if let Some(t) = self.ai_target_entity {
-            if let Some(h) = world.get_mut::<Health>(t) {
+        if let Some(t) = self.ai_target_entity
+            && let Some(h) = world.get_mut::<Health>(t) {
                 let damage = (self.last_target_hp - h.current).max(0.0);
                 if damage > 0.001 {
                     self.demo_health = (self.demo_health - damage).max(0.0);
@@ -1768,7 +1762,6 @@ impl Game for FortressDemo {
                 h.current = self.demo_health_max;
                 self.last_target_hp = self.demo_health_max;
             }
-        }
 
         // Triggers + stages.
         if in_play {
@@ -2021,9 +2014,8 @@ impl Game for FortressDemo {
         let entities: Vec<_> = world.entities().to_vec();
 
         for e in entities {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
+            if let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
             if world.has::<Decal>(e) { continue; }
 
             let (Some(_t), Some(m), Some(mat)) = (
@@ -2053,9 +2045,9 @@ impl Game for FortressDemo {
 
             let dist = (world_center - cam_pos).length();
             let dist_eff = (dist - world_radius).max(0.0) / lod_bias;
-            let lod_level = if mesh.lods.is_empty() { 0 }
-                else if dist_eff < lod_dists[0] { 0 }
+            let lod_level = if mesh.lods.is_empty() || dist_eff < lod_dists[0] { 0 }
                 else if dist_eff < lod_dists[1] || mesh.lods.len() < 1 { 1 }
+                else if dist_eff < lod_dists[1] || mesh.lods.is_empty() { 1 }
                 else if dist_eff < lod_dists[2] || mesh.lods.len() < 2 { 2.min(mesh.lods.len()) }
                 else { 3.min(mesh.lods.len()) };
 
@@ -2160,13 +2152,12 @@ impl Game for FortressDemo {
 
         // Bounding-сферы выделенных.
         for &e in selected {
-            if let (Some(_), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e)) {
-                if let Some(mesh) = renderer.meshes.get(&mh.0) {
+            if let (Some(_), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e))
+                && let Some(mesh) = renderer.meshes.get(&mh.0) {
                     let model = crate::game::world_matrix(world, e);
                     let (center, radius) = mesh.world_bounds(&model);
                     batch.sphere_wireframe(center, radius * 1.05, [1.0, 0.85, 0.2, 1.0], 24);
                 }
-            }
         }
 
         batch.vertices().to_vec()
@@ -2300,12 +2291,11 @@ impl Game for FortressDemo {
         }
 
         // OUT OF AMMO.
-        if let Some(rt) = self.current_runtime() {
-            if rt.mag == 0 && rt.reserve == 0 && !is_victory {
+        if let Some(rt) = self.current_runtime()
+            && rt.mag == 0 && rt.reserve == 0 && !is_victory {
                 ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() * 0.5 + 60.0,
                     "OUT OF AMMO", 28.0, [1.0, 0.3, 0.3, 0.9]);
             }
-        }
 
         // ADS vignette.
         if self.ads_blend > 0.5 && !is_victory {
@@ -2726,8 +2716,8 @@ fn draw_inventory_ui(
                 ui.text(cx + cell_w - 18.0, cy + 4.0,
                     &format!("{}", stack.count), 10.0, [1.0, 0.9, 0.5, 1.0]);
             }
-            if hovered && clicked {
-                if let Some(it) = item {
+            if hovered && clicked
+                && let Some(it) = item {
                     match it.kind {
                         ItemKind::Consumable => action = InventoryAction::Use(i),
                         ItemKind::Weapon
@@ -2736,7 +2726,6 @@ fn draw_inventory_ui(
                         _ => action = InventoryAction::Drop(i),
                     }
                 }
-            }
         }
     }
 

@@ -546,9 +546,9 @@ pub(super) fn encode_volumetric_compute(
     });
     cpass.set_pipeline(&r.volumetric_pipeline);
     cpass.set_bind_group(0, &r.sd.volumetric_compute_bg, &[]);
-    let gx = (VOLUMETRIC_GRID_W + 7) / 8;
-    let gy = (VOLUMETRIC_GRID_H + 7) / 8;
-    let gz = (VOLUMETRIC_GRID_D + 3) / 4;
+    let gx = VOLUMETRIC_GRID_W.div_ceil(8);
+    let gy = VOLUMETRIC_GRID_H.div_ceil(8);
+    let gz = VOLUMETRIC_GRID_D.div_ceil(4);
     cpass.dispatch_workgroups(gx, gy, gz);
 }
 

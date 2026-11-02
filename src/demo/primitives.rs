@@ -524,12 +524,11 @@ pub fn stop_gate_if_reached(world: &mut World, gate: Entity) -> bool {
         if let Some(t) = world.get_mut::<Transform>(gate) {
             t.position.y = motion.open_y;
         }
-        if let Some(v) = world.get_mut::<Velocity>(gate) {
-            if v.value.length_squared() > 1e-6 {
+        if let Some(v) = world.get_mut::<Velocity>(gate)
+            && v.value.length_squared() > 1e-6 {
                 v.value = Vec3::ZERO;
                 return true;
             }
-        }
     }
     false
 }

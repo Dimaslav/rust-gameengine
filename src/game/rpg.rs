@@ -107,8 +107,8 @@ impl RpgState {
     }
 
     pub fn start_quest(&mut self, id: u32, title: &str, total: u32) {
-        if !self.quests.contains_key(&id) {
-            self.quests.insert(id, Quest {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.quests.entry(id) {
+            e.insert(Quest {
                 title: title.to_string(),
                 total,
                 current: 0,

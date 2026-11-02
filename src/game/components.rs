@@ -149,7 +149,9 @@ pub enum Interactable {
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ElevatorState {
+    #[default]
     Idle,
     Moving,
     DoorsOpening,
@@ -157,9 +159,6 @@ pub enum ElevatorState {
     DoorsClosing,
 }
 
-impl Default for ElevatorState {
-    fn default() -> Self { Self::Idle }
-}
 
 /// Логика лифта с trapezoid-профилем скорости и sensor-дверью.
 ///

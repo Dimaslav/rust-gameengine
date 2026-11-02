@@ -213,15 +213,12 @@ fn import_fbx_ast(
     for m in &models {
         let Some(&entity) = model_to_entity.get(&m.id) else { continue };
         let parent_id = conn_map.parent_of.get(&m.id).copied();
-        if let Some(pid) = parent_id {
-            if pid != 0 {
-                if let Some(&pe) = model_to_entity.get(&pid) {
-                    if pe != entity {
+        if let Some(pid) = parent_id
+            && pid != 0
+                && let Some(&pe) = model_to_entity.get(&pid)
+                    && pe != entity {
                         world.insert(entity, Parent(pe));
                     }
-                }
-            }
-        }
     }
 
     log::info!(
@@ -363,7 +360,9 @@ fn find_layer_array(node: &FbxNode, layer: &str, elem: &str) -> Option<Vec<f32>>
 /// Применение `Quat::from_euler` в glam соответствует «XYZ» =
 /// сначала X, потом Y, потом Z (в исходной нотации FBX для eEulerXYZ).
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 enum RotationOrder {
+    #[default]
     XYZ,
     XZY,
     YZX,
@@ -372,11 +371,6 @@ enum RotationOrder {
     ZYX,
 }
 
-impl Default for RotationOrder {
-    fn default() -> Self {
-        RotationOrder::XYZ
-    }
-}
 
 impl RotationOrder {
     fn from_enum_code(code: i32) -> Self {
@@ -571,11 +565,10 @@ fn parse_material(node: &FbxNode) -> Option<FbxMaterial> {
                     }
                 }
                 "TransparencyFactor" => {
-                    if let Some(v) = floats.last() {
-                        if (m.opacity - 1.0).abs() < 1e-6 {
+                    if let Some(v) = floats.last()
+                        && (m.opacity - 1.0).abs() < 1e-6 {
                             m.opacity = 1.0 - *v;
                         }
-                    }
                 }
                 "Metallic" => {
                     if let Some(v) = floats.last() {

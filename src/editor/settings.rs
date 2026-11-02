@@ -144,7 +144,7 @@ impl EditorSettings {
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, text).map_err(|e| {
             log::warn!(
                 "Failed to write editor settings to {}: {}",

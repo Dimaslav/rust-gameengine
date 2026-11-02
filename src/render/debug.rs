@@ -5,8 +5,10 @@
 //! текстурой напрямую.
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum DebugView {
     /// Финальная картинка (bloom + ACES).
+    #[default]
     Final = 0,
     /// SSAO после blur. Grayscale.
     Ssao = 1,
@@ -20,11 +22,6 @@ pub enum DebugView {
     CsmCascade0 = 5,
 }
 
-impl Default for DebugView {
-    fn default() -> Self {
-        Self::Final
-    }
-}
 
 impl DebugView {
     /// Возвращает true, если нужен отдельный debug-pipeline.

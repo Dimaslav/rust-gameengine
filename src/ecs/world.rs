@@ -67,11 +67,10 @@ impl World {
     /// Вызывать после загрузки сцены / десериализации, если id вставлялись
     /// напрямую.
     pub fn sync_next_id(&mut self) {
-        if let Some(&max) = self.entities.iter().max() {
-            if max >= self.next_id {
+        if let Some(&max) = self.entities.iter().max()
+            && max >= self.next_id {
                 self.next_id = max.saturating_add(1);
             }
-        }
     }
 
     // ============================================================
@@ -192,11 +191,10 @@ impl World {
         // Заполняем буфер entity из A-стораджа без промежуточной
         // аллокации (`entities_iter()` возвращает `slice::Iter`,
         // `.copied()` даёт `u32`, `extend` пишет прямо в буфер).
-        if let Some(s) = self.storages.get(&a_type) {
-            if let Some(storage) = s.as_any().downcast_ref::<ComponentStorage<A>>() {
+        if let Some(s) = self.storages.get(&a_type)
+            && let Some(storage) = s.as_any().downcast_ref::<ComponentStorage<A>>() {
                 entities.extend(storage.entities_iter().copied());
             }
-        }
 
         if entities.is_empty() {
             // A-сторадж пуст или отсутствует — работа сделана,

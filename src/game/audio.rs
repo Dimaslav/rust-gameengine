@@ -26,10 +26,12 @@ use serde::{Deserialize, Serialize};
 /// применяется как глобальный множитель поверх уже применённых шин
 /// (см. `AudioSystem::bus_volume_effective`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum AudioBus {
     /// Итоговая громкость — множитель поверх всех остальных.
     Master,
     /// Игровые эффекты: выстрелы, взрывы, шаги, удары.
+    #[default]
     Sfx,
     /// Фоновая музыка и ambient-циклы.
     Music,
@@ -70,9 +72,6 @@ impl AudioBus {
     }
 }
 
-impl Default for AudioBus {
-    fn default() -> Self { Self::Sfx }
-}
 
 /// Звук, привязанный к entity.
 ///

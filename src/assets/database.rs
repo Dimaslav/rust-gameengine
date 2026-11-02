@@ -143,15 +143,14 @@ impl AssetDatabase {
             dependencies: Vec::new(),
         };
 
-        if let Ok(text) = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default()) {
-            if let Err(e) = std::fs::write(meta_path, text) {
+        if let Ok(text) = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+            && let Err(e) = std::fs::write(meta_path, text) {
                 log::warn!(
                     "AssetDatabase: cannot write .meta {}: {}",
                     meta_path.display(),
                     e
                 );
             }
-        }
 
         (id, settings, Vec::new())
     }

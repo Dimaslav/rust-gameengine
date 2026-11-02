@@ -136,21 +136,13 @@ impl Experience {
 // ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct PlayerStats {
     pub attributes: Attributes,
     pub experience: Experience,
     pub unspent_points: u32,
 }
 
-impl Default for PlayerStats {
-    fn default() -> Self {
-        Self {
-            attributes: Attributes::default(),
-            experience: Experience::default(),
-            unspent_points: 0,
-        }
-    }
-}
 
 impl PlayerStats {
     /// Получить опыт. Возвращает количество поднятых уровней.

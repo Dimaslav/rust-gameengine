@@ -99,11 +99,9 @@ struct ColliderSnapshot {
 fn collect(world: &World, filter: &QueryFilter) -> Vec<ColliderSnapshot> {
     let mut out = Vec::new();
     for &e in world.entities() {
-        if filter.visible_only {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
-        }
+        if filter.visible_only
+            && let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
         let Some(col) = world.get::<Collider>(e).copied() else { continue };
         let Some(t) = world.get::<Transform>(e) else { continue };
 
@@ -143,7 +141,7 @@ impl super::PhysicsWorld {
         for s in collect(world, &filter) {
             let Some((t, n)) = ray_collider(origin, dir, &s) else { continue };
             if t > max_dist { continue; }
-            if best.map_or(true, |b| t < b.distance) {
+            if best.is_none_or(|b| t < b.distance) {
                 best = Some(RayHit {
                     entity: s.entity,
                     point: origin + dir * t,
@@ -190,9 +188,8 @@ impl super::PhysicsWorld {
         let dir = dir.normalize_or_zero();
         if dir.length_squared() < 1e-12 { return false; }
         for s in collect(world, &filter) {
-            if let Some((t, _)) = ray_collider(origin, dir, &s) {
-                if t <= max_dist { return true; }
-            }
+            if let Some((t, _)) = ray_collider(origin, dir, &s)
+                && t <= max_dist { return true; }
         }
         false
     }
@@ -380,7 +377,7 @@ fn ray_capsule(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, radius: f32) -> Option
             let along = (pt - a).dot(ba) / baba.max(1e-12);
             let on_cap = if sgn < 0.0 { along <= 0.0 } else { along >= 1.0 };
             if !on_cap { continue; }
-            if best.map_or(true, |(bt, _)| t < bt) {
+            if best.is_none_or(|(bt, _)| t < bt) {
                 best = Some((t, n));
             }
         }

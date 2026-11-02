@@ -218,12 +218,10 @@ impl Bvh {
                     let tri = &triangles[ti as usize];
                     if let Some(t) =
                         ray_triangle(origin, dir, tri[0], tri[1], tri[2])
-                    {
-                        if t < best_t {
+                        && t < best_t {
                             best_t = t;
                             best_tri = Some(ti);
                         }
-                    }
                 }
             } else {
                 // Внутренний узел — кладём оба ребёнка.

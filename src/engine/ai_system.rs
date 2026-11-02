@@ -42,13 +42,11 @@ impl Default for AiTuning {
     }
 }
 
+#[derive(Default)]
 pub struct AiSystem {
     pub tuning: AiTuning,
 }
 
-impl Default for AiSystem {
-    fn default() -> Self { Self { tuning: AiTuning::default() } }
-}
 
 impl AiSystem {
     pub fn new() -> Self { Self::default() }
@@ -70,9 +68,8 @@ impl AiSystem {
     fn find_target(&self, world: &World) -> Option<(Entity, Vec3)> {
         for (e, _) in world.query::<AiTarget>() {
             let Some(t) = world.get::<Transform>(e) else { continue };
-            if let Some(h) = world.get::<Health>(e) {
-                if h.current <= 0.0 { continue; }
-            }
+            if let Some(h) = world.get::<Health>(e)
+                && h.current <= 0.0 { continue; }
             return Some((e, t.position));
         }
         None
@@ -105,7 +102,7 @@ impl AiSystem {
         agent.state_timer += dt;
 
         // --- Perception: зрение ---
-        let sees = target.map_or(false, |(_, tp)| {
+        let sees = target.is_some_and(|(_, tp)| {
             self.can_see(world, agent_pos, agent.yaw, tp, &agent)
         });
         if sees {
@@ -169,11 +166,10 @@ impl AiSystem {
             }
             AiState::Chase => {
                 let distance = target.map(|(_, tp)| (tp - agent_pos).length());
-                if let Some(d) = distance {
-                    if d <= agent.attack_range {
+                if let Some(d) = distance
+                    && d <= agent.attack_range {
                         agent.state = AiState::Attack;
                     }
-                }
                 if !sees && agent.time_since_seen > agent.lose_target_time {
                     if let Some(lp) = agent.last_seen_pos {
                         agent.state = AiState::Investigate;
@@ -188,13 +184,12 @@ impl AiSystem {
             }
             AiState::Attack => {
                 let distance = target.map(|(_, tp)| (tp - agent_pos).length());
-                if let Some(d) = distance {
-                    if d > agent.attack_range * 1.2 {
+                if let Some(d) = distance
+                    && d > agent.attack_range * 1.2 {
                         agent.state = AiState::Chase;
                     }
-                }
                 if !sees && agent.time_since_seen > agent.lose_target_time {
-                    if let Some(_) = agent.last_seen_pos {
+                    if agent.last_seen_pos.is_some() {
                         agent.state = AiState::Investigate;
                         agent.state_timer = 0.0;
                     } else {
@@ -281,15 +276,14 @@ impl AiSystem {
             world.insert(e, patrol);
             return;
         }
-        if let Some(nm) = navmesh {
-            if agent.repath_timer <= 0.0 || agent.path.is_empty() {
+        if let Some(nm) = navmesh
+            && (agent.repath_timer <= 0.0 || agent.path.is_empty()) {
                 if let Some(path) = nm.find_path(agent_pos, target) {
                     agent.path = nm.smooth_path(path, |a, b| segment_clear(world, a, b));
                     agent.path_index = 0;
                 }
                 agent.repath_timer = self.tuning.repath_interval;
             }
-        }
         self.follow_path(world, e, agent, dt);
         world.insert(e, patrol);
     }

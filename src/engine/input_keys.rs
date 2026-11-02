@@ -30,6 +30,7 @@ use winit::keyboard::KeyCode;
 /// `Unknown` — заглушка для всего, что не покрыто.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
+#[derive(Default)]
 pub enum Key {
     // --- Letters ---
     KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM,
@@ -56,6 +57,7 @@ pub enum Key {
     Semicolon, Quote, Comma, Period, Slash,
 
     /// Заглушка для `KeyCode`, не входящего в покрытие.
+    #[default]
     Unknown,
 }
 
@@ -183,9 +185,6 @@ impl Key {
     }
 }
 
-impl Default for Key {
-    fn default() -> Self { Self::Unknown }
-}
 
 #[cfg(test)]
 mod tests {

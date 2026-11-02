@@ -430,11 +430,10 @@ impl EditorState {
         self.selected.retain(|&e| world.entities().contains(&e));
         self.hierarchy_expanded.retain(|&e| world.entities().contains(&e));
         self.locked.retain(|&e| world.entities().contains(&e));
-        if let Some(s) = self.solo {
-            if !world.entities().contains(&s) {
+        if let Some(s) = self.solo
+            && !world.entities().contains(&s) {
                 self.solo = None;
             }
-        }
     }
 
     pub fn is_locked(&self, world: &World, mut e: Entity) -> bool {

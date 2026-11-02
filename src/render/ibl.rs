@@ -80,7 +80,7 @@ impl IblResources {
         let data: Vec<f32> = img.into_raw();
 
         let mut rgba: Vec<f32> = Vec::with_capacity(data.len() / 3 * 4);
-        for px in data.chunks_exact(3) {
+        for px in data.as_chunks::<3>().0 {
             rgba.push(px[0]);
             rgba.push(px[1]);
             rgba.push(px[2]);

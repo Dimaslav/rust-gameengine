@@ -164,7 +164,7 @@ pub fn draw_all(
     }
 
     if let Some((text, ttl)) = &state.hint {
-        let alpha = ttl.min(1.0).max(0.0);
+        let alpha = ttl.clamp(0.0, 1.0);
         egui::Area::new(egui::Id::unique("editor_hint"))
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
             .interactable(false)

@@ -76,11 +76,10 @@ impl ScriptSystem {
             .map(|(_, c)| c.script.clone())
             .collect();
         for s in scripts_in_use {
-            if !self.known.contains(&s) {
-                if self.engine.ensure_loaded(&s).is_ok() {
+            if !self.known.contains(&s)
+                && self.engine.ensure_loaded(&s).is_ok() {
                     self.known.insert(s);
                 }
-            }
         }
 
         // --- Собрать список entity со скриптами ---

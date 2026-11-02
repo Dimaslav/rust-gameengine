@@ -13,17 +13,14 @@ use crate::render::{Camera3D, LineBatch, Renderer};
 const PIXEL_THRESHOLD: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum GizmoMode {
+    #[default]
     Translate,
     Rotate,
     Scale,
 }
 
-impl Default for GizmoMode {
-    fn default() -> Self {
-        Self::Translate
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -220,7 +217,7 @@ pub fn pick_axis(
             }
         };
 
-        if d_px <= PIXEL_THRESHOLD && best.map_or(true, |(_, bd)| d_px < bd) {
+        if d_px <= PIXEL_THRESHOLD && best.is_none_or(|(_, bd)| d_px < bd) {
             best = Some((axis, d_px));
         }
     }

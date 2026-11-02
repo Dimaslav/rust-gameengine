@@ -107,7 +107,7 @@ fn rebuild_materials_using(renderer: &mut Renderer, texture_name: &str) {
 
     for (name, mat) in renderer.materials.iter() {
         let refs = mat.referenced_textures();
-        if refs.iter().any(|n| *n == texture_name) {
+        if refs.contains(&texture_name) {
             to_rebuild.push((name.clone(), mat.clone()));
         }
     }

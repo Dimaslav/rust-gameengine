@@ -43,18 +43,15 @@
 use crate::ecs::{Entity, System, World};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TimerMode {
     /// Срабатывает один раз и останавливается.
+    #[default]
     Once,
     /// Срабатывает каждые `duration` секунд, пока не удалят.
     Repeating,
 }
 
-impl Default for TimerMode {
-    fn default() -> Self {
-        Self::Once
-    }
-}
 
 /// Per-entity таймер.
 ///

@@ -107,13 +107,12 @@ pub fn instantiate_prefab(
         let mut s = snap.clone();
         s.parent = None;
 
-        if is_root(snap.parent) {
-            if let Some(ref mut t) = s.transform {
+        if is_root(snap.parent)
+            && let Some(ref mut t) = s.transform {
                 t.position[0] += offset.x;
                 t.position[1] += offset.y;
                 t.position[2] += offset.z;
             }
-        }
 
         let e = spawn_snapshot(world, s);
         idx_to_entity.insert(idx as u32, e);

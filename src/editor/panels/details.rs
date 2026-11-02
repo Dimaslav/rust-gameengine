@@ -337,11 +337,10 @@ fn draw_single(
     }
 
     // === Material (секция редактирования) ===
-    if let Some((name, original)) = &assets.selected_material {
-        if matches("material") {
+    if let Some((name, original)) = &assets.selected_material
+        && matches("material") {
             inspector_material(ui, world, e, editor, action, assets, name, original);
         }
-    }
 
     ui.separator();
     if ui.button("Deselect").clicked() {
@@ -638,12 +637,10 @@ fn inspector_transform(
                 if ui
                     .add_enabled(paste_enabled, egui::Button::new("Paste"))
                     .clicked()
-                {
-                    if let Some(src) = editor.clipboard_transform {
+                    && let Some(src) = editor.clipboard_transform {
                         editor.undo_requested = true;
                         *t = src;
                     }
-                }
                 if ui.button("Reset").clicked() {
                     editor.undo_requested = true;
                     t.position = Vec3::ZERO;
@@ -1137,14 +1134,13 @@ fn inspector_material(
                     changed = true;
                 }
             });
-            if m.alpha_mode == AlphaMode::Mask {
-                if ui
+            if m.alpha_mode == AlphaMode::Mask
+                && ui
                     .add(egui::Slider::new(&mut m.alpha_cutoff, 0.0..=1.0).text("Alpha cutoff"))
                     .changed()
                 {
                     changed = true;
                 }
-            }
             if ui
                 .checkbox(&mut m.double_sided, "Double-sided")
                 .changed()
@@ -1270,17 +1266,15 @@ fn inspector_rigidbody(
         .default_open(true)
         .show(ui, |ui| {
             let has_parent = world.has::<Parent>(e);
-            if has_parent {
-                if let Some(rb) = world.get::<RigidBody>(e) {
-                    if rb.body_type != BodyType::Static {
+            if has_parent
+                && let Some(rb) = world.get::<RigidBody>(e)
+                    && rb.body_type != BodyType::Static {
                         ui.label(
                             egui::RichText::new("⚠ Physics disabled: has Parent")
                                 .strong()
                                 .color(egui::Color32::from_rgb(240, 130, 130)),
                         );
                     }
-                }
-            }
             let Some(rb) = world.get_mut::<RigidBody>(e) else {
                 return;
             };
@@ -1438,12 +1432,11 @@ fn inspector_physics_material(
                     ("Concrete", PhysicsMaterial::concrete()),
                 ];
                 for (label, preset) in presets {
-                    if ui.small_button(label).clicked() {
-                        if let Some(m) = world.get_mut::<PhysicsMaterial>(e) {
+                    if ui.small_button(label).clicked()
+                        && let Some(m) = world.get_mut::<PhysicsMaterial>(e) {
                             *m = preset;
                             editor.undo_requested = true;
                         }
-                    }
                 }
             });
             ui.separator();

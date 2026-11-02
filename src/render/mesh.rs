@@ -176,7 +176,7 @@ impl Mesh {
         let aabb_max = max;
 
         let mut triangles = Vec::with_capacity(indices.len() / 3);
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             let a = Vec3::from(vertices[tri[0] as usize].position);
             let b = Vec3::from(vertices[tri[1] as usize].position);
             let c = Vec3::from(vertices[tri[2] as usize].position);
@@ -212,7 +212,7 @@ impl Mesh {
     pub fn rebuild_triangles_from_cpu(&mut self) {
         self.triangles.clear();
         self.triangles.reserve(self.cpu_indices.len() / 3);
-        for tri in self.cpu_indices.chunks_exact(3) {
+        for tri in self.cpu_indices.as_chunks::<3>().0 {
             let a = Vec3::from(self.cpu_vertices[tri[0] as usize].position);
             let b = Vec3::from(self.cpu_vertices[tri[1] as usize].position);
             let c = Vec3::from(self.cpu_vertices[tri[2] as usize].position);

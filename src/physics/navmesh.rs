@@ -1,40 +1,3 @@
-//! Grid-based navmesh generation + A* pathfinding.
-//!
-//! # Что это
-//!
-//! Не triangle-mesh (Delaunay/Recast), а **2D-сетка** с высотами
-//! и признаком walkable. Для типичных игровых сцен (пол + препятствия)
-//! этого достаточно: строит быстро, работает за O(1) на lookup,
-//! легко визуализируется.
-//!
-//! # Как бейкается
-//!
-//! 1. Собираем AABB всех физических коллайдеров.
-//! 2. Строим сетку с `cell_size` (по умолчанию 0.5 м).
-//! 3. Для каждой ячейки ищем **самый высокий верх** коллайдера,
-//!    покрывающего ячейку по XZ → это ground_y.
-//! 4. Ячейка блокируется, если какой-то коллайдер пересекает
-//!    вертикальный интервал [ground_y + step_height, ground_y + agent_height].
-//! 5. 8-соседняя связность: диагональ разрешена, только если оба
-//!    ортогональных соседа walkable (защита от срезания углов).
-//!
-//! # Ограничения v1
-//!
-//! * Многоуровневые сцены (мост над полом) не поддерживаются:
-//!   берётся самый верхний ground.
-//! * Криволинейные поверхности (сферы) аппроксимируются верхней
-//!   точкой AABB.
-//! * Нет "off-mesh links" (прыжки через пропасти).
-//!
-//! # Debug visualization
-//!
-//! ИЗМЕНЕНО (Фаза 6.5): добавлен `walkable_edges` — возвращает
-//! пары `Vec3` (начало, конец) для граничных рёбер walkable-ячеек.
-//! Рёбра рисуются в `LineBatch` в `App::redraw` при включённом
-//! `EditorSettings::show_navmesh`. Обходятся только те рёбра,
-//! где сосед (слева/справа/сверху/снизу) — не walkable, чтобы
-//! не плодить по 4 линии на каждую ячейку.
-
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -48,7 +11,7 @@ pub const DEFAULT_CELL_SIZE: f32 = 0.5;
 pub const DEFAULT_AGENT_RADIUS: f32 = 0.4;
 pub const DEFAULT_AGENT_HEIGHT: f32 = 1.8;
 pub const DEFAULT_STEP_HEIGHT: f32 = 0.4;
-pub const DEFAULT_SLOPE_LIMIT_COS: f32 = 0.7071;
+pub const DEFAULT_SLOPE_LIMIT_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 pub const DEFAULT_PADDING: f32 = 4.0;
 
 #[derive(Debug, Clone)]
@@ -194,7 +157,7 @@ impl Navmesh {
                 }
 
                 let ni = self.idx(nx as u32, nz as u32);
-                let step_cost = if dx != 0 && dz != 0 { 1.41421356 } else { 1.0 };
+                let step_cost = if dx != 0 && dz != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
                 let tentative = cur_g + step_cost;
 
                 if tentative < g_score[ni] {
@@ -230,7 +193,7 @@ impl Navmesh {
         let dx = (ax as f32 - bx as f32).abs();
         let dz = (az as f32 - bz as f32).abs();
         let (min, max) = if dx < dz { (dx, dz) } else { (dz, dx) };
-        min * 1.41421356 + (max - min)
+        min * std::f32::consts::SQRT_2 + (max - min)
     }
 
     // ============================================================
@@ -331,13 +294,11 @@ impl Navmesh {
         let mut any = false;
 
         for &e in world.entities() {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
+            if let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
             let Some(col) = world.get::<Collider>(e) else { continue };
-            if let Some(rb) = world.get::<RigidBody>(e) {
-                if rb.body_type == BodyType::Dynamic { continue; }
-            }
+            if let Some(rb) = world.get::<RigidBody>(e)
+                && rb.body_type == BodyType::Dynamic { continue; }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
             let (bmin, bmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
             min = min.min(bmin);
@@ -375,13 +336,11 @@ impl Navmesh {
         let mut cells = vec![Cell::default(); n];
 
         for &e in world.entities() {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
+            if let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
             let Some(col) = world.get::<Collider>(e) else { continue };
-            if let Some(rb) = world.get::<RigidBody>(e) {
-                if rb.body_type == BodyType::Dynamic { continue; }
-            }
+            if let Some(rb) = world.get::<RigidBody>(e)
+                && rb.body_type == BodyType::Dynamic { continue; }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
             let (cmin, cmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
 
@@ -406,13 +365,11 @@ impl Navmesh {
         }
 
         for &e in world.entities() {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
+            if let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
             let Some(col) = world.get::<Collider>(e) else { continue };
-            if let Some(rb) = world.get::<RigidBody>(e) {
-                if rb.body_type == BodyType::Dynamic { continue; }
-            }
+            if let Some(rb) = world.get::<RigidBody>(e)
+                && rb.body_type == BodyType::Dynamic { continue; }
             let Some(t) = world.get::<crate::game::components::Transform>(e) else { continue };
             let (cmin, cmax) = collider_aabb(col, t.position, t.rotation, t.scale.abs());
 
@@ -489,9 +446,8 @@ pub fn segment_clear(world: &World, a: Vec3, b: Vec3) -> bool {
     let dir = dir / len;
 
     for &e in world.entities() {
-        if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 { continue; }
-        }
+        if let Some(v) = world.get::<Visible>(e)
+            && !v.0 { continue; }
         let Some(col) = world.get::<Collider>(e) else { continue };
         let Some(rb) = world.get::<RigidBody>(e) else { continue };
         if rb.body_type != BodyType::Static { continue; }

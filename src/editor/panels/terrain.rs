@@ -71,11 +71,10 @@ pub fn draw(ui: &mut Ui, state: &mut EditorState, action: &mut Option<EditorActi
                     egui::Slider::new(&mut tool.flatten_target, -50.0..=200.0)
                         .text("Target Y"),
                 );
-                if ui.small_button("Use cursor Y").clicked() {
-                    if let Some(p) = tool.cursor_world {
+                if ui.small_button("Use cursor Y").clicked()
+                    && let Some(p) = tool.cursor_world {
                         tool.flatten_target = p.y;
                     }
-                }
             }
 
             ui.separator();

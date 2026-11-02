@@ -78,11 +78,10 @@ pub struct SaveManager {
 impl SaveManager {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
-        if !dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&dir) {
+        if !dir.exists()
+            && let Err(e) = std::fs::create_dir_all(&dir) {
                 log::warn!("SaveManager: cannot create {}: {}", dir.display(), e);
             }
-        }
         Self { dir }
     }
 

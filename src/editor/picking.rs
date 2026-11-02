@@ -150,7 +150,7 @@ pub fn pick_ray_cached(
             mesh.bvh().raycast(local_o, local_d, f32::INFINITY, &mesh.triangles)
         {
             let t_world = t_local / local_d_len;
-            if best.map_or(true, |(_, bt)| t_world < bt) {
+            if best.is_none_or(|(_, bt)| t_world < bt) {
                 best = Some((entry.entity, t_world));
             }
         }

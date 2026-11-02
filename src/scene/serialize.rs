@@ -874,11 +874,10 @@ fn spawn_all_entities(
     }
 
     for (new_e, old_parent) in pending_parent {
-        if let Some(old_p) = old_parent {
-            if let Some(&new_p) = id_map.get(&old_p) {
+        if let Some(old_p) = old_parent
+            && let Some(&new_p) = id_map.get(&old_p) {
                 world.insert(new_e, Parent(new_p));
             }
-        }
     }
 
     id_map
@@ -889,12 +888,11 @@ fn fix_call_elevator_refs(world: &mut World, id_map: &HashMap<u32, Entity>) {
         world.query::<Trigger>().map(|(e, _)| e).collect();
     for e in trigger_entities {
         let Some(mut t) = world.get::<Trigger>(e).cloned() else { continue };
-        if let TriggerAction::CallElevator { elevator, floor_idx } = t.action {
-            if let Some(&new_el) = id_map.get(&elevator) {
+        if let TriggerAction::CallElevator { elevator, floor_idx } = t.action
+            && let Some(&new_el) = id_map.get(&elevator) {
                 t.action = TriggerAction::CallElevator { elevator: new_el, floor_idx };
                 world.insert(e, t);
             }
-        }
     }
 }
 
@@ -1060,14 +1058,13 @@ fn restore_terrain(
     }
     hm.recompute_min_max();
 
-    if let Some(splat_b64) = &tref.splat_b64 {
-        if let Ok(splat) = b64_decode(splat_b64) {
+    if let Some(splat_b64) = &tref.splat_b64
+        && let Ok(splat) = b64_decode(splat_b64) {
             let n = (hm.resolution * hm.resolution * 4) as usize;
             if splat.len() >= n {
                 hm.splat[..n].copy_from_slice(&splat[..n]);
             }
         }
-    }
 
     let mesh = generate_terrain_mesh(&renderer.device, &hm);
     renderer.add_mesh("terrain", mesh);
@@ -1098,7 +1095,7 @@ const B64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;

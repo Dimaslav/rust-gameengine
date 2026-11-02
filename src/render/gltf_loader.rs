@@ -120,7 +120,7 @@ pub fn load_gltf_into_with(
                 }
                 gltf::image::Format::R8G8B8 => {
                     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                    for px in data.chunks_exact(3) {
+                    for px in data.as_chunks::<3>().0 {
                         rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
                     }
                     if is_linear {
@@ -608,7 +608,7 @@ fn make_track(
             times.len()
         );
         let mut pairs: Vec<(f32, [f32; 4])> =
-            times.into_iter().zip(values.into_iter()).collect();
+            times.into_iter().zip(values).collect();
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         times = pairs.iter().map(|p| p.0).collect();
         values = pairs.into_iter().map(|p| p.1).collect();

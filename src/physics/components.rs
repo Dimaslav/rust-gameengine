@@ -4,15 +4,14 @@ use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum BodyType {
     Static,
+    #[default]
     Dynamic,
     Kinematic,
 }
 
-impl Default for BodyType {
-    fn default() -> Self { Self::Dynamic }
-}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RigidBody {

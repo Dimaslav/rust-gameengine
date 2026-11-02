@@ -66,9 +66,8 @@ impl ColliderCache {
         self.hash.clear();
 
         for &e in world.entities() {
-            if let Some(v) = world.get::<Visible>(e) {
-                if !v.0 { continue; }
-            }
+            if let Some(v) = world.get::<Visible>(e)
+                && !v.0 { continue; }
             let Some(col) = world.get::<Collider>(e).copied() else { continue };
             if world.get::<Transform>(e).is_none() { continue; }
 

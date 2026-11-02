@@ -96,11 +96,8 @@ pub fn parse_fbx_binary(bytes: &[u8]) -> Result<Vec<FbxNode>> {
     let mut cur = Cursor::new(bytes, header_end);
     let mut nodes = Vec::new();
     let root_end = bytes.len();
-    loop {
-        match read_node(&mut cur, version, 0, root_end)? {
-            Some(n) => nodes.push(n),
-            None => break,
-        }
+    while let Some(n) = read_node(&mut cur, version, 0, root_end)? {
+        nodes.push(n);
     }
 
     log::debug!(
@@ -449,35 +446,35 @@ fn read_array(
     match tag {
         'f' => {
             let mut v = Vec::with_capacity(array_len as usize);
-            for c in bytes.chunks_exact(4) {
+            for c in bytes.as_chunks::<4>().0 {
                 v.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64);
             }
             Ok(FbxArg::FloatArray(v))
         }
         'd' => {
             let mut v = Vec::with_capacity(array_len as usize);
-            for c in bytes.chunks_exact(8) {
+            for c in bytes.as_chunks::<8>().0 {
                 v.push(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
             }
             Ok(FbxArg::FloatArray(v))
         }
         'l' => {
             let mut v = Vec::with_capacity(array_len as usize);
-            for c in bytes.chunks_exact(8) {
+            for c in bytes.as_chunks::<8>().0 {
                 v.push(i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
             }
             Ok(FbxArg::IntArray(v))
         }
         'i' => {
             let mut v = Vec::with_capacity(array_len as usize);
-            for c in bytes.chunks_exact(4) {
+            for c in bytes.as_chunks::<4>().0 {
                 v.push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64);
             }
             Ok(FbxArg::IntArray(v))
         }
         'b' => {
             let mut v = Vec::with_capacity(array_len as usize);
-            for c in bytes.chunks_exact(1) {
+            for c in bytes.as_chunks::<1>().0 {
                 v.push(c[0]);
             }
             Ok(FbxArg::BoolArray(v))

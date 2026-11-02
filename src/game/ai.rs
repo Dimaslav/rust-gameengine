@@ -28,8 +28,10 @@ use crate::ecs::Entity;
 ///   └────(has_patrol)───── Patrol
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum AiState {
     /// Стоит, ждёт.
+    #[default]
     Idle,
     /// Ходит по точкам маршрута.
     Patrol,
@@ -43,9 +45,6 @@ pub enum AiState {
     Dead,
 }
 
-impl Default for AiState {
-    fn default() -> Self { Self::Idle }
-}
 
 /// Агент с FSM.
 ///

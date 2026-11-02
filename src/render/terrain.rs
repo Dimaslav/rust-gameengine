@@ -15,15 +15,14 @@ use crate::render::mesh::{Mesh, Vertex3D};
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Falloff {
     Constant,
     Linear,
+    #[default]
     Smooth,
 }
 
-impl Default for Falloff {
-    fn default() -> Self { Self::Smooth }
-}
 
 impl Falloff {
     #[inline]
@@ -744,8 +743,8 @@ pub fn ray_heightmap(
         let p = origin + dir * t;
         let diff = p.y - heightmap.sample(p.x, p.z);
 
-        if let Some(dp) = diff_prev {
-            if diff <= 0.0 && dp > 0.0 {
+        if let Some(dp) = diff_prev
+            && diff <= 0.0 && dp > 0.0 {
                 // Бинарный поиск между t_prev и t.
                 let mut a = t_prev;
                 let mut b = t;
@@ -760,7 +759,6 @@ pub fn ray_heightmap(
                     return Some(hit);
                 }
             }
-        }
 
         diff_prev = Some(diff);
         t_prev = t;

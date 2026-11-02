@@ -284,7 +284,9 @@ fn default_motion_blur_max() -> f32 { 32.0 }
 fn default_motion_blur_samples() -> u32 { 12 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum Tonemapper {
+    #[default]
     AgX = 0,
     ACESFilmic = 1,
     Reinhard = 2,
@@ -292,9 +294,6 @@ pub enum Tonemapper {
     None = 4,
 }
 
-impl Default for Tonemapper {
-    fn default() -> Self { Self::AgX }
-}
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostFx {

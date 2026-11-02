@@ -83,12 +83,11 @@ impl HierarchySnapshot {
         let mut has_parent: HashSet<Entity> = HashSet::new();
 
         for &e in &all {
-            if let Some(Parent(p)) = world.get::<Parent>(e).copied() {
-                if all_set.contains(&p) && p != e {
+            if let Some(Parent(p)) = world.get::<Parent>(e).copied()
+                && all_set.contains(&p) && p != e {
                     children_of.entry(p).or_default().push(e);
                     has_parent.insert(e);
                 }
-            }
         }
 
         let mut roots: Vec<Entity> = all
@@ -247,8 +246,8 @@ pub fn draw_section(
         if ui.small_button("⤡ Collapse").clicked() {
             editor.hierarchy_expanded.clear();
         }
-        if !editor.selected.is_empty() {
-            if ui.small_button("→ Selected").clicked() {
+        if !editor.selected.is_empty()
+            && ui.small_button("→ Selected").clicked() {
                 let selected: Vec<Entity> = editor.selected.clone();
                 for e in selected {
                     let mut cur = e;
@@ -261,7 +260,6 @@ pub fn draw_section(
                     }
                 }
             }
-        }
     });
 
     ui.separator();

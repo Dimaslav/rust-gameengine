@@ -94,8 +94,8 @@ pub fn draw_window(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if let Some(e) = primary {
-                                            if ui
+                                        if let Some(e) = primary
+                                            && ui
                                                 .small_button("→ selected")
                                                 .on_hover_text(format!(
                                                     "Attach '{}' to #{}",
@@ -108,7 +108,6 @@ pub fn draw_window(
                                                     script: name.clone(),
                                                 });
                                             }
-                                        }
                                     },
                                 );
                             });

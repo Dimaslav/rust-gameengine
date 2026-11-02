@@ -192,7 +192,7 @@ impl AudioSystem {
         let source = SharedSamples {
             data: entry.samples, pos: 0, sample_rate: entry.sample_rate,
         };
-        let sink = Sink::connect_new(&self._stream.mixer());
+        let sink = Sink::connect_new(self._stream.mixer());
         sink.set_volume(volume);
         sink.append(source);
         sink.detach();
@@ -222,7 +222,7 @@ impl AudioSystem {
                 let source = SharedSamples {
                     data: entry.samples, pos: 0, sample_rate: entry.sample_rate,
                 };
-                let sink = Sink::connect_new(&self._stream.mixer());
+                let sink = Sink::connect_new(self._stream.mixer());
                 let initial_vol = (src.volume * self.bus_volume_effective(src.bus)).clamp(0.0, 4.0);
                 sink.set_volume(initial_vol);
                 sink.set_speed(src.pitch.max(0.01));

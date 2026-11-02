@@ -24,17 +24,13 @@ use crate::render::Renderer;
 // Публичный API
 // ============================================================
 
+#[derive(Default)]
 pub struct FbxExportOptions {
     /// `Some(list)` — экспортировать только эти entity.
     /// `None` — всю сцену.
     pub selected: Option<Vec<Entity>>,
 }
 
-impl Default for FbxExportOptions {
-    fn default() -> Self {
-        Self { selected: None }
-    }
-}
 
 pub struct FbxExportStats {
     pub entities: usize,
@@ -98,11 +94,10 @@ fn collect_items<'a>(
     let mut items = Vec::new();
     for e in candidates {
         // Скрытые не экспортируем.
-        if let Some(v) = world.get::<Visible>(e) {
-            if !v.0 {
+        if let Some(v) = world.get::<Visible>(e)
+            && !v.0 {
                 continue;
             }
-        }
         let Some(mh) = world.get::<MeshHandle>(e) else { continue };
         if world.get::<Transform>(e).is_none() {
             continue;
@@ -149,12 +144,11 @@ fn build_fbx_string(
     let mut material_ids: HashMap<String, u64> = HashMap::new();
     let mut next_mat_id: u64 = 3_000_000;
     for it in &items {
-        if let Some(mn) = &it.material_name {
-            if !material_ids.contains_key(mn) {
+        if let Some(mn) = &it.material_name
+            && !material_ids.contains_key(mn) {
                 material_ids.insert(mn.clone(), next_mat_id);
                 next_mat_id += 1;
             }
-        }
     }
 
     // Geometry/Model IDs.
@@ -316,7 +310,7 @@ fn write_geometry(
     // (`-idx - 1`), так кодируется конец полигона в FBX.
     let tri_count = mesh.cpu_indices.len() / 3;
     let mut pvi: Vec<i64> = Vec::with_capacity(tri_count * 3);
-    for tri in mesh.cpu_indices.chunks_exact(3) {
+    for tri in mesh.cpu_indices.as_chunks::<3>().0 {
         pvi.push(tri[0] as i64);
         pvi.push(tri[1] as i64);
         pvi.push(-(tri[2] as i64) - 1);
@@ -326,7 +320,7 @@ fn write_geometry(
     // polygon-vertex, в том же порядке, что и PolygonVertexIndex.
     let mut poly_normals: Vec<[f32; 3]> = Vec::with_capacity(tri_count * 3);
     let mut poly_uvs: Vec<[f32; 2]> = Vec::with_capacity(tri_count * 3);
-    for tri in mesh.cpu_indices.chunks_exact(3) {
+    for tri in mesh.cpu_indices.as_chunks::<3>().0 {
         for k in 0..3 {
             let vi = tri[k] as usize;
             poly_normals.push(normals[vi]);
@@ -538,11 +532,10 @@ fn write_connections(
         writeln!(out, "    C: \"OO\", {}, {}", geom_id, model_id).unwrap();
 
         // Material → Model
-        if let Some(mn) = &it.material_name {
-            if let Some(&mid) = material_ids.get(mn) {
+        if let Some(mn) = &it.material_name
+            && let Some(&mid) = material_ids.get(mn) {
                 writeln!(out, "    C: \"OO\", {}, {}", mid, model_id).unwrap();
             }
-        }
 
         let _ = it; // silence unused
     }

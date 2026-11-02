@@ -285,8 +285,8 @@ impl AnimationRuntime {
 
             // 6. Обновляем скелет.
             let skel_handle = world.get::<SkeletonHandle>(e).cloned();
-            if let Some(handle) = skel_handle {
-                if let Some(skel) = skeletons.get(&handle.0) {
+            if let Some(handle) = skel_handle
+                && let Some(skel) = skeletons.get(&handle.0) {
                     let final_time = if looping && duration > 0.0 {
                         to_time
                     } else {
@@ -296,7 +296,6 @@ impl AnimationRuntime {
                     let joint_matrices = skel.joint_matrices(&local_pose);
                     renderer.update_skeleton(&handle.0, &joint_matrices);
                 }
-            }
 
             // 7. Запоминаем new_time для следующего кадра.
             self.prev_times.insert(e, new_time);

@@ -34,7 +34,9 @@ use super::settings::EditorSettings;
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
     Serialize, Deserialize,
 )]
+#[derive(Default)]
 pub enum Workspace {
+    #[default]
     Layout,
     Modeling,
     LevelDesign,
@@ -72,11 +74,6 @@ impl Workspace {
     }
 }
 
-impl Default for Workspace {
-    fn default() -> Self {
-        Workspace::Layout
-    }
-}
 
 // ============================================================
 // PanelId

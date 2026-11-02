@@ -1,9 +1,32 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+// Явно разрешённые clippy-category с обоснованием:
+// * too_many_arguments — функции построения pipeline'ов, primitive-хелперы
+//   (`wall`, `static_mesh`, `collision::resolve_movement_ex`) требуют
+//   много параметров по существу (координаты, размеры, материалы, коллизии).
+//   Рефакторинг в struct-билдер только ухудшит читаемость.
+#![allow(clippy::too_many_arguments)]
+// * type_complexity — `[([f32;3], [f32;3], [f32;3], [f32;3]); 6]` для граней
+//   куба и кортеж возврата из `load_scene_*` — раскладывать в алиасы
+//   без пользы для читаемости.
+#![allow(clippy::type_complexity)]
+// * mut_from_ref — `ScriptHost::world_mut(&self) -> &mut World` — намеренный
+//   unsafe-доступ через `*mut World` (см. комментарии в `scripting/host.rs`).
+//   Без этого Rhai не может мутировать мир из скрипта.
+#![allow(clippy::mut_from_ref)]
+// * wrong_self_convention — `to_light(&self)`, `to_wgpu(&self)`, `to_orbit(&mut self)`
+//   называются так по смыслу, менять имена (`as_light`, `into_wgpu`) — churn
+//   по всему проекту без пользы.
+#![allow(clippy::wrong_self_convention)]
+// * upper_case_acronyms — `SMG`, `XYZ`, `ZXY` — это стандартные имена
+//   (WeaponKind::SMG, EulerRot::XYZ), они не «acronym в обычном слове».
+#![allow(clippy::upper_case_acronyms)]
+
 mod app_state;
 mod menu;
 mod assets;
+// ... (дальше без изменений)
 mod demo;
 mod ecs;
 mod editor;

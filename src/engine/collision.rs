@@ -123,7 +123,7 @@ pub fn find_support(
 
         let normal = surface_normal_at_entry(e, feet_pos);
 
-        if best.as_ref().map_or(true, |b| top_y > b.top_y) {
+        if best.as_ref().is_none_or(|b| top_y > b.top_y) {
             best = Some(SupportInfo { entity: e.entity, normal, top_y });
         }
     }

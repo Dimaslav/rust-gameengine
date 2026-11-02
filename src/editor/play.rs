@@ -125,7 +125,7 @@ impl Default for PlayState {
             air_accel_tau: 0.30,
             step_down_max: 0.5,
             // cos(45°) = 0.7071
-            slope_walk_limit_cos: 0.7071,
+            slope_walk_limit_cos: std::f32::consts::FRAC_1_SQRT_2,
             slope_slide_speed: 6.0,
             ground_normal: Vec3::Y,
 
