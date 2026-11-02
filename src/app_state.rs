@@ -7,22 +7,15 @@ use serde::{Deserialize, Serialize};
 // AppMode
 // ============================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum AppMode {
     /// Главное меню. Сцена НЕ обновляется, но рендерится (фон).
     MainMenu,
     /// Обычная игра/редактор.
+    #[default]
     InGame,
     /// Настройки. `return_to` — куда вернуться по «Back».
     Settings { return_to: Box<AppMode> },
-}
-
-impl Default for AppMode {
-    fn default() -> Self {
-        // Движок стартует сразу в редакторе (без главного меню).
-        // Меню доступно через SKIP_MAIN_MENU=0 или в standalone-билде.
-        AppMode::InGame
-    }
 }
 
 impl AppMode {
@@ -35,21 +28,11 @@ impl AppMode {
 // AppSettings
 // ============================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)] pub window: WindowSettings,
     #[serde(default)] pub graphics: GraphicsSettings,
     #[serde(default)] pub audio: AudioSettings,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            window: WindowSettings::default(),
-            graphics: GraphicsSettings::default(),
-            audio: AudioSettings::default(),
-        }
-    }
 }
 
 impl AppSettings {
@@ -62,7 +45,7 @@ impl AppSettings {
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, text)
     }
 }
@@ -97,10 +80,11 @@ impl Default for WindowSettings {
 // Graphics
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum QualityPreset {
     Low,
     Medium,
+    #[default]
     High,
     Ultra,
 }
@@ -125,10 +109,6 @@ impl QualityPreset {
             Self::Ultra => "Всё + volumetric + SSR + DoF + motion blur.",
         }
     }
-}
-
-impl Default for QualityPreset {
-    fn default() -> Self { Self::High }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,8 +12,8 @@ mod game;
 mod physics;
 mod render;
 mod scene;
-mod ui;
 mod scripting;
+mod ui;
 
 use engine::run;
 
@@ -26,7 +26,7 @@ fn install_crash_handler() {
         let location = info.location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".into());
-        
+
         let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
             (*s).to_string()
         } else if let Some(s) = info.payload().downcast_ref::<String>() {
@@ -36,7 +36,7 @@ fn install_crash_handler() {
         };
 
         let backtrace = std::backtrace::Backtrace::force_capture();
-        
+
         let report = format!(
             "=== Rust Engine 3D crash report ===\n\
              Time: {:?}\n\
@@ -51,11 +51,9 @@ fn install_crash_handler() {
             backtrace,
         );
 
-        // Пишем в файл рядом с exe.
         let _ = std::fs::write("crash.log", &report);
         eprintln!("{}", report);
 
-        // На Windows — MessageBox через WinAPI.
         #[cfg(target_os = "windows")]
         {
             show_crash_dialog(&report);
@@ -66,8 +64,9 @@ fn install_crash_handler() {
 #[cfg(target_os = "windows")]
 fn show_crash_dialog(report: &str) {
     use std::ffi::CString;
-    
-    extern "system" {
+
+    // ИСПРАВЛЕНО: Rust 2024 требует `unsafe extern "system"`.
+    unsafe extern "system" {
         fn MessageBoxA(
             hwnd: *mut std::ffi::c_void,
             text: *const u8,
@@ -77,19 +76,21 @@ fn show_crash_dialog(report: &str) {
     }
 
     let text = format!(
-        "Движок упал. Отчёт сохранён в crash.log\n\n{}", 
+        "Движок упал. Отчёт сохранён в crash.log\n\n{}",
         report.lines().take(15).collect::<Vec<_>>().join("\n")
     );
-    
+
     let Ok(text_cstr) = CString::new(text) else { return };
     let Ok(cap) = CString::new("Rust Engine 3D — Crash") else { return };
-    
+
+    // SAFETY: указатели на null-terminated строки живут весь вызов,
+    // окно не передаём (null), флаг MB_ICONERROR = 0x10.
     unsafe {
         MessageBoxA(
             std::ptr::null_mut(),
             text_cstr.as_ptr() as *const u8,
             cap.as_ptr() as *const u8,
-            0x10, // MB_ICONERROR
+            0x10,
         );
     }
 }

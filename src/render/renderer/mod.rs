@@ -217,9 +217,6 @@ fn sort_draws_for_render(draws: &[MeshDraw], cam_pos: Vec3) -> Vec<MeshDraw> {
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
-        // ИЗМЕНЕНО (wgpu 30): `InstanceDescriptor` больше не реализует
-        // `Default`. `Instance::default()` создаёт instance со всеми
-        // бэкендами (эквивалент `Backends::all()`).
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).unwrap();
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1024,7 +1021,10 @@ impl Renderer {
 
     #[cfg(debug_assertions)]
     pub fn reload_shaders(&mut self) -> Result<(), String> {
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // ИСПРАВЛЕНО (wgpu 30): pop_error_scope() удалён. push_error_scope()
+        // теперь возвращает ErrorScopeGuard, который нужно await-ить.
+        // Результат — Option<wgpu::Error>.
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let build = || -> Result<BuiltPipelines, String> {
             Ok(BuiltPipelines {
@@ -1089,16 +1089,17 @@ impl Renderer {
         };
 
         let built = match build() {
-            Ok(b) => b,
+            Ok(b) => {
+                if let Some(err) = pollster::block_on(error_scope.pop()) {
+                    return Err(format!("{}", err));
+                }
+                b
+            }
             Err(msg) => {
-                let _ = pollster::block_on(self.device.pop_error_scope());
+                let _ = pollster::block_on(error_scope.pop());
                 return Err(msg);
             }
         };
-
-        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
-            return Err(format!("{}", err));
-        }
 
         self.gbuffer_pipeline = built.gbuffer;
         self.gbuffer_pipeline_double_sided = built.gbuffer_double_sided;
