@@ -2310,6 +2310,28 @@ impl<G: Game> App<G> {
                 );
                 self.editor.state.validation_issues = issues;
             }
+
+            // === Component Clipboard ===
+            EditorAction::CopyComponent(e, kind) => {
+                if let Some(clip) = crate::editor::clipboard::ClipboardComponent::from_entity(
+                    &self.world, e, kind,
+                ) {
+                    let name = clip.label();
+                    self.editor.state.clipboard_component = Some(clip);
+                    self.editor.state.hud_hint(format!("📋 Copied: {}", name));
+                }
+            }
+
+            EditorAction::PasteComponent(e) => {
+                if let Some(clip) = self.editor.state.clipboard_component.clone() {
+                    if self.world.entities().contains(&e) {
+                        let gs = self.game.save_game_state();
+                        self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
+                        clip.paste_into(&mut self.world, e);
+                        self.editor.state.hud_hint(format!("📥 Pasted: {}", clip.label()));
+                    }
+                }
+            }
         }
     }
 

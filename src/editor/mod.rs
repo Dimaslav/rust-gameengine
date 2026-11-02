@@ -1,4 +1,5 @@
 pub mod camera_bookmarks;
+pub mod clipboard;
 pub mod gizmo;
 pub mod hotkeys;
 pub mod layout;
@@ -26,6 +27,7 @@ use crate::game::components::{Parent, Transform};
 use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
 
+use clipboard::{ClipboardComponent, ComponentKind};
 use gizmo::GizmoState;
 use hotkeys::{HotkeyAction, HotkeyMap};
 use layout::{LayoutState, OutlinerFilter, Workspace, WorkspaceLayouts};
@@ -176,6 +178,9 @@ pub struct EditorState {
 
     pub show_validation_panel: bool,
     pub validation_issues: Vec<SceneIssue>,
+
+    pub clipboard_component: Option<ClipboardComponent>,
+    pub show_welcome_panel: bool,
 }
 
 // ============================================================
@@ -240,13 +245,15 @@ pub enum EditorAction {
     DetachScript(Entity),
     SelectEntity(Entity),
 
-    // === Scene Validation ===
     ValidateScene,
     SelectEntities(Vec<Entity>),
     DeleteEntities(Vec<Entity>),
     RemoveParent(Vec<Entity>),
     ReplaceMissingMesh(Vec<Entity>, String),
     ReplaceMissingMaterial(Vec<Entity>, String),
+
+    CopyComponent(Entity, ComponentKind),
+    PasteComponent(Entity),
 }
 
 // ============================================================
@@ -342,6 +349,8 @@ impl EditorState {
 
             show_validation_panel: false,
             validation_issues: Vec::new(),
+            clipboard_component: None,
+            show_welcome_panel: true,
         };
 
         s.save_path = s.settings.save_path.clone();
@@ -368,7 +377,7 @@ impl EditorState {
         s.gizmo_snap = self.gizmo.snap_enabled;
         s.palette_keep_active = self.palette.keep_active;
         s.palette_snap_to_grid = self.palette.snap_to_grid;
-        s.palette_grid_step = self.palette.grid_step;
+        s.palette_grid_step = self.palette.grid_step;    // <-- ИСПРАВЛЕНО
 
         let mut layouts: BTreeMap<Workspace, LayoutState> = self.saved_workspaces.clone();
         layouts.insert(self.active_workspace, self.layout.clone());
@@ -404,10 +413,6 @@ impl EditorState {
     pub fn apply_theme(&self, ctx: &egui::Context) {
         self.theme.apply(ctx);
     }
-
-    // ============================================================
-    // Selection
-    // ============================================================
 
     pub fn is_selected(&self, e: Entity) -> bool {
         self.selected.contains(&e)
