@@ -61,6 +61,18 @@ impl ItemKind {
             Self::Misc => "📦",
         }
     }
+
+    /// Приоритет для сортировки по типу. Меньше = выше в списке.
+    pub fn sort_priority(self) -> u8 {
+        match self {
+            Self::Weapon => 0,
+            Self::Armor => 1,
+            Self::Trinket => 2,
+            Self::Consumable => 3,
+            Self::Key => 4,
+            Self::Misc => 5,
+        }
+    }
 }
 
 // ============================================================
@@ -98,8 +110,30 @@ impl Rarity {
             Self::Legendary => [1.00, 0.70, 0.20, 1.0],
         }
     }
+
+    /// Приоритет для сортировки по редкости. Меньше = выше в списке.
+    pub fn sort_priority(self) -> u8 {
+        match self {
+            Self::Legendary => 0,
+            Self::Epic => 1,
+            Self::Rare => 2,
+            Self::Uncommon => 3,
+            Self::Common => 4,
+        }
+    }
 }
 
+// ============================================================
+// SortKey
+// ============================================================
+
+/// Ключ сортировки инвентаря.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Rarity,
+    Kind,
+    Name,
+}
 
 // ============================================================
 // Item — data-driven
@@ -157,6 +191,27 @@ fn default_stack() -> u32 { 1 }
 impl Item {
     pub fn is_stackable(&self) -> bool {
         self.max_stack > 1
+    }
+
+    /// Строка бонусов для tooltip: `+3 VIT, +2 LCK`.
+    /// Возвращает пустую строку, если бонусов нет.
+    pub fn bonus_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut push = |v: i32, label: &str| {
+            if v != 0 {
+                let sign = if v > 0 { "+" } else { "" };
+                parts.push(format!("{}{} {}", sign, v, label));
+            }
+        };
+        push(self.bonus_strength, "STR");
+        push(self.bonus_dexterity, "DEX");
+        push(self.bonus_intelligence, "INT");
+        push(self.bonus_vitality, "VIT");
+        push(self.bonus_luck, "LCK");
+        if self.heal_amount > 0.0 {
+            parts.push(format!("+{:.0} HP", self.heal_amount));
+        }
+        parts.join(", ")
     }
 }
 
@@ -508,6 +563,102 @@ impl Inventory {
         }
         count
     }
+
+    // ============================================================
+    // Swap / Split / Sort (Фаза 2.3)
+    // ============================================================
+
+    /// Поменять местами два слота. Если оба слота содержат стеки
+    /// одного item_id и стакуются — вместо swap пытается смерджить.
+    pub fn swap(&mut self, a: usize, b: usize, registry: &ItemRegistry) {
+        if a == b { return; }
+        if a >= self.slots.len() || b >= self.slots.len() { return; }
+
+        // Попытка merge: оба слота с одинаковым item_id и стакуемым.
+        if let (Some(sa), Some(sb)) = (
+            self.slots[a].as_ref().cloned(),
+            self.slots[b].as_ref().cloned(),
+        ) && sa.item_id == sb.item_id
+            && let Some(item) = registry.get_by_id(&sa.item_id)
+            && item.is_stackable()
+        {
+            let max = item.max_stack.max(1);
+            if sa.count + sb.count <= max {
+                // Полный merge: всё в b, a очищается.
+                self.slots[b] = Some(ItemStack::new(sa.item_id.clone(), sa.count + sb.count));
+                self.slots[a] = None;
+                return;
+            }
+            // Частичный merge: переливаем сколько влезает.
+            let space = max.saturating_sub(sb.count);
+            let move_count = space.min(sa.count);
+            if move_count > 0 {
+                self.slots[b] = Some(ItemStack::new(sb.item_id.clone(), sb.count + move_count));
+                let remain = sa.count - move_count;
+                self.slots[a] = if remain > 0 {
+                    Some(ItemStack::new(sa.item_id, remain))
+                } else {
+                    None
+                };
+                return;
+            }
+        }
+
+        self.slots.swap(a, b);
+    }
+
+    /// Разделить стак `idx` пополам. Возвращает индекс нового слота
+    /// или `None`, если стак < 2 или нет свободного места.
+    pub fn split_stack(&mut self, idx: usize) -> Option<usize> {
+        let stack = self.slots.get(idx)?.as_ref()?.clone();
+        if stack.count < 2 { return None; }
+        let half = stack.count / 2;
+        let remain = stack.count - half;
+        let empty = self.slots.iter().position(|s| s.is_none())?;
+        self.slots[idx] = Some(ItemStack::new(stack.item_id.clone(), remain));
+        self.slots[empty] = Some(ItemStack::new(stack.item_id, half));
+        Some(empty)
+    }
+
+    /// Сортировка инвентаря. Пустые слоты уходят в конец.
+    pub fn sort(&mut self, registry: &ItemRegistry, key: SortKey) {
+        // Собираем все непустые стеки.
+        let mut stacks: Vec<ItemStack> = self
+            .slots
+            .iter_mut()
+            .filter_map(|s| s.take())
+            .collect();
+
+        // Сортируем по ключу; fallback — по id, чтобы был детерминизм.
+        stacks.sort_by(|a, b| {
+            let ia = registry.get_by_id(&a.item_id);
+            let ib = registry.get_by_id(&b.item_id);
+            let cmp = match key {
+                SortKey::Rarity => {
+                    let ra = ia.map(|i| i.rarity.sort_priority()).unwrap_or(255);
+                    let rb = ib.map(|i| i.rarity.sort_priority()).unwrap_or(255);
+                    ra.cmp(&rb)
+                }
+                SortKey::Kind => {
+                    let ka = ia.map(|i| i.kind.sort_priority()).unwrap_or(255);
+                    let kb = ib.map(|i| i.kind.sort_priority()).unwrap_or(255);
+                    ka.cmp(&kb)
+                }
+                SortKey::Name => {
+                    let na = ia.map(|i| i.name.as_str()).unwrap_or(a.item_id.as_str());
+                    let nb = ib.map(|i| i.name.as_str()).unwrap_or(b.item_id.as_str());
+                    na.cmp(nb)
+                }
+            };
+            cmp.then_with(|| a.item_id.cmp(&b.item_id))
+        });
+
+        // Раскладываем обратно: сначала стеки, потом None.
+        let mut iter = stacks.into_iter();
+        for slot in self.slots.iter_mut() {
+            *slot = iter.next();
+        }
+    }
 }
 
 // ============================================================
@@ -538,5 +689,41 @@ impl Equipment {
             attrs.luck = attrs.luck.saturating_add_signed(item.bonus_luck);
         }
         attrs
+    }
+
+    /// Взять предмет из указанного слота экипировки (вернуть в инвентарь).
+    pub fn take_slot(&mut self, slot: EquipSlot) -> Option<String> {
+        match slot {
+            EquipSlot::Weapon => self.weapon_id.take(),
+            EquipSlot::Armor => self.armor_id.take(),
+            EquipSlot::Trinket => self.trinket_id.take(),
+        }
+    }
+
+    /// Положить предмет в слот. Возвращает старый id, если был.
+    pub fn put_slot(&mut self, slot: EquipSlot, id: String) -> Option<String> {
+        match slot {
+            EquipSlot::Weapon => self.weapon_id.replace(id),
+            EquipSlot::Armor => self.armor_id.replace(id),
+            EquipSlot::Trinket => self.trinket_id.replace(id),
+        }
+    }
+}
+
+/// Слот экипировки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquipSlot {
+    Weapon,
+    Armor,
+    Trinket,
+}
+
+impl EquipSlot {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Weapon => "Weapon",
+            Self::Armor => "Armor",
+            Self::Trinket => "Trinket",
+        }
     }
 }

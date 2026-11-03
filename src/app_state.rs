@@ -28,8 +28,15 @@ impl AppMode {
 // AppSettings
 // ============================================================
 
+/// Текущая версия формата `settings.ron`.
+fn current_format() -> u32 { 1 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// Версия формата. При добавлении/переименовании полей — инкрементировать
+    /// и добавить миграцию в `migrate()`.
+    #[serde(default = "current_format")]
+    pub format: u32,
     #[serde(default)] pub window: WindowSettings,
     #[serde(default)] pub graphics: GraphicsSettings,
     #[serde(default)] pub audio: AudioSettings,
@@ -42,6 +49,7 @@ fn default_language() -> String { "ru".to_string() }
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            format: current_format(),
             window: WindowSettings::default(),
             graphics: GraphicsSettings::default(),
             audio: AudioSettings::default(),
@@ -55,13 +63,26 @@ impl AppSettings {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        ron::from_str(&text).unwrap_or_default()
+        let mut settings: Self = ron::from_str(&text).unwrap_or_default();
+        settings.migrate();
+        settings
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(std::io::Error::other)?;
         std::fs::write(path, text)
+    }
+
+    /// Миграция старых форматов к текущему. Вызывается после парсинга.
+    fn migrate(&mut self) {
+        if self.format < 1 {
+            // Версия 1 — исходный формат (без поля `format`).
+            // Здесь можно добавить преобразования полей.
+            self.format = 1;
+        }
+        // Будущие миграции:
+        // if self.format < 2 { ...; self.format = 2; }
     }
 }
 

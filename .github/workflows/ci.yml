@@ -6,14 +6,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        
+        with:
+          components: clippy
+          
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -36,6 +38,9 @@ jobs:
 
       - name: Check
         run: cargo check --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -W clippy::all
 
       - name: Test
         run: cargo test

@@ -1,0 +1,13 @@
+(
+    id: "brew_antidote",
+    title: "Antidotes",
+    category: "Potions",
+    inputs: [
+        (item_id: "health_potion", count: 1),
+        (item_id: "map_fragment", count: 1),
+    ],
+    outputs: [
+        (item_id: "antidote", count: 2),
+    ],
+    gold_cost: 10,
+)

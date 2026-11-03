@@ -1,4 +1,4 @@
- use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -66,10 +66,17 @@ impl Binding {
     }
 }
 
+/// Текущая версия формата `input.ron`.
+fn current_format() -> u32 { 1 }
+
 /// RON-структура для save/load. Публичная — чтобы пользователь мог
 /// писать файл вручную через `ron::to_string`/`from_str`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct InputMapFile {
+    /// Версия формата. При добавлении/переименовании полей — инкрементировать
+    /// и добавить миграцию.
+    #[serde(default = "current_format")]
+    pub format: u32,
     #[serde(default)]
     pub bindings: HashMap<String, Vec<Binding>>,
     #[serde(default)]
@@ -184,7 +191,7 @@ impl InputMap {
     }
 
     /// Удалить все привязки с этой клавишей/кнопкой во **всех**
-    /// действиях, кроме `except_action`. Полезно при ребинде:
+    /// действиях, кроме `except_action`. Полезно при ребйнде:
     /// если пользователь назначает `Space` на `jump`, надо убрать
     /// `Space` с `crouch`, иначе они конфликтуют.
     ///
@@ -219,6 +226,7 @@ impl InputMap {
             })
             .collect();
         InputMapFile {
+            format: current_format(),
             bindings: self.bindings.clone(),
             contexts,
         }
@@ -248,8 +256,17 @@ impl InputMap {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("read {}", path.as_ref().display()))?;
-        let data: InputMapFile = ron::from_str(&text)
+        let mut data: InputMapFile = ron::from_str(&text)
             .with_context(|| format!("parse {}", path.as_ref().display()))?;
+
+        // Миграция: старые файлы без `format` парсятся с `current_format`
+        // через `#[serde(default)]`, но на всякий случай нормализуем.
+        if data.format < 1 {
+            data.format = 1;
+        }
+        // Будущие миграции:
+        // if data.format < 2 { ...; data.format = 2; }
+
         Ok(Self::from_file_data(data))
     }
 

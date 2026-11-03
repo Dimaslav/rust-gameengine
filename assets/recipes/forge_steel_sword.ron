@@ -1,0 +1,13 @@
+(
+    id: "forge_steel_sword",
+    title: "Steel Sword",
+    category: "Weapons",
+    inputs: [
+        (item_id: "ruby_gem", count: 2),
+        (item_id: "map_fragment", count: 1),
+    ],
+    outputs: [
+        (item_id: "steel_sword", count: 1),
+    ],
+    gold_cost: 50,
+)

@@ -7,6 +7,10 @@
             speaker: "Blacksmith",
             text: "Ключ от подземелья спрятан у босса в самом низу.",
             options: [
+                (text: "Покажи свой товар.", next: None,
+                    effect: [OpenVendor("blacksmith")]),
+                (text: "Дай воспользоваться кузницей.", next: None,
+                    effect: [OpenCrafting("blacksmith")]),
                 (text: "Как туда добраться?", next: Some("portal_info"), effect: []),
                 (text: "Дай мне зелье, если есть.", next: Some("give_potion"),
                     effect: [GiveItem(id: "health_potion", count: 2)]),

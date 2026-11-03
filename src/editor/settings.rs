@@ -15,8 +15,16 @@ use super::theme::Theme;
 
 const MAX_RECENT: usize = 8;
 
+/// Текущая версия формата `editor.ron`.
+fn current_format() -> u32 { 1 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorSettings {
+    /// Версия формата. При добавлении/переименовании полей — инкрементировать
+    /// и добавить миграцию в `migrate()`.
+    #[serde(default = "current_format")]
+    pub format: u32,
+
     // === Панели (legacy, дублирует активный workspace) ===
     pub show_renderer_panel: bool,
     pub show_stats_panel: bool,
@@ -76,6 +84,7 @@ pub struct EditorSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
+            format: current_format(),
             show_renderer_panel: true,
             show_stats_panel: true,
             show_hierarchy_panel: true,
@@ -96,7 +105,7 @@ impl Default for EditorSettings {
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
             gizmo_snap: false,
-            palette_keep_active: false, // ИЗМЕНЕНО: было true
+            palette_keep_active: false,
             palette_snap_to_grid: true,
             palette_grid_step: 0.5,
             recent_scenes: Vec::new(),
@@ -114,7 +123,8 @@ impl EditorSettings {
             return Self::default();
         };
         match ron::from_str::<Self>(&text) {
-            Ok(s) => {
+            Ok(mut s) => {
+                s.migrate();
                 log::info!("Editor settings loaded from {}", path.display());
                 s
             }
@@ -139,6 +149,16 @@ impl EditorSettings {
                 Self::default()
             }
         }
+    }
+
+    /// Миграция старых форматов к текущему. Вызывается после парсинга.
+    fn migrate(&mut self) {
+        if self.format < 1 {
+            // Версия 1 — исходный формат (без поля `format`).
+            self.format = 1;
+        }
+        // Будущие миграции:
+        // if self.format < 2 { ...; self.format = 2; }
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {

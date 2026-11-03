@@ -1,0 +1,12 @@
+(
+    id: "brew_health_potion",
+    title: "Health Potions",
+    category: "Potions",
+    inputs: [
+        (item_id: "antidote", count: 2),
+    ],
+    outputs: [
+        (item_id: "health_potion", count: 3),
+    ],
+    gold_cost: 15,
+)

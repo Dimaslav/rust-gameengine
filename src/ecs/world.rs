@@ -273,3 +273,235 @@ impl World {
     pub fn len(&self) -> usize { self.entities.len() }
     pub fn is_empty(&self) -> bool { self.entities.is_empty() }
 }
+
+// ============================================================
+// Тесты
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Pos(i32);
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Vel(i32);
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Tag(u32);
+
+    #[test]
+    fn spawn_and_despawn() {
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        let c = w.spawn();
+        assert_eq!(w.len(), 3);
+        assert_eq!(w.entities(), &[a, b, c]);
+
+        w.despawn(b);
+        assert_eq!(w.len(), 2);
+        assert!(!w.entities().contains(&b));
+        // a и c остались.
+        assert!(w.entities().contains(&a));
+        assert!(w.entities().contains(&c));
+    }
+
+    #[test]
+    fn despawn_removes_components() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Pos(1));
+        w.insert(e, Vel(2));
+        assert!(w.has::<Pos>(e));
+        assert!(w.has::<Vel>(e));
+
+        w.despawn(e);
+        assert!(!w.has::<Pos>(e));
+        assert!(!w.has::<Vel>(e));
+    }
+
+    #[test]
+    fn insert_get_remove() {
+        let mut w = World::new();
+        let e = w.spawn();
+        assert!(w.get::<Pos>(e).is_none());
+
+        w.insert(e, Pos(10));
+        assert_eq!(w.get::<Pos>(e), Some(&Pos(10)));
+
+        // Перезапись.
+        w.insert(e, Pos(20));
+        assert_eq!(w.get::<Pos>(e), Some(&Pos(20)));
+
+        let removed = w.remove::<Pos>(e);
+        assert_eq!(removed, Some(Pos(20)));
+        assert!(w.get::<Pos>(e).is_none());
+    }
+
+    #[test]
+    fn query_filters_by_component() {
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        let c = w.spawn();
+        w.insert(a, Pos(1));
+        w.insert(b, Vel(2));
+        w.insert(c, Pos(3));
+
+        let mut found: Vec<(Entity, i32)> = w.query::<Pos>()
+            .map(|(e, p)| (e, p.0))
+            .collect();
+        found.sort_by_key(|(_, v)| *v);
+        assert_eq!(found, vec![(a, 1), (c, 3)]);
+    }
+
+    #[test]
+    fn query2_requires_both() {
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        let c = w.spawn();
+        w.insert(a, Pos(1));
+        w.insert(a, Vel(10));
+        w.insert(b, Pos(2));
+        // b без Vel.
+        w.insert(c, Vel(30));
+        // c без Pos.
+
+        let found: Vec<(Entity, i32, i32)> = w.query2::<Pos, Vel>()
+            .map(|(e, p, v)| (e, p.0, v.0))
+            .collect();
+        assert_eq!(found, vec![(a, 1, 10)]);
+    }
+
+    #[test]
+    fn for_each_pair_visits_intersection() {
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        let c = w.spawn();
+        w.insert(a, Pos(0));
+        w.insert(a, Vel(1));
+        w.insert(b, Pos(0));
+        // b без Vel — не должен попасть.
+        w.insert(c, Vel(1));
+        // c без Pos — не должен попасть.
+
+        let mut visited: Vec<Entity> = Vec::new();
+        w.for_each_pair::<Pos, Vel, _>(|e, _p, _v| visited.push(e));
+        assert_eq!(visited, vec![a]);
+    }
+
+    #[test]
+    fn for_each_pair_mutates_a_not_b() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Pos(10));
+        w.insert(e, Vel(5));
+
+        w.for_each_pair::<Pos, Vel, _>(|_e, p, v| {
+            p.0 += v.0;
+        });
+
+        assert_eq!(w.get::<Pos>(e), Some(&Pos(15)));
+        assert_eq!(w.get::<Vel>(e), Some(&Vel(5)));
+    }
+
+    #[test]
+    fn for_each_pair_returns_scratch_capacity() {
+        // После вызова скретч-буфер должен вернуться в World и
+        // переиспользоваться на следующем вызове без падения.
+        let mut w = World::new();
+        for i in 0..100 {
+            let e = w.spawn();
+            w.insert(e, Pos(i));
+            w.insert(e, Vel(1));
+        }
+
+        let mut count1 = 0;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| count1 += 1);
+        assert_eq!(count1, 100);
+
+        // Второй вызов — тот же буфер.
+        let mut count2 = 0;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| count2 += 1);
+        assert_eq!(count2, 100);
+    }
+
+    #[test]
+    fn for_each_pair_empty_is_noop() {
+        let mut w = World::new();
+        let mut called = false;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| called = true);
+        assert!(!called);
+    }
+
+    #[test]
+    fn for_each_pair_missing_b_store() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Pos(1));
+        // Vel ни у кого нет — B-стораджа не существует.
+        let mut called = false;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| called = true);
+        assert!(!called);
+    }
+
+    #[test]
+    #[should_panic(expected = "distinct component types")]
+    fn for_each_pair_panics_on_same_type() {
+        let mut w = World::new();
+        w.for_each_pair::<Pos, Pos, _>(|_, _, _| {});
+    }
+
+    #[test]
+    fn sync_next_id_after_manual_insert() {
+        let mut w = World::new();
+        // Симулируем загрузку: id вставлены напрямую, минуя spawn.
+        w.entities.push(100);
+        w.entity_pos.insert(100, 0);
+        w.sync_next_id();
+        let new = w.spawn();
+        assert!(new > 100);
+    }
+
+    #[test]
+    fn events_double_buffer() {
+        let mut w = World::new();
+        w.send(42u32);
+        w.send(43u32);
+
+        // current видит оба.
+        let cur: Vec<u32> = w.read_events_current::<u32>().copied().collect();
+        assert_eq!(cur, vec![42, 43]);
+
+        // После update — current пуст, previous содержит старые.
+        w.update_events();
+        let cur: Vec<u32> = w.read_events_current::<u32>().copied().collect();
+        assert!(cur.is_empty());
+        let all: Vec<u32> = w.read_events::<u32>().copied().collect();
+        assert_eq!(all, vec![42, 43]);
+
+        // Отправляем новое в current.
+        w.send(44u32);
+        let all: Vec<u32> = w.read_events::<u32>().copied().collect();
+        assert_eq!(all, vec![44, 42, 43]);
+    }
+
+    #[test]
+    fn insert_many_entities_then_iterate() {
+        let mut w = World::new();
+        for i in 0..1000 {
+            let e = w.spawn();
+            w.insert(e, Tag(i));
+        }
+        let mut sum = 0u64;
+        for (_, t) in w.query::<Tag>() {
+            sum += t.0 as u64;
+        }
+        // 0 + 1 + ... + 999 = 499500.
+        assert_eq!(sum, 499_500);
+    }
+}

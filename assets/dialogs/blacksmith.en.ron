@@ -7,6 +7,10 @@
             speaker: "Blacksmith",
             text: "The key to the dungeon is with the boss at the very bottom.",
             options: [
+                (text: "Show me your wares.", next: None,
+                    effect: [OpenVendor("blacksmith")]),
+                (text: "Let me use the forge.", next: None,
+                    effect: [OpenCrafting("blacksmith")]),
                 (text: "How do I get there?", next: Some("portal_info"), effect: []),
                 (text: "Give me a potion if you have one.", next: Some("give_potion"),
                     effect: [GiveItem(id: "health_potion", count: 2)]),

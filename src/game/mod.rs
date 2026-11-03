@@ -2,6 +2,7 @@ pub mod ai;
 pub mod animation;
 pub mod audio;
 pub mod components;
+pub mod crafting;
 pub mod decals;
 pub mod dialogs;
 pub mod items;
@@ -13,6 +14,7 @@ pub mod stats;
 pub mod timers;
 pub mod weapons;
 pub mod quests;
+pub mod vendors;
 
 pub use ai::{
     AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath,
@@ -26,6 +28,9 @@ pub use items::{
     LootEntry, LootRegistry, LootTable, Rarity,
 };
 pub use audio::{attenuation, source_position, AudioBus, AudioSource};
+pub use crafting::{
+    CraftingRegistry, CraftingSession, RecipeDef, RecipeInput, RecipeOutput,
+};
 pub use decals::Decal;
 pub use components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
@@ -37,6 +42,9 @@ pub use stats::{
 };
 pub use lights::{DirectionalLight, PointLight};
 pub use timers::{Timer, TimerFinished, TimerMode, TimerSystem};
+pub use vendors::{
+    VendorDef, VendorItem, VendorNpc, VendorRegistry, VendorSession,
+};
 pub use weapons::{
     apply_spread, Weapon, WeaponKind, WeaponRegistry, WeaponRuntime,
 };

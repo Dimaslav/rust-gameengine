@@ -16,8 +16,12 @@ use crate::game::components::*;
 use crate::game::decals::Decal;
 use crate::game::dialogs::{DialogEffect, DialogGraph, DialogNpc, DialogSession};
 use crate::game::items::{
-    roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
+    roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry, SortKey,
 };
+use crate::game::vendors::{VendorDef, VendorNpc, VendorRegistry, VendorSession};
+use crate::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
+use crate::ui::vendor_ui::{self, VendorAction};
+use crate::ui::crafting_ui::{self, CraftingAction};
 use crate::game::rpg::GoldValue;
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::game::stats::{PlayerStats, STAT_DESCRIPTIONS, STAT_NAMES};
@@ -30,6 +34,9 @@ use crate::render::{
     InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx, Renderer, Skeleton,
 };
 use crate::ui::Hud;
+use crate::ui::inventory_ui::{
+    self, InvDragState, InvLocation, InventoryAction,
+};
 
 use super::primitives::*;
 use super::primitives::{stop_gate_if_reached, GateMotion};
@@ -57,6 +64,19 @@ const ACT5_HALF_Z: f32 = 8.0;
 
 const WALL_H: f32 = 5.0;
 const WALL_T: f32 = 0.6;
+
+// ============================================================
+// Layout-константы инвентаря (должны совпадать с inventory_ui)
+// ============================================================
+
+const INV_PANEL_W: f32 = 720.0;
+const INV_PANEL_H: f32 = 520.0;
+const INV_PAD: f32 = 20.0;
+const INV_CELL: f32 = 64.0;
+const INV_GAP: f32 = 6.0;
+const INV_COLS: usize = 6;
+const INV_EQ_SLOT_W: f32 = 220.0;
+const INV_EQ_SLOT_H: f32 = 44.0;
 
 // ============================================================
 // Systems
@@ -240,6 +260,23 @@ pub struct FortressDemo {
     item_registry: ItemRegistry,
     loot_registry: LootRegistry,
     show_inventory: bool,
+    inv_drag: InvDragState,
+
+    // === Vendor ===
+    vendor_registry: VendorRegistry,
+    vendor_session: Option<VendorSession>,
+    /// `Esc` закрывает вендора.
+    vendor_esc_pressed: bool,
+
+    // === Crafting ===
+    crafting_registry: CraftingRegistry,
+    crafting_session: Option<CraftingSession>,
+    crafting_esc_pressed: bool,
+    /// ПКМ нажата в этом кадре. `UiInput` не несёт правую кнопку,
+    /// поэтому сохраняем здесь из `update()`.
+    rmb_pressed_this_frame: bool,
+    /// Ctrl зажат в этом кадре. Используется для Ctrl+click (split).
+    ctrl_held: bool,
 
     last_play_mode: bool,
     hud: Hud,
@@ -333,6 +370,17 @@ impl FortressDemo {
             item_registry: ItemRegistry::empty(),
             loot_registry: LootRegistry::empty(),
             show_inventory: false,
+            inv_drag: InvDragState::default(),
+            rmb_pressed_this_frame: false,
+            ctrl_held: false,
+
+            vendor_registry: VendorRegistry::empty(),
+            vendor_session: None,
+            vendor_esc_pressed: false,
+
+            crafting_registry: CraftingRegistry::empty(),
+            crafting_session: None,
+            crafting_esc_pressed: false,
 
             last_play_mode: false,
             hud: Hud::new(),
@@ -571,6 +619,203 @@ impl FortressDemo {
     }
 
     // ============================================================
+    // Inventory drag/drop helper
+    // ============================================================
+
+    /// Hit-test: какой слот инвентаря / экипировки под курсором.
+    /// Layout — копия layout'а из `inventory_ui::draw`. Должен
+    /// совпадать, иначе ПКМ не работает.
+    fn hit_test_inventory(&self, sw: f32, sh: f32, mx: f32, my: f32) -> Option<InvLocation> {
+        let px = (sw - INV_PANEL_W) * 0.5;
+        let py = (sh - INV_PANEL_H) * 0.5;
+        let content_y = py + 100.0;
+
+        // Экипировка.
+        let eq_x = px + INV_PAD;
+        let eq_y = content_y + 8.0 + 18.0;
+        let slots = [
+            (crate::game::items::EquipSlot::Weapon, 0usize),
+            (crate::game::items::EquipSlot::Armor, 1),
+            (crate::game::items::EquipSlot::Trinket, 2),
+        ];
+        for (slot, idx) in slots {
+            let y = eq_y + idx as f32 * (INV_EQ_SLOT_H + INV_GAP);
+            if mx >= eq_x && mx < eq_x + INV_EQ_SLOT_W
+                && my >= y && my < y + INV_EQ_SLOT_H {
+                return Some(InvLocation::Equipment(slot));
+            }
+        }
+
+        // Сетка инвентаря.
+        let grid_x = eq_x + INV_EQ_SLOT_W + INV_PAD;
+        let grid_y = content_y + 8.0 + 18.0;
+        for i in 0..self.inventory.capacity {
+            let col = (i % INV_COLS) as f32;
+            let row = (i / INV_COLS) as f32;
+            let cx = grid_x + col * (INV_CELL + INV_GAP);
+            let cy = grid_y + row * (INV_CELL + INV_GAP);
+            if mx >= cx && mx < cx + INV_CELL
+                && my >= cy && my < cy + INV_CELL {
+                return Some(InvLocation::Inventory(i));
+            }
+        }
+        None
+    }
+
+    fn handle_craft(&mut self, recipe: &RecipeDef) {
+        // Level check.
+        if self.player_stats.experience.level < recipe.required_level {
+            self.hud.push(format!("Requires level {}", recipe.required_level));
+            return;
+        }
+        // Gold check.
+        if self.campaign.gold < recipe.gold_cost {
+            self.hud.push("Not enough gold");
+            return;
+        }
+        // Input check.
+        for input in &recipe.inputs {
+            if self.inventory.count_of(&input.item_id) < input.count {
+                let name = self.item_registry
+                    .get_by_id(&input.item_id)
+                    .map(|i| i.name.clone())
+                    .unwrap_or_else(|| input.item_id.clone());
+                self.hud.push(format!("Need {} ×{}", name, input.count));
+                return;
+            }
+        }
+
+        // Dry-run: проверим, что все outputs поместятся.
+        let mut inv_check = self.inventory.clone();
+        for input in &recipe.inputs {
+            inv_check.remove_by_id(&input.item_id, input.count);
+        }
+        for output in &recipe.outputs {
+            let leftover = inv_check.add(
+                &self.item_registry,
+                ItemStack::new(output.item_id.clone(), output.count),
+            );
+            if leftover > 0 {
+                self.hud.push("Inventory full!");
+                return;
+            }
+        }
+
+        // Применяем.
+        for input in &recipe.inputs {
+            self.inventory.remove_by_id(&input.item_id, input.count);
+        }
+        for output in &recipe.outputs {
+            self.inventory.add(
+                &self.item_registry,
+                ItemStack::new(output.item_id.clone(), output.count),
+            );
+        }
+        self.campaign.gold -= recipe.gold_cost;
+        self.hud.push(format!("🔨 Crafted: {}", recipe.title));
+    }
+
+    fn handle_vendor_buy(&mut self, def: &VendorDef, idx: usize) {
+        let Some(session) = self.vendor_session.as_mut() else { return };
+        let Some(vitem) = def.items.get(idx).cloned() else { return };
+        if !session.has_stock(idx) {
+            self.hud.push("Out of stock");
+            return;
+        }
+        if self.campaign.gold < vitem.price {
+            self.hud.push("Not enough gold");
+            return;
+        }
+        let stack = ItemStack::new(vitem.item_id.clone(), 1);
+        let leftover = self.inventory.add(&self.item_registry, stack);
+        if leftover > 0 {
+            self.hud.push("Inventory full!");
+            return;
+        }
+        self.campaign.gold -= vitem.price;
+        session.take_one(idx);
+        session.spent += vitem.price;
+        let name = self.item_registry
+            .get_by_id(&vitem.item_id)
+            .map(|i| i.name.clone())
+            .unwrap_or(vitem.item_id.clone());
+        self.hud.push(format!("Bought {} for {}g", name, vitem.price));
+    }
+
+    fn handle_vendor_sell(&mut self, idx: usize) {
+        let Some(stack) = self.inventory.slots.get(idx).and_then(|s| s.clone()) else { return };
+        let Some(item) = self.item_registry.get_by_id(&stack.item_id).cloned() else { return };
+        if item.sell_price == 0 {
+            self.hud.push("This item cannot be sold");
+            return;
+        }
+        let _ = self.inventory.take_one(idx);
+        self.campaign.gold += item.sell_price;
+        if let Some(session) = self.vendor_session.as_mut() {
+            session.earned += item.sell_price;
+        }
+        self.hud.push(format!("Sold {} for {}g", item.name, item.sell_price));
+    }
+
+    /// Обработка swap между любыми двумя локациями.
+    fn handle_inv_swap(&mut self, a: InvLocation, b: InvLocation) {
+        match (a, b) {
+            (InvLocation::Inventory(i), InvLocation::Inventory(j)) => {
+                self.inventory.swap(i, j, &self.item_registry);
+            }
+            (InvLocation::Inventory(i), InvLocation::Equipment(slot)) => {
+                // Из инвентаря в экипировку.
+                let Some(stack) = self.inventory.slots.get(i).and_then(|s| s.clone()) else {
+                    return;
+                };
+                let Some(item) = self.item_registry.get_by_id(&stack.item_id).cloned() else {
+                    return;
+                };
+                if !item.equippable {
+                    return;
+                }
+                let matches_slot = matches!(
+                    (item.kind, slot),
+                    (ItemKind::Weapon, crate::game::items::EquipSlot::Weapon)
+                        | (ItemKind::Armor, crate::game::items::EquipSlot::Armor)
+                        | (ItemKind::Trinket, crate::game::items::EquipSlot::Trinket)
+                );
+                if !matches_slot {
+                    return;
+                }
+
+                let _ = self.inventory.take_slot(i);
+                let old = self.equipment.put_slot(slot, item.id.clone());
+                if let Some(old_id) = old {
+                    let _ = self.inventory.add(
+                        &self.item_registry,
+                        ItemStack::new(old_id, 1),
+                    );
+                }
+                self.hud.push(format!("Equipped: {}", item.name));
+            }
+            (InvLocation::Equipment(slot), InvLocation::Inventory(_)) => {
+                // Снять экипировку в первый свободный слот инвентаря.
+                let Some(old_id) = self.equipment.take_slot(slot) else {
+                    return;
+                };
+                let leftover = self.inventory.add(
+                    &self.item_registry,
+                    ItemStack::new(old_id, 1),
+                );
+                if leftover > 0 {
+                    self.hud.push("Inventory full!");
+                } else {
+                    self.hud.push("Unequipped");
+                }
+            }
+            (InvLocation::Equipment(_), InvLocation::Equipment(_)) => {
+                // Swap между слотами экипировки не поддерживаем.
+            }
+        }
+    }
+
+    // ============================================================
     // Building
     // ============================================================
 
@@ -666,9 +911,9 @@ impl FortressDemo {
         blood_decal(world, c + Vec3::new( 4.0, 0.02, -4.0), 1.8, 0.8);
 
         spawn_dialog_npc(world, "npc_elder", c + Vec3::new(-7.0, 0.9, -7.0), "elder");
-        spawn_dialog_npc(world, "npc_blacksmith", c + Vec3::new(7.0, 0.9, -7.0), "blacksmith");
+        let smith_e = spawn_dialog_npc(world, "npc_blacksmith", c + Vec3::new(7.0, 0.9, -7.0), "blacksmith");
+        world.insert(smith_e, VendorNpc { vendor_id: "blacksmith".into() });
 
-        // === Новые враги (по одному на арене, чтобы можно было протестировать) ===
         enemy(world, "Act1_Archer", c + Vec3::new(-9.0, 0.0, 8.0), EnemyKind::Archer, None);
     }
 
@@ -777,7 +1022,6 @@ impl FortressDemo {
             blood_decal(world, c + Vec3::new(x, 0.02, z), s, a);
         }
 
-        // === Новые враги (типы) ===
         enemy(world, "Act2_Mage_1", c + Vec3::new(-20.0, 0.0, 0.0), EnemyKind::Mage, None);
         enemy(world, "Act2_Mage_2", c + Vec3::new(20.0, 0.0, 0.0), EnemyKind::Mage, None);
         enemy(world, "Act2_Assassin_1",
@@ -899,7 +1143,7 @@ impl FortressDemo {
         enemy(world, "Act4_Assassin",
             c + Vec3::new(0.0, 0.0, 15.0), EnemyKind::Assassin, None);
         enemy(world, "Act4_Tank",
-            c + Vec3::new(-15.0, 0.0, 15.0), EnemyKind::Tank, None);        
+            c + Vec3::new(-15.0, 0.0, 15.0), EnemyKind::Tank, None);
 
         chest(world, "Act4_Chest_A", c + Vec3::new(-14.0, 0.25, 14.0), 750);
         chest(world, "Act4_Chest_B", c + Vec3::new( 14.0, 0.25, 14.0), 1000);
@@ -1473,6 +1717,20 @@ impl Game for FortressDemo {
             });
         log::info!("loot: {} tables loaded", self.loot_registry.len());
 
+        self.vendor_registry = VendorRegistry::load_from_dir("assets/vendors")
+            .unwrap_or_else(|e| {
+                log::warn!("vendors: failed to load: {:#}", e);
+                VendorRegistry::empty()
+            });
+        log::info!("vendors: {} loaded", self.vendor_registry.len());
+
+        self.crafting_registry = CraftingRegistry::load_from_dir("assets/recipes")
+            .unwrap_or_else(|e| {
+                log::warn!("recipes: failed to load: {:#}", e);
+                CraftingRegistry::empty()
+            });
+        log::info!("recipes: {} loaded", self.crafting_registry.len());
+
         add_materials(renderer);
 
         let heightmap = crate::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
@@ -1528,6 +1786,16 @@ impl Game for FortressDemo {
         let in_play = input.play_mode;
         self.last_play_mode = in_play;
 
+        // `UiInput` (в `collect_ui`) не несёт модификаторы и ПКМ,
+        // поэтому запоминаем их здесь.
+        self.rmb_pressed_this_frame = input.mouse_pressed(MouseButton::Right);
+        self.ctrl_held = input.key_down(KeyCode::ControlLeft)
+            || input.key_down(KeyCode::ControlRight);
+        self.vendor_esc_pressed = input.key_pressed(KeyCode::Escape)
+            && self.vendor_session.is_some();
+        self.crafting_esc_pressed = input.key_pressed(KeyCode::Escape)
+            && self.crafting_session.is_some();
+
         let total_attrs = self.total_attributes();
         let max_hp = 100.0 + total_attrs.vitality as f32 * 10.0;
         self.demo_health_max = max_hp;
@@ -1548,6 +1816,7 @@ impl Game for FortressDemo {
         if !in_play {
             self.show_character_sheet = false;
             self.show_inventory = false;
+            self.inv_drag.cancel();
         }
 
         self.last_dt = dt;
@@ -1629,7 +1898,8 @@ impl Game for FortressDemo {
         let rmb = input.mouse_down(MouseButton::Right);
         let want_ads = in_play && !self.demo_paused && rmb
             && self.weapon_raise_timer <= 0.0
-            && !self.demo_reloading;
+            && !self.demo_reloading
+            && !self.show_inventory;
         if want_ads != self.ads_active {
             self.ads_active = want_ads;
         }
@@ -1859,6 +2129,9 @@ impl Game for FortressDemo {
         if self.demo_paused != paused {
             self.demo_paused = paused;
             log::info!("FortressDemo: pause = {}", paused);
+            if paused {
+                self.inv_drag.cancel();
+            }
         }
     }
 
@@ -1949,6 +2222,7 @@ impl Game for FortressDemo {
                 self.demo_health_max = self.total_attributes().vitality as f32 * 10.0 + 100.0;
                 self.demo_health = self.demo_health.min(self.demo_health_max);
 
+                self.inv_drag.cancel();
                 self.hud.push("📂 Game loaded");
             }
             Err(e) => {
@@ -2255,6 +2529,16 @@ impl Game for FortressDemo {
     ) {
         self.hud.tick(self.last_dt);
         if !self.last_play_mode { return; }
+        if self.vendor_session.is_some() && self.vendor_esc_pressed {
+            self.vendor_session = None;
+            self.vendor_esc_pressed = false;
+        }
+        if self.crafting_session.is_some() && self.crafting_esc_pressed {
+            self.crafting_session = None;
+            self.crafting_esc_pressed = false;
+        }
+        // Vendor закрывает Esc — но Esc может быть уже "съеден" паузой.
+        // Игра выставляет флаг из update().        
 
         let is_victory = self.campaign.stage == Stage::Victory;
 
@@ -2556,21 +2840,151 @@ impl Game for FortressDemo {
         }
 
         if self.show_inventory && !self.demo_paused && !is_victory {
-            let action = draw_inventory_ui(
+            // ПКМ — use / equip / unequip. Обрабатываем ДО `draw`,
+            // чтобы не конфликтовать с drag-and-drop (который на ЛКМ).
+            let input = ui.input();
+            if self.rmb_pressed_this_frame {
+                let (mx, my) = input.mouse_pos;
+                let sw = ui.screen_w();
+                let sh = ui.screen_h();
+                if let Some(loc) = self.hit_test_inventory(sw, sh, mx, my) {
+                    match loc {
+                        InvLocation::Inventory(idx) => {
+                            if let Some(stack) = self.inventory.slots.get(idx).and_then(|s| s.clone()) {
+                                if let Some(item) = self.item_registry.get_by_id(&stack.item_id) {
+                                    match item.kind {
+                                        ItemKind::Consumable => self.use_from_slot(idx),
+                                        _ if item.equippable => self.equip_from_slot(idx),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        InvLocation::Equipment(slot) => {
+                            if let Some(old_id) = self.equipment.take_slot(slot) {
+                                let leftover = self.inventory.add(
+                                    &self.item_registry,
+                                    ItemStack::new(old_id, 1),
+                                );
+                                if leftover > 0 {
+                                    self.hud.push("Inventory full!");
+                                } else {
+                                    self.hud.push("Unequipped");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ЛКМ: drag / swap / split / drop.
+            let action = inventory_ui::draw(
                 ui,
                 &self.inventory,
                 &self.equipment,
                 &self.item_registry,
+                &mut self.inv_drag,
             );
             match action {
                 InventoryAction::None => {}
-                InventoryAction::Equip(idx) => self.equip_from_slot(idx),
+                InventoryAction::StartDrag(loc) => {
+                    // Ctrl+click на стаке — split вместо drag.
+                    if self.ctrl_held
+                        && let InvLocation::Inventory(idx) = loc
+                        && self.inventory.split_stack(idx).is_some()
+                    {
+                        self.hud.push("Stack split");
+                        self.inv_drag.cancel();
+                    }
+                }
+                InventoryAction::Swap(a, b) => self.handle_inv_swap(a, b),
+                InventoryAction::Split(idx) => {
+                    if self.inventory.split_stack(idx).is_some() {
+                        self.hud.push("Stack split");
+                    }
+                }
                 InventoryAction::Use(idx) => self.use_from_slot(idx),
+                InventoryAction::EquipFromInv(idx) => self.equip_from_slot(idx),
+                InventoryAction::Unequip(slot) => {
+                    if let Some(old_id) = self.equipment.take_slot(slot) {
+                        let _ = self.inventory.add(
+                            &self.item_registry,
+                            ItemStack::new(old_id, 1),
+                        );
+                        self.hud.push("Unequipped");
+                    }
+                }
                 InventoryAction::Drop(idx) => {
                     if self.inventory.take_slot(idx).is_some() {
                         self.hud.push("Item dropped");
                     }
                 }
+                InventoryAction::SortBy(key) => {
+                    self.inventory.sort(&self.item_registry, key);
+                    self.hud.push(format!("Sorted: {:?}", key));
+                }
+            }
+
+        }
+
+        // === Vendor UI ===
+        if let Some(session) = self.vendor_session.as_ref() {
+            if let Some(def) = self.vendor_registry.get(&session.vendor_id).cloned() {
+                let action = vendor_ui::draw(
+                    ui,
+                    session,
+                    &def,
+                    &self.item_registry,
+                    &self.inventory,
+                    &self.equipment,
+                    self.campaign.gold,
+                );
+
+                match action {
+                    VendorAction::None => {}
+                    VendorAction::Close => {
+                        self.vendor_session = None;
+                    }
+                    VendorAction::Buy(idx) => {
+                        self.handle_vendor_buy(&def, idx);
+                    }
+                    VendorAction::Sell(idx) => {
+                        self.handle_vendor_sell(idx);
+                    }
+                }
+            }
+        } else {
+            self.vendor_esc_pressed = false;
+        }
+
+        // === Crafting UI ===
+        if let Some(mut session) = self.crafting_session.take() {
+            let action = crafting_ui::draw(
+                ui,
+                &mut session,
+                &self.crafting_registry,
+                &self.item_registry,
+                &self.inventory,
+                self.campaign.gold,
+                self.player_stats.experience.level,
+            );
+            let mut keep = true;
+            match action {
+                CraftingAction::None => {}
+                CraftingAction::Select(id) => {
+                    session.selected_recipe_id = Some(id);
+                }
+                CraftingAction::Craft(id) => {
+                    if let Some(recipe) = self.crafting_registry.get(&id).cloned() {
+                        self.handle_craft(&recipe);
+                    }
+                }
+                CraftingAction::Close => {
+                    keep = false;
+                }
+            }
+            if keep {
+                self.crafting_session = Some(session);
             }
         }
 
@@ -2650,6 +3064,37 @@ impl Game for FortressDemo {
                                         "⭐ LEVEL UP → Lv {}",
                                         self.player_stats.experience.level
                                     ));
+                                }
+                            }
+                            DialogEffect::OpenVendor(vendor_id) => {
+                                if let Some(def) = self.vendor_registry.get(&vendor_id).cloned() {
+                                    let npc_entity = self
+                                        .dialog_session
+                                        .as_ref()
+                                        .map(|s| s.npc_entity)
+                                        .unwrap_or(0);
+                                    self.vendor_session =
+                                        Some(VendorSession::new(&def, npc_entity));
+                                    self.dialog_session = None;
+                                    self.hud.push(format!("💰 Trading with {}", def.title));
+                                } else {
+                                    log::warn!("OpenVendor: '{}' not found", vendor_id);
+                                }
+                            }
+                            DialogEffect::OpenCrafting(bench_id) => {
+                                if self.crafting_registry.is_empty() {
+                                    self.hud.push("No recipes loaded");
+                                } else {
+                                    let npc_entity = self
+                                        .dialog_session
+                                        .as_ref()
+                                        .map(|s| s.npc_entity)
+                                        .unwrap_or(0);
+                                    self.crafting_session = Some(CraftingSession::new(
+                                        &bench_id, npc_entity, &self.crafting_registry,
+                                    ));
+                                    self.dialog_session = None;
+                                    self.hud.push("🔨 Forge opened");
                                 }
                             }
                         }
@@ -2753,130 +3198,6 @@ fn draw_character_sheet(ui: &mut crate::ui::UiLayer, stats: &mut PlayerStats) {
 
     ui.text_centered(sw * 0.5, py + ph - 22.0,
         "Tab — close · Esc — pause", 11.0, [0.6, 0.65, 0.75, 0.8]);
-}
-
-// ============================================================
-// Inventory UI
-// ============================================================
-
-enum InventoryAction {
-    None,
-    Equip(usize),
-    Use(usize),
-    Drop(usize),
-}
-
-fn draw_inventory_ui(
-    ui: &mut crate::ui::UiLayer,
-    inv: &Inventory,
-    equipment: &Equipment,
-    registry: &ItemRegistry,
-) -> InventoryAction {
-    let sw = ui.screen_w();
-    let sh = ui.screen_h();
-    let pw = 620.0;
-    let ph = 460.0;
-    let px = sw * 0.5 - pw * 0.5;
-    let py = sh * 0.5 - ph * 0.5;
-
-    ui.rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.5]);
-    ui.rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, [0.55, 0.6, 0.75, 1.0]);
-    ui.rect(px, py, pw, ph, [0.13, 0.15, 0.20, 0.98]);
-
-    let used = inv.slots.iter().filter(|s| s.is_some()).count();
-    ui.text_centered(sw * 0.5, py + 22.0, "INVENTORY", 24.0, [1.0, 0.9, 0.6, 1.0]);
-    ui.text_centered(sw * 0.5, py + 50.0,
-        &format!("{} / {} slots used", used, inv.capacity),
-        12.0, [0.75, 0.8, 0.9, 1.0]);
-
-    ui.rect(px + 16.0, py + 68.0, pw - 32.0, 1.0, [0.4, 0.45, 0.55, 0.8]);
-
-    let eq_x = px + 20.0;
-    let eq_y = py + 82.0;
-    ui.text(eq_x, eq_y, "EQUIPMENT", 14.0, [0.9, 0.9, 0.5, 1.0]);
-
-    let slots: [(&str, &Option<String>); 3] = [
-        ("Weapon",  &equipment.weapon_id),
-        ("Armor",   &equipment.armor_id),
-        ("Trinket", &equipment.trinket_id),
-    ];
-    let mut ey = eq_y + 22.0;
-    for (label, id_opt) in slots {
-        ui.rect(eq_x, ey, 240.0, 36.0, [0.08, 0.10, 0.14, 0.95]);
-        ui.rect_outline(eq_x, ey, 240.0, 36.0, 1.0, [0.4, 0.45, 0.55, 1.0]);
-        ui.text(eq_x + 8.0, ey + 10.0, label, 11.0, [0.7, 0.75, 0.85, 1.0]);
-
-        let name = id_opt.as_deref()
-            .and_then(|id| registry.get_by_id(id))
-            .map(|i| i.name.clone())
-            .unwrap_or_else(|| "— empty —".to_string());
-        let color = id_opt.as_deref()
-            .and_then(|id| registry.get_by_id(id))
-            .map(|i| i.rarity.color())
-            .unwrap_or([0.5, 0.5, 0.5, 1.0]);
-        ui.text(eq_x + 70.0, ey + 10.0, &name, 13.0, color);
-        ey += 44.0;
-    }
-
-    let grid_x = px + 280.0;
-    let grid_y = py + 82.0;
-    ui.text(grid_x, grid_y, "ITEMS", 14.0, [0.9, 0.9, 0.5, 1.0]);
-
-    let cell_w = 60.0;
-    let cell_h = 60.0;
-    let gap = 4.0;
-    let cols = 5;
-
-    let mut action = InventoryAction::None;
-
-    let input = ui.input();
-    let (mx, my) = input.mouse_pos;
-    let clicked = input.mouse_clicked;
-
-    for i in 0..inv.capacity {
-        let col = i % cols;
-        let row = i / cols;
-        let cx = grid_x + col as f32 * (cell_w + gap);
-        let cy = grid_y + 22.0 + row as f32 * (cell_h + gap);
-
-        ui.rect(cx, cy, cell_w, cell_h, [0.08, 0.10, 0.14, 0.95]);
-
-        let hovered = mx >= cx && mx < cx + cell_w && my >= cy && my < cy + cell_h;
-        let border = if hovered { [1.0, 0.9, 0.5, 1.0] } else { [0.35, 0.4, 0.5, 1.0] };
-        ui.rect_outline(cx, cy, cell_w, cell_h, 1.0, border);
-
-        if let Some(stack) = &inv.slots[i] {
-            let item = registry.get_by_id(&stack.item_id);
-            let (icon, name, color) = match item {
-                Some(it) => (it.kind.icon(), it.name.clone(), it.rarity.color()),
-                None => ("?", stack.item_id.clone(), [0.5, 0.5, 0.5, 1.0]),
-            };
-            ui.text_centered(cx + cell_w * 0.5, cy + 20.0, icon, 22.0, color);
-            let short: String = name.chars().take(9).collect();
-            ui.text_centered(cx + cell_w * 0.5, cy + cell_h - 14.0, &short, 9.0,
-                [0.9, 0.9, 0.9, 1.0]);
-            if stack.count > 1 {
-                ui.text(cx + cell_w - 18.0, cy + 4.0,
-                    &format!("{}", stack.count), 10.0, [1.0, 0.9, 0.5, 1.0]);
-            }
-            if hovered && clicked
-                && let Some(it) = item {
-                    match it.kind {
-                        ItemKind::Consumable => action = InventoryAction::Use(i),
-                        ItemKind::Weapon
-                        | ItemKind::Armor
-                        | ItemKind::Trinket => action = InventoryAction::Equip(i),
-                        _ => action = InventoryAction::Drop(i),
-                    }
-                }
-        }
-    }
-
-    ui.text_centered(sw * 0.5, py + ph - 22.0,
-        "LMB on item: use / equip / drop · Tab: stats · I: close",
-        11.0, [0.6, 0.65, 0.75, 0.8]);
-
-    action
 }
 
 // ============================================================

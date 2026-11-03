@@ -148,6 +148,10 @@ pub enum DialogEffect {
     GiveItem { id: String, count: u32 },
     GiveGold(u32),
     GiveXp(u32),
+    /// Открыть окно вендора с указанным `VendorDef::id`.
+    OpenVendor(String),
+    /// Открыть кузницу (`CraftingRegistry` использует общий id).
+    OpenCrafting(String),
 }
 
 // ============================================================
