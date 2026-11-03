@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn empty_world_builds_empty_cache() {
-        let mut w = World::new();
+        let w = World::new();
         let mut cache = ColliderCache::new();
         cache.build(&w);
         assert!(cache.is_empty());
