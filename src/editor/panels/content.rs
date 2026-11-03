@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::assets::{AssetDatabase, AssetId, AssetKind, AssetMeta};
+use crate::assets::{AssetDatabase, AssetKind, AssetMeta};
 use crate::editor::panels::UiAssets;
 use crate::editor::{EditorAction, EditorState, ThumbnailCache, ThumbnailState};
 

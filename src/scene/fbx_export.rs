@@ -67,8 +67,6 @@ pub fn export_fbx_string(
 // ============================================================
 
 struct Item<'a> {
-    /// Индекс исходной сущности (для логов).
-    entity: Entity,
     /// Отображаемое имя.
     name: String,
     /// Мировая матрица (запекается в вершины).
@@ -115,7 +113,6 @@ fn collect_items<'a>(
         let model = crate::game::world_matrix(world, e);
 
         items.push(Item {
-            entity: e,
             name,
             model,
             mesh,
@@ -536,8 +533,6 @@ fn write_connections(
             && let Some(&mid) = material_ids.get(mn) {
                 writeln!(out, "    C: \"OO\", {}, {}", mid, model_id).unwrap();
             }
-
-        let _ = it; // silence unused
     }
 
     writeln!(out, "}}").unwrap();

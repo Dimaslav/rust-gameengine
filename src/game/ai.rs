@@ -1,57 +1,18 @@
-//! AI-компоненты: агент, состояние FSM, зрение, патруль, слух.
-//!
-//! Логика самого FSM — в `engine::ai_system`. Здесь только данные.
-//!
-//! ИЗМЕНЕНО (bugfix #7): `AiAgent` и `PatrolPath` теперь реализуют
-//! `Serialize`/`Deserialize`. Runtime-поля (path, timers, yaw,
-//! last_seen_pos) помечены `#[serde(skip, default)]` и при загрузке
-//! стартуют с нуля. Без этого Save/Load сцены терял AI полностью,
-//! а автосейв в кампании «The Fallen Citadel» не восстанавливал
-//! поведение врагов.
-
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::ecs::Entity;
-
-/// Состояние агента. FSM переходы:
-///
-/// ```text
-/// Idle ──(see_target)──> Chase ──(in_range)──> Attack
-///   ▲                        │                    │
-///   │                        │ lost_target         │ lost_target
-///   │                        ▼                    ▼
-///   │                    Investigate  ◄───────────┘
-///   │                        │
-///   │                   (reached | timeout)
-///   │                        ▼
-///   └────(has_patrol)───── Patrol
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[derive(Default)]
 pub enum AiState {
-    /// Стоит, ждёт.
     #[default]
     Idle,
-    /// Ходит по точкам маршрута.
     Patrol,
-    /// Расследует шум или последнюю известную позицию цели.
     Investigate,
-    /// Видит игрока, бежит за ним.
     Chase,
-    /// В зоне атаки, бьёт.
     Attack,
-    /// Мёртв (Health.current <= 0). Система его игнорирует.
     Dead,
 }
 
-
-/// Агент с FSM.
-///
-/// ИЗМЕНЕНО (bugfix #7): добавлены `Serialize`/`Deserialize`.
-/// Персистентная часть (state, speed, vision, attack) сохраняется
-/// в сцену. Runtime-поля (path, timers, yaw, last_seen_pos)
-/// сбрасываются при загрузке — агент стартует в Idle без пути.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAgent {
     pub state: AiState,
@@ -163,9 +124,6 @@ impl AiAgent {
     pub fn is_alive(&self) -> bool { self.state != AiState::Dead }
 }
 
-/// Цикл патруля.
-///
-/// ИЗМЕНЕНО (bugfix #7): добавлены `Serialize`/`Deserialize`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatrolPath {
     pub points: Vec<Vec3>,
@@ -228,14 +186,9 @@ impl Default for PatrolPath {
     }
 }
 
-/// Маркер цели (обычно на игроке или на главной entity, которую
-/// AI преследует). Система ищет entity с этим компонентом и берёт
-/// первую живую.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AiTarget;
 
-/// Маркер "это агент, которого можно убить". Используется, чтобы
-/// отличать врагов от декоративных NPC.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Enemy;
 
@@ -243,14 +196,6 @@ pub struct Enemy;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DebugPath;
 
-/// Источник шума в мире.
-///
-/// Отправляется через `world.send(NoiseEvent { ... })`. Читается
-/// `AiSystem::update` (по `read_events_current`) в тот же кадр.
-///
-/// `radius` — реальный радиус слышимости этого шума. AI воспринимает
-/// шум, если его `hearing_range >= radius` **и** расстояние от агента
-/// до `position` меньше `min(hearing_range, radius)`.
 #[derive(Debug, Clone, Copy)]
 pub struct NoiseEvent {
     pub position: Vec3,

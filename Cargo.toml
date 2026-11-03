@@ -1,28 +1,70 @@
+[workspace]
+# Q2: `crates/engine-cli` и `samples/*` будут добавлены как отдельные
+# крейты (project wizard, примеры). Пока — single-package workspace.
+members = ["."]
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+# NOTE: 1.99 — placeholder из вашего репозитория. Для публичного
+# релиза опустите до реального MSRV (edition 2024 требует ≥ 1.85).
+# Проверить: `cargo +X.Y check`. Не заявляйте MSRV, который не тестируете.
+rust-version = "1.99"
+license = "Proprietary"
+repository = "https://github.com/Dimaslav/rust-gameengine"
+authors = ["Dimaslav"]
+
 [package]
 name = "rust-engine"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.99"
-default-run = "rust-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust Engine 3D — modular game engine (editor + runtime)"
+default-run = "engine-editor"
+
+[lib]
+name = "rust_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "engine-editor"
+path = "src/bin/engine-editor.rs"
+
+# Legacy bin. `src/main.rs` больше не дублирует модули (см. A8),
+# но бинарь всё ещё полезен для обратной совместимости.
+[[bin]]
+name = "rust-engine"
+path = "src/main.rs"
+
+# Legacy packer — заменён на `engine-cli build` (Q2). Пока оставляем,
+# чтобы CI не сломался.
+[[bin]]
+name = "packer"
+path = "src/bin/packer.rs"
 
 [dependencies]
-# --- Оконная система ---
+# --- Window / scripting ---
 winit = "0.30.13"
 rhai = "1.27.0"
 
-# --- Графика ---
+# --- Graphics ---
 wgpu = "30.0.1"
 
-# --- Асинхронный запуск ---
+# --- Async bootstrap ---
 pollster = "1.0.1"
 
-# --- Сериализация / математика / утилиты ---
+# --- Serialization / math / utils ---
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "0.34.2", features = ["bytemuck", "serde"] }
 log = "0.4.34"
 env_logger = "0.11.11"
 
-# --- Картинки / HDR / EXR ---
+# --- Images / HDR / EXR ---
 image = { version = "0.25.10", default-features = false, features = [
     "png", "jpeg", "gif", "webp", "bmp", "tiff", "tga", "dds",
     "hdr", "exr", "ico", "pnm", "qoi", "ff",
@@ -33,33 +75,28 @@ image = { version = "0.25.10", default-features = false, features = [
 # --- zlib для FBX binary ---
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 
-# --- Ошибки / glTF / serde / ron ---
+# --- Errors / glTF / serde / ron ---
 anyhow = "1.0.104"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 ron = "0.12.2"
 
-# --- UI ---
+# --- base64 (заменяет самописный код в scene/serialize.rs) ---
+base64 = "0.22"
+
+# --- UI (editor) ---
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
 
-# --- Редактор: thumbnails для Content Browser ---
+# --- Editor thumbnails ---
 egui_extras = { version = "0.37.0", features = ["image", "svg"] }
 
-# --- Аудио ---
+# --- Audio ---
 rodio = "0.21"
 
-# --- Нативный диалог выбора файлов ---
+# --- Native file dialog ---
 rfd = "0.17.2"
 
-# --- Принудительная синхронизация версии windows для wgpu-hal и gpu-allocator ---
+# --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
-
-[[bin]]
-name = "rust-engine"
-path = "src/main.rs"
-
-[[bin]]
-name = "packer"
-path = "src/bin/packer.rs"

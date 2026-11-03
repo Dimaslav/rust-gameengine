@@ -3,18 +3,16 @@
 //! # Управление
 //!
 //! - **ЛКМ (drag)** — нажать на слот и тащить. Отпустить на другом
-//!   слоте — swap (или merge, если стакается). Отпустить вне слотов —
-//!   ничего (drag отменяется).
+//!   слоте — swap (или merge, если стакается).
 //! - **Ctrl+ЛКМ** — разделить стак пополам.
-//! - **Shift+ЛКМ** — выбросить предмет.
+//! - **Shift+ЛКМ** — выбросить (обрабатывается в демо через Shift).
 //! - **ПКМ** на consumable — использовать.
 //! - **ПКМ** на equippable — экипировать (или снять, если надето).
 //! - **Кнопки `Rarity / Kind / Name`** сверху — сортировка.
 //!
-//! # Состояние
-//!
-//! Drag — это состояние **между кадрами**. Хранится в `InvDragState`,
-//! который игра держит в своём state.
+//! ИЗМЕНЕНО: Ctrl+click теперь работает внутри UI через `UiInput::modifiers`
+//! (см. `src/ui/layer.rs`). Раньше split приходилось делать костылём
+//! в `FortressDemo::collect_ui` по внешнему `self.ctrl_held`.
 
 use crate::game::items::{
     EquipSlot, Equipment, Inventory, ItemKind, ItemRegistry, SortKey,
@@ -25,20 +23,15 @@ use crate::ui::UiLayer;
 // Типы
 // ============================================================
 
-/// Куда указывает слот: инвентарь или экипировка.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InvLocation {
     Inventory(usize),
     Equipment(EquipSlot),
 }
 
-/// Состояние drag-and-drop инвентаря.
 #[derive(Default)]
 pub struct InvDragState {
-    /// Что тащим. `None` — drag не активен.
     pub from: Option<InvLocation>,
-    /// Была ли мышь зажата в прошлом кадре. Нужно, чтобы поймать
-    /// момент отпускания (`was_down && !now_down`).
     pub was_mouse_down: bool,
 }
 
@@ -46,31 +39,20 @@ impl InvDragState {
     pub fn is_dragging(&self) -> bool {
         self.from.is_some()
     }
-
     pub fn cancel(&mut self) {
         self.from = None;
     }
 }
 
-/// Действие, которое игрок совершил над инвентарём.
 pub enum InventoryAction {
     None,
-    /// Игрок начал drag со слота `from`. Игра может сохранить это
-    /// в `InvDragState` (обычно уже сохранено) или проигнорировать.
     StartDrag(InvLocation),
-    /// Игрок отпустил drag на слоте `to` — нужно переставить/смерджить.
     Swap(InvLocation, InvLocation),
-    /// Клик (Ctrl) — разделить стак.
     Split(usize),
-    /// ПКМ на consumable — использовать.
     Use(usize),
-    /// ПКМ / двойной клик на equippable — экипировать из инвентаря.
     EquipFromInv(usize),
-    /// ПКМ / двойной клик на слоте экипировки — снять.
     Unequip(EquipSlot),
-    /// Shift+ЛКМ — выбросить.
     Drop(usize),
-    /// Нажата кнопка сортировки.
     SortBy(SortKey),
 }
 
@@ -153,8 +135,7 @@ pub fn draw(
         let loc = InvLocation::Equipment(slot);
         let rect = (eq_x, eq_y_cursor, EQ_SLOT_W, EQ_SLOT_H);
         if point_in_rect(mx, my, rect) { hovered = Some(loc); }
-        let is_drop_target = drag.from.is_some()
-            && drag.from != Some(loc);
+        let is_drop_target = drag.from.is_some() && drag.from != Some(loc);
         draw_eq_slot(ui, rect, slot, id_opt.as_deref(), registry, is_drop_target);
         eq_y_cursor += EQ_SLOT_H + GAP;
     }
@@ -186,37 +167,32 @@ pub fn draw(
     // === Обработка клика / drag ===
     if input.mouse_clicked
         && let Some(loc) = hovered {
+            let ctrl = input.modifiers.ctrl;
             match loc {
                 InvLocation::Inventory(idx) => {
-                    // Ctrl+клик на стаке — split.
-                    let ctrl = false; // input.modifiers недоступен; см. ниже
-                    let _ = ctrl;
-                    // Проверка стека для split делается через ctrl, но
-                    // UiInput не несёт модификаторы. Поэтому split
-                    // реализован как отдельная кнопка? Нет — используем
-                    // `is_dragging` и повторный клик.
-                    //
-                    // Реализуем: Ctrl отслеживается через внешний
-                    // `InventoryAction::Split` из игры. Здесь мы
-                    // только запускаем drag. Игра решает, что делать
-                    // на release.
-                    if drag.from.is_none() {
+                    if ctrl {
+                        // Ctrl+click — split, не начинаем drag.
+                        action = InventoryAction::Split(idx);
+                        drag.cancel();
+                    } else if drag.from.is_none() {
                         drag.from = Some(loc);
                         drag.was_mouse_down = true;
                         action = InventoryAction::StartDrag(loc);
-                    } else {
-                        // Повторный клик на слот, пока идёт drag — swap.
-                        if let Some(from) = drag.from {
-                            if from != loc {
-                                action = InventoryAction::Swap(from, loc);
-                            }
-                            drag.from = None;
+                    } else if let Some(from) = drag.from {
+                        if from != loc {
+                            action = InventoryAction::Swap(from, loc);
                         }
+                        drag.from = None;
                     }
-                    let _ = idx;
                 }
                 InvLocation::Equipment(_) => {
-                    if drag.from.is_none() {
+                    if ctrl {
+                        // Ctrl+click на слоте экипировки — снять.
+                        if let InvLocation::Equipment(slot) = loc {
+                            action = InventoryAction::Unequip(slot);
+                        }
+                        drag.cancel();
+                    } else if drag.from.is_none() {
                         drag.from = Some(loc);
                         drag.was_mouse_down = true;
                         action = InventoryAction::StartDrag(loc);
@@ -233,22 +209,15 @@ pub fn draw(
     // Отпускание мыши — если тащили.
     if drag.was_mouse_down && !input.mouse_down {
         if let Some(from) = drag.from {
-            // Отпустили на слот?
             if let Some(to) = hovered {
                 if to != from {
                     action = InventoryAction::Swap(from, to);
                 }
             }
-            // Отпустили вне слотов — отмена.
             drag.from = None;
         }
         drag.was_mouse_down = false;
     }
-
-    // Двойной клик (ПКМ) — использовать / экипировать.
-    // UiInput не несёт правую кнопку, поэтому ПКМ обрабатывается
-    // в демо через `input.mouse_pressed(MouseButton::Right)`.
-    // См. `fortress.rs::collect_ui`.
 
     // === Tooltip ===
     if drag.from.is_none()
@@ -304,7 +273,7 @@ pub fn draw(
     // Подсказка внизу.
     ui.text_centered(
         sw * 0.5, py + PANEL_H - 18.0,
-        "LMB drag: move/merge · Ctrl+click: split · Shift+click: drop · RMB: use/equip · I: close",
+        "LMB drag: move/merge · Ctrl+click: split · Ctrl+click on equip: unequip · I: close",
         11.0, [0.6, 0.65, 0.75, 0.8],
     );
 
@@ -406,7 +375,6 @@ fn draw_tooltip(
     }
     let h = 12.0 + lines.len() as f32 * line_h;
 
-    // Сдвигаем tooltip, чтобы не уходил за экран.
     let mut tx = mx + 16.0;
     let mut ty = my + 16.0;
     if tx + w > ui.screen_w() - 8.0 { tx = mx - w - 16.0; }
@@ -429,7 +397,5 @@ fn point_in_rect(mx: f32, my: f32, r: (f32, f32, f32, f32)) -> bool {
     mx >= r.0 && mx < r.0 + r.2 && my >= r.1 && my < r.1 + r.3
 }
 
-// `ItemKind` импортируется, но не используется напрямую — оставлен
-// для будущего расширения (например, drag-and-drop по типу).
 #[allow(dead_code)]
 fn _silence_unused(_: ItemKind) {}

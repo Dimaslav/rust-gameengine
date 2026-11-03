@@ -57,7 +57,6 @@ impl Default for PhysicsWorld {
 struct BodyState {
     entity: Entity,
     body_type: BodyType,
-    mass: f32,
     inv_mass: f32,
     inv_inertia: f32,
     position: Vec3,
@@ -306,7 +305,6 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
         out.push(BodyState {
             entity: e,
             body_type: rb.body_type,
-            mass,
             inv_mass: rb.inv_mass(),
             inv_inertia,
             position: t.position,

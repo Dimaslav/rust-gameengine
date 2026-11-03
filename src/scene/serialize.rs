@@ -1,7 +1,21 @@
+//! Сериализация сцены в RON.
+//!
+//! ## Изменения (v2)
+//!
+//! * `EntitySnapshot.entity_id` / `.parent` теперь `Option<Entity>`
+//!   (index + generation), а не `Option<u32>`. Старые сцены (v1)
+//!   не загрузятся — формат инкрементирован в `SaveHeader`.
+//! * `TriggerSnapshot` для `CallElevator` хранит `elevator: Option<Entity>`
+//!   и `floor_idx: Option<u32>` отдельно (раньше — в общем `param: [f32; 4]`).
+//! * `b64_encode` / `b64_decode` — через crate `base64`.
+
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+use glam::Vec3;
 
 use crate::ecs::{Entity, World};
 use crate::game::ai::{AiAgent, AiState, PatrolPath};
@@ -17,7 +31,6 @@ use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
 use crate::game::timers::{Timer, TimerMode};
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
-use glam::Vec3;
 
 // ============================================================
 // SceneFile
@@ -29,23 +42,18 @@ pub struct SceneFile {
     pub entities: Vec<EntitySnapshot>,
     #[serde(default)]
     pub player_spawn: Option<[f32; 3]>,
-
     #[serde(default)]
     pub materials: HashMap<String, Material>,
-
     #[serde(default)]
     pub texture_paths: HashMap<String, String>,
-
     #[serde(default)]
     pub game_state_ron: Option<String>,
-
-    // === TERRAIN ===
     #[serde(default)]
     pub terrain: Option<TerrainRef>,
 }
 
 // ============================================================
-// TerrainRef (base64 snapshot heightmap)
+// TerrainRef
 // ============================================================
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -54,7 +62,6 @@ pub struct TerrainRef {
     pub size: f32,
     pub min_height: f32,
     pub max_height: f32,
-    /// Base64 от R16 (resolution² × 2 байта).
     pub heights_b64: String,
     #[serde(default)]
     pub splat_b64: Option<String>,
@@ -68,48 +75,93 @@ pub struct TerrainRef {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
-    #[serde(default)] pub entity_id: Option<u32>,
-    #[serde(default)] pub name: Option<String>,
-    #[serde(default)] pub transform: Option<TransformSnapshot>,
-    #[serde(default)] pub parent: Option<u32>,
-    #[serde(default)] pub mesh: Option<String>,
-    #[serde(default)] pub material: Option<String>,
-    #[serde(default)] pub skeleton: Option<String>,
-    #[serde(default)] pub animation: Option<AnimationSnapshot>,
-    #[serde(default)] pub spinner: Option<SpinnerSnapshot>,
-    #[serde(default)] pub velocity: Option<VelocitySnapshot>,
-    #[serde(default)] pub health: Option<HealthSnapshot>,
-    #[serde(default)] pub chase: Option<ChaseSnapshot>,
-    #[serde(default)] pub trigger: Option<TriggerSnapshot>,
-    #[serde(default)] pub interactable: Option<InteractableSnapshot>,
-    #[serde(default)] pub tint: Option<[f32; 4]>,
-    #[serde(default)] pub visible: Option<bool>,
-    #[serde(default)] pub texture_tiling: Option<f32>,
-    #[serde(default)] pub elevator: Option<ElevatorSnapshot>,
-    #[serde(default)] pub sliding_door: Option<SlidingDoorSnapshot>,
+    /// Оригинальный handle (index + generation). `None` для
+    /// prefab-инстансов и при копипасте — generation будет 0.
+    #[serde(default)]
+    pub entity_id: Option<Entity>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub transform: Option<TransformSnapshot>,
+    /// Ссылка на родителя. В сцене — реальный `Entity` (с generation).
+    /// В префабе — `Entity { index, 0 }` — индекс в массиве.
+    #[serde(default)]
+    pub parent: Option<Entity>,
+    #[serde(default)]
+    pub mesh: Option<String>,
+    #[serde(default)]
+    pub material: Option<String>,
+    #[serde(default)]
+    pub skeleton: Option<String>,
+    #[serde(default)]
+    pub animation: Option<AnimationSnapshot>,
+    #[serde(default)]
+    pub spinner: Option<SpinnerSnapshot>,
+    #[serde(default)]
+    pub velocity: Option<VelocitySnapshot>,
+    #[serde(default)]
+    pub health: Option<HealthSnapshot>,
+    #[serde(default)]
+    pub chase: Option<ChaseSnapshot>,
+    #[serde(default)]
+    pub trigger: Option<TriggerSnapshot>,
+    #[serde(default)]
+    pub interactable: Option<InteractableSnapshot>,
+    #[serde(default)]
+    pub tint: Option<[f32; 4]>,
+    #[serde(default)]
+    pub visible: Option<bool>,
+    #[serde(default)]
+    pub texture_tiling: Option<f32>,
+    #[serde(default)]
+    pub elevator: Option<ElevatorSnapshot>,
+    #[serde(default)]
+    pub sliding_door: Option<SlidingDoorSnapshot>,
 
-    #[serde(default)] pub rigid_body: Option<RigidBody>,
-    #[serde(default)] pub collider: Option<Collider>,
-    #[serde(default)] pub physics_material: Option<PhysicsMaterial>,
+    #[serde(default)]
+    pub rigid_body: Option<RigidBody>,
+    #[serde(default)]
+    pub collider: Option<Collider>,
+    #[serde(default)]
+    pub physics_material: Option<PhysicsMaterial>,
 
-    #[serde(default)] pub dir_light: Option<DirectionalLightSnapshot>,
-    #[serde(default)] pub point_light: Option<PointLightSnapshot>,
+    #[serde(default)]
+    pub dir_light: Option<DirectionalLightSnapshot>,
+    #[serde(default)]
+    pub point_light: Option<PointLightSnapshot>,
 
-    #[serde(default)] pub decal: Option<DecalSnapshot>,
-    #[serde(default)] pub gold_value: Option<u32>,
-    #[serde(default)] pub key_item: Option<u32>,
-    #[serde(default)] pub chest: Option<ChestSnapshot>,
-    #[serde(default)] pub door: Option<DoorSnapshot>,
-    #[serde(default)] pub npc: Option<NpcSnapshot>,
-    #[serde(default)] pub quest_target: Option<u32>,
+    #[serde(default)]
+    pub decal: Option<DecalSnapshot>,
+    #[serde(default)]
+    pub gold_value: Option<u32>,
+    #[serde(default)]
+    pub key_item: Option<u32>,
+    #[serde(default)]
+    pub chest: Option<ChestSnapshot>,
+    #[serde(default)]
+    pub door: Option<DoorSnapshot>,
+    #[serde(default)]
+    pub npc: Option<NpcSnapshot>,
+    #[serde(default)]
+    pub quest_target: Option<u32>,
 
-    #[serde(default)] pub ai_agent: Option<AiAgentSnapshot>,
-    #[serde(default)] pub patrol_path: Option<PatrolPathSnapshot>,
-    #[serde(default)] pub audio_source: Option<AudioSource>,
-    #[serde(default)] pub timer: Option<TimerSnapshot>,
-    #[serde(default)] pub ai_target: Option<bool>,
-    #[serde(default)] pub enemy: Option<bool>,
-    #[serde(default)] pub debug_path: Option<bool>,
+    #[serde(default)]
+    pub ai_agent: Option<AiAgentSnapshot>,
+    #[serde(default)]
+    pub patrol_path: Option<PatrolPathSnapshot>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub timer: Option<TimerSnapshot>,
+    #[serde(default)]
+    pub ai_target: Option<bool>,
+    #[serde(default)]
+    pub enemy: Option<bool>,
+    #[serde(default)]
+    pub debug_path: Option<bool>,
+
+    #[serde(default)]
+    pub script: Option<ScriptComponentSnapshot>,
 }
 
 // ============================================================
@@ -132,26 +184,47 @@ pub struct AnimationSnapshot {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct SpinnerSnapshot { pub axis: [f32; 3], pub speed: f32 }
+pub struct SpinnerSnapshot {
+    pub axis: [f32; 3],
+    pub speed: f32,
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct VelocitySnapshot { pub value: [f32; 3] }
+pub struct VelocitySnapshot {
+    pub value: [f32; 3],
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct HealthSnapshot { pub current: f32, pub max: f32 }
+pub struct HealthSnapshot {
+    pub current: f32,
+    pub max: f32,
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct ChaseSnapshot { pub speed: f32, pub stop_distance: f32 }
+pub struct ChaseSnapshot {
+    pub speed: f32,
+    pub stop_distance: f32,
+}
 
+/// **ИЗМЕНЕНО:** для `CallElevator` ссылка на elevator хранится
+/// в `elevator: Option<Entity>`, номер этажа — в `floor_idx: Option<u32>`.
+/// Раньше оба кодировались в `param: [f32; 4]`, что при generation > 0
+/// или floor_idx > 2^24 давало потерю точности.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerSnapshot {
     pub radius: f32,
     pub action: String,
+    /// Для teleport — [x, y, z, 0]; для tint — [r, g, b, a];
+    /// для play_sound/despawn/call_elevator — не используется.
     pub param: [f32; 4],
     pub once: bool,
     pub fired: bool,
     #[serde(default)]
     pub sound_name: Option<String>,
+    #[serde(default)]
+    pub elevator: Option<Entity>,
+    #[serde(default)]
+    pub floor_idx: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -166,14 +239,17 @@ pub struct ElevatorSnapshot {
     pub current_floor: u32,
     pub target_floor: u32,
     pub speed: f32,
-    #[serde(default)] pub acceleration: f32,
-    #[serde(default)] pub current_velocity: f32,
+    #[serde(default)]
+    pub acceleration: f32,
+    #[serde(default)]
+    pub current_velocity: f32,
     pub state: String,
     pub doors_open: f32,
     pub door_speed: f32,
     pub dwell: f32,
     pub dwell_timer: f32,
-    #[serde(default)] pub sensor_radius: f32,
+    #[serde(default)]
+    pub sensor_radius: f32,
 }
 
 impl ElevatorSnapshot {
@@ -317,7 +393,8 @@ pub struct AiAgentSnapshot {
     pub damage: f32,
     pub attack_cooldown: f32,
     pub lose_target_time: f32,
-    #[serde(default)] pub emits_noise: bool,
+    #[serde(default)]
+    pub emits_noise: bool,
 }
 
 impl AiAgentSnapshot {
@@ -336,7 +413,6 @@ impl AiAgentSnapshot {
             emits_noise: a.emits_noise,
         }
     }
-
     pub fn to_agent(&self) -> AiAgent {
         AiAgent {
             state: self.state,
@@ -349,7 +425,6 @@ impl AiAgentSnapshot {
             damage: self.damage,
             attack_cooldown: self.attack_cooldown,
             lose_target_time: self.lose_target_time,
-
             path: Vec::new(),
             path_index: 0,
             repath_timer: 0.0,
@@ -366,11 +441,15 @@ impl AiAgentSnapshot {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PatrolPathSnapshot {
     pub points: Vec<[f32; 3]>,
-    #[serde(default)] pub current: usize,
-    #[serde(default = "default_patrol_wait")] pub wait_time: f32,
+    #[serde(default)]
+    pub current: usize,
+    #[serde(default = "default_patrol_wait")]
+    pub wait_time: f32,
 }
 
-fn default_patrol_wait() -> f32 { 0.5 }
+fn default_patrol_wait() -> f32 {
+    0.5
+}
 
 impl PatrolPathSnapshot {
     pub fn from_path(p: &PatrolPath) -> Self {
@@ -380,7 +459,6 @@ impl PatrolPathSnapshot {
             wait_time: p.wait_time,
         }
     }
-
     pub fn to_path(&self) -> PatrolPath {
         PatrolPath {
             points: self.points.iter().map(|a| Vec3::from_array(*a)).collect(),
@@ -397,8 +475,21 @@ pub struct TimerSnapshot {
     pub duration: f32,
     pub elapsed: f32,
     pub mode: String,
-    #[serde(default)] pub paused: bool,
-    #[serde(default)] pub finished: bool,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub finished: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ScriptComponentSnapshot {
+    pub script: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ============================================================
@@ -447,7 +538,6 @@ fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Mate
             used.insert(mh.0.clone());
         }
     }
-
     let mut out = HashMap::new();
     for name in used {
         if let Some(mat) = renderer.materials.get(&name) {
@@ -507,7 +597,6 @@ pub fn save_scene_with_game_state_to_string(
     let materials = collect_materials(world, renderer);
     let texture_paths = collect_texture_paths(renderer, &materials);
 
-    // === TERRAIN ===
     let terrain = renderer.terrain.as_ref().map(|hm| {
         let (mn, mx) = hm.min_max();
         TerrainRef {
@@ -542,7 +631,10 @@ pub fn save_scene_with_game_state_to_file(
     game_state_ron: Option<String>,
 ) -> Result<()> {
     let text = save_scene_with_game_state_to_string(
-        world, renderer, player_spawn, game_state_ron,
+        world,
+        renderer,
+        player_spawn,
+        game_state_ron,
     )?;
     std::fs::write(path.as_ref(), text)
         .with_context(|| format!("write scene to {}", path.as_ref().display()))?;
@@ -558,7 +650,10 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
     s.entity_id = Some(e);
     let mut any = false;
 
-    if let Some(n) = world.get::<Name>(e) { s.name = Some(n.0.clone()); any = true; }
+    if let Some(n) = world.get::<Name>(e) {
+        s.name = Some(n.0.clone());
+        any = true;
+    }
     if let Some(t) = world.get::<Transform>(e) {
         s.transform = Some(TransformSnapshot {
             position: t.position.to_array(),
@@ -567,51 +662,92 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         });
         any = true;
     }
-    if let Some(Parent(p)) = world.get::<Parent>(e).copied() { s.parent = Some(p); any = true; }
-    if let Some(m) = world.get::<MeshHandle>(e) { s.mesh = Some(m.0.clone()); any = true; }
-    if let Some(m) = world.get::<MaterialHandle>(e) { s.material = Some(m.0.clone()); any = true; }
-    if let Some(sk) = world.get::<SkeletonHandle>(e) { s.skeleton = Some(sk.0.clone()); any = true; }
+    if let Some(Parent(p)) = world.get::<Parent>(e).copied() {
+        s.parent = Some(p);
+        any = true;
+    }
+    if let Some(m) = world.get::<MeshHandle>(e) {
+        s.mesh = Some(m.0.clone());
+        any = true;
+    }
+    if let Some(m) = world.get::<MaterialHandle>(e) {
+        s.material = Some(m.0.clone());
+        any = true;
+    }
+    if let Some(sk) = world.get::<SkeletonHandle>(e) {
+        s.skeleton = Some(sk.0.clone());
+        any = true;
+    }
     if let Some(a) = world.get::<AnimationPlayer>(e) {
         s.animation = Some(AnimationSnapshot {
-            clip: a.clip.clone(), time: a.time, speed: a.speed, looping: a.looping,
+            clip: a.clip.clone(),
+            time: a.time,
+            speed: a.speed,
+            looping: a.looping,
         });
         any = true;
     }
     if let Some(sp) = world.get::<Spinner>(e) {
-        s.spinner = Some(SpinnerSnapshot { axis: sp.axis.to_array(), speed: sp.speed });
+        s.spinner = Some(SpinnerSnapshot {
+            axis: sp.axis.to_array(),
+            speed: sp.speed,
+        });
         any = true;
     }
     if let Some(v) = world.get::<Velocity>(e) {
-        s.velocity = Some(VelocitySnapshot { value: v.value.to_array() });
+        s.velocity = Some(VelocitySnapshot {
+            value: v.value.to_array(),
+        });
         any = true;
     }
     if let Some(h) = world.get::<Health>(e) {
-        s.health = Some(HealthSnapshot { current: h.current, max: h.max });
+        s.health = Some(HealthSnapshot {
+            current: h.current,
+            max: h.max,
+        });
         any = true;
     }
     if let Some(c) = world.get::<Chase>(e) {
-        s.chase = Some(ChaseSnapshot { speed: c.speed, stop_distance: c.stop_distance });
+        s.chase = Some(ChaseSnapshot {
+            speed: c.speed,
+            stop_distance: c.stop_distance,
+        });
         any = true;
     }
     if let Some(t) = world.get::<Trigger>(e) {
-        let (kind, param, sound_name) = match &t.action {
-            TriggerAction::Teleport(p) => ("teleport".to_string(), [p[0], p[1], p[2], 0.0], None),
-            TriggerAction::Tint(c) => ("tint".to_string(), *c, None),
-            TriggerAction::Despawn => ("despawn".to_string(), [0.0; 4], None),
-            TriggerAction::CallElevator { elevator, floor_idx } => (
-                "call_elevator".to_string(),
-                [*elevator as f32, *floor_idx as f32, 0.0, 0.0],
-                None,
-            ),
-            TriggerAction::PlaySound(name) => (
-                "play_sound".to_string(),
-                [0.0; 4],
-                Some(name.clone()),
-            ),
+        let mut ts = TriggerSnapshot {
+            radius: t.radius,
+            action: String::new(),
+            param: [0.0; 4],
+            once: t.once,
+            fired: t.fired,
+            sound_name: None,
+            elevator: None,
+            floor_idx: None,
         };
-        s.trigger = Some(TriggerSnapshot {
-            radius: t.radius, action: kind, param, once: t.once, fired: t.fired, sound_name,
-        });
+        match &t.action {
+            TriggerAction::Teleport(p) => {
+                ts.action = "teleport".into();
+                ts.param = [p[0], p[1], p[2], 0.0];
+            }
+            TriggerAction::Tint(c) => {
+                ts.action = "tint".into();
+                ts.param = *c;
+            }
+            TriggerAction::Despawn => {
+                ts.action = "despawn".into();
+            }
+            TriggerAction::CallElevator { elevator, floor_idx } => {
+                ts.action = "call_elevator".into();
+                ts.elevator = Some(*elevator);
+                ts.floor_idx = Some(*floor_idx);
+            }
+            TriggerAction::PlaySound(name) => {
+                ts.action = "play_sound".into();
+                ts.sound_name = Some(name.clone());
+            }
+        }
+        s.trigger = Some(ts);
         any = true;
     }
     if let Some(i) = world.get::<Interactable>(e) {
@@ -623,8 +759,14 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         s.interactable = Some(InteractableSnapshot { kind, color });
         any = true;
     }
-    if let Some(t) = world.get::<Tint>(e) { s.tint = Some(t.0); any = true; }
-    if let Some(v) = world.get::<Visible>(e) { s.visible = Some(v.0); any = true; }
+    if let Some(t) = world.get::<Tint>(e) {
+        s.tint = Some(t.0);
+        any = true;
+    }
+    if let Some(v) = world.get::<Visible>(e) {
+        s.visible = Some(v.0);
+        any = true;
+    }
     if let Some(t) = world.get::<TextureTiling>(e) {
         s.texture_tiling = Some(t.size);
         any = true;
@@ -644,11 +786,18 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         });
         any = true;
     }
-
-    if let Some(rb) = world.get::<RigidBody>(e) { s.rigid_body = Some(*rb); any = true; }
-    if let Some(col) = world.get::<Collider>(e) { s.collider = Some(*col); any = true; }
-    if let Some(mat) = world.get::<PhysicsMaterial>(e) { s.physics_material = Some(*mat); any = true; }
-
+    if let Some(rb) = world.get::<RigidBody>(e) {
+        s.rigid_body = Some(*rb);
+        any = true;
+    }
+    if let Some(col) = world.get::<Collider>(e) {
+        s.collider = Some(*col);
+        any = true;
+    }
+    if let Some(mat) = world.get::<PhysicsMaterial>(e) {
+        s.physics_material = Some(*mat);
+        any = true;
+    }
     if let Some(l) = world.get::<DirectionalLight>(e) {
         s.dir_light = Some(DirectionalLightSnapshot::from_light(l));
         any = true;
@@ -657,7 +806,6 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         s.point_light = Some(PointLightSnapshot::from_light(l));
         any = true;
     }
-
     if let Some(d) = world.get::<Decal>(e) {
         s.decal = Some(DecalSnapshot {
             texture: d.texture.clone(),
@@ -674,11 +822,17 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         any = true;
     }
     if let Some(c) = world.get::<Chest>(e) {
-        s.chest = Some(ChestSnapshot { gold: c.gold, opened: c.opened });
+        s.chest = Some(ChestSnapshot {
+            gold: c.gold,
+            opened: c.opened,
+        });
         any = true;
     }
     if let Some(d) = world.get::<Door>(e) {
-        s.door = Some(DoorSnapshot { needs_key: d.needs_key, open: d.open });
+        s.door = Some(DoorSnapshot {
+            needs_key: d.needs_key,
+            open: d.open,
+        });
         any = true;
     }
     if let Some(n) = world.get::<Npc>(e) {
@@ -694,7 +848,6 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         s.quest_target = Some(q.quest_id);
         any = true;
     }
-
     if let Some(a) = world.get::<AiAgent>(e) {
         s.ai_agent = Some(AiAgentSnapshot::from_agent(a));
         any = true;
@@ -732,6 +885,13 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         s.debug_path = Some(true);
         any = true;
     }
+    if let Some(sc) = world.get::<crate::scripting::ScriptComponent>(e) {
+        s.script = Some(ScriptComponentSnapshot {
+            script: sc.script.clone(),
+            enabled: sc.enabled,
+        });
+        any = true;
+    }
 
     if any { Some(s) } else { None }
 }
@@ -747,13 +907,11 @@ pub fn load_scene_from_str(text: &str) -> Result<(World, Option<Vec3>)> {
 
 pub fn load_scene_from_str_full(
     text: &str,
-) -> Result<(World, Option<Vec3>, HashMap<u32, Entity>)> {
+) -> Result<(World, Option<Vec3>, HashMap<Entity, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
-
     let mut world = World::new();
     let id_map = spawn_all_entities(&mut world, file.entities);
     fix_call_elevator_refs(&mut world, &id_map);
-
     let spawn = file.player_spawn.map(Vec3::from_array);
     Ok((world, spawn, id_map))
 }
@@ -775,15 +933,15 @@ pub fn load_scene_with_assets_from_str_full(
 pub fn load_scene_with_assets_from_str_full_with_ids(
     text: &str,
     renderer: &mut Renderer,
-) -> Result<(World, Option<Vec3>, Option<String>, HashMap<u32, Entity>)> {
+) -> Result<(World, Option<Vec3>, Option<String>, HashMap<Entity, Entity>)> {
     let file: SceneFile = ron::from_str(text).context("parse RON scene")?;
 
-    // === TERRAIN: restore before entities ===
     if let Some(tref) = &file.terrain {
         match restore_terrain(renderer, tref) {
             Ok(()) => log::info!(
                 "Scene load: terrain restored ({}×{})",
-                tref.resolution, tref.resolution,
+                tref.resolution,
+                tref.resolution,
             ),
             Err(e) => log::warn!("Scene load: terrain restore failed: {:#}", e),
         }
@@ -800,7 +958,9 @@ pub fn load_scene_with_assets_from_str_full_with_ids(
             Err(e) => {
                 log::warn!(
                     "Scene load: texture '{}' from '{}' failed: {}",
-                    name, path, e
+                    name,
+                    path,
+                    e
                 );
                 failed_tex += 1;
             }
@@ -809,7 +969,8 @@ pub fn load_scene_with_assets_from_str_full_with_ids(
     if restored_tex + failed_tex > 0 {
         log::info!(
             "Scene load: {} textures restored, {} failed",
-            restored_tex, failed_tex
+            restored_tex,
+            failed_tex
         );
     }
 
@@ -821,10 +982,7 @@ pub fn load_scene_with_assets_from_str_full_with_ids(
         }
     }
     if !file.materials.is_empty() {
-        log::info!(
-            "Scene load: {} materials restored",
-            file.materials.len()
-        );
+        log::info!("Scene load: {} materials restored", file.materials.len());
     }
 
     let mut world = World::new();
@@ -859,9 +1017,9 @@ pub fn load_scene_with_assets_from_file(
 fn spawn_all_entities(
     world: &mut World,
     entities: Vec<EntitySnapshot>,
-) -> HashMap<u32, Entity> {
-    let mut id_map: HashMap<u32, Entity> = HashMap::with_capacity(entities.len());
-    let mut pending_parent: Vec<(Entity, Option<u32>)> = Vec::with_capacity(entities.len());
+) -> HashMap<Entity, Entity> {
+    let mut id_map: HashMap<Entity, Entity> = HashMap::with_capacity(entities.len());
+    let mut pending_parent: Vec<(Entity, Option<Entity>)> = Vec::with_capacity(entities.len());
 
     for snap in entities {
         let old_id = snap.entity_id;
@@ -875,57 +1033,103 @@ fn spawn_all_entities(
 
     for (new_e, old_parent) in pending_parent {
         if let Some(old_p) = old_parent
-            && let Some(&new_p) = id_map.get(&old_p) {
-                world.insert(new_e, Parent(new_p));
-            }
+            && let Some(&new_p) = id_map.get(&old_p)
+        {
+            world.insert(new_e, Parent(new_p));
+        }
     }
 
     id_map
 }
 
-fn fix_call_elevator_refs(world: &mut World, id_map: &HashMap<u32, Entity>) {
-    let trigger_entities: Vec<Entity> =
-        world.query::<Trigger>().map(|(e, _)| e).collect();
+fn fix_call_elevator_refs(world: &mut World, id_map: &HashMap<Entity, Entity>) {
+    let trigger_entities: Vec<Entity> = world.query::<Trigger>().map(|(e, _)| e).collect();
     for e in trigger_entities {
-        let Some(mut t) = world.get::<Trigger>(e).cloned() else { continue };
+        let Some(mut t) = world.get::<Trigger>(e).cloned() else {
+            continue;
+        };
         if let TriggerAction::CallElevator { elevator, floor_idx } = t.action
-            && let Some(&new_el) = id_map.get(&elevator) {
-                t.action = TriggerAction::CallElevator { elevator: new_el, floor_idx };
-                world.insert(e, t);
-            }
+            && let Some(&new_el) = id_map.get(&elevator)
+        {
+            t.action = TriggerAction::CallElevator {
+                elevator: new_el,
+                floor_idx,
+            };
+            world.insert(e, t);
+        }
     }
 }
 
 pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     let e = world.spawn();
 
-    if let Some(n) = snap.name { world.insert(e, Name(n)); }
-    if let Some(t) = snap.transform {
-        world.insert(e, Transform {
-            position: glam::Vec3::from_array(t.position),
-            rotation: glam::Quat::from_array(t.rotation),
-            scale: glam::Vec3::from_array(t.scale),
-        });
+    if let Some(n) = snap.name {
+        world.insert(e, Name(n));
     }
-    if let Some(m) = snap.mesh { world.insert(e, MeshHandle(m)); }
-    if let Some(m) = snap.material { world.insert(e, MaterialHandle(m)); }
-    if let Some(s) = snap.skeleton { world.insert(e, SkeletonHandle(s)); }
+    if let Some(t) = snap.transform {
+        world.insert(
+            e,
+            Transform {
+                position: glam::Vec3::from_array(t.position),
+                rotation: glam::Quat::from_array(t.rotation),
+                scale: glam::Vec3::from_array(t.scale),
+            },
+        );
+    }
+    if let Some(m) = snap.mesh {
+        world.insert(e, MeshHandle(m));
+    }
+    if let Some(m) = snap.material {
+        world.insert(e, MaterialHandle(m));
+    }
+    if let Some(s) = snap.skeleton {
+        world.insert(e, SkeletonHandle(s));
+    }
     if let Some(a) = snap.animation {
-        world.insert(e, AnimationPlayer {
-            clip: a.clip, time: a.time, speed: a.speed, looping: a.looping,
-        });
+        world.insert(
+            e,
+            AnimationPlayer {
+                clip: a.clip,
+                time: a.time,
+                speed: a.speed,
+                looping: a.looping,
+            },
+        );
     }
     if let Some(sp) = snap.spinner {
-        world.insert(e, Spinner { axis: glam::Vec3::from_array(sp.axis), speed: sp.speed });
+        world.insert(
+            e,
+            Spinner {
+                axis: glam::Vec3::from_array(sp.axis),
+                speed: sp.speed,
+            },
+        );
     }
     if let Some(v) = snap.velocity {
-        world.insert(e, Velocity { value: glam::Vec3::from_array(v.value) });
+        world.insert(
+            e,
+            Velocity {
+                value: glam::Vec3::from_array(v.value),
+            },
+        );
     }
     if let Some(h) = snap.health {
-        world.insert(e, Health { current: h.current, max: h.max });
+        world.insert(
+            e,
+            Health {
+                current: h.current,
+                max: h.max,
+            },
+        );
     }
     if let Some(c) = snap.chase {
-        world.insert(e, Chase { speed: c.speed, stop_distance: c.stop_distance });
+        world.insert(
+            e,
+            Chase {
+                speed: c.speed,
+                stop_distance: c.stop_distance,
+            },
+        );
     }
     if let Some(t) = snap.trigger {
         let action = match t.action.as_str() {
@@ -933,17 +1137,23 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             "tint" => TriggerAction::Tint(t.param),
             "despawn" => TriggerAction::Despawn,
             "call_elevator" => TriggerAction::CallElevator {
-                elevator: t.param[0] as u32,
-                floor_idx: t.param[1] as u32,
+                elevator: t.elevator.unwrap_or(Entity::from_raw(0, 0)),
+                floor_idx: t.floor_idx.unwrap_or(0),
             },
             "play_sound" => TriggerAction::PlaySound(
-                t.sound_name.unwrap_or_else(|| "pickup".to_string())
+                t.sound_name.unwrap_or_else(|| "pickup".to_string()),
             ),
             _ => TriggerAction::Despawn,
         };
-        world.insert(e, Trigger {
-            radius: t.radius, action, once: t.once, fired: t.fired,
-        });
+        world.insert(
+            e,
+            Trigger {
+                radius: t.radius,
+                action,
+                once: t.once,
+                fired: t.fired,
+            },
+        );
     }
     if let Some(i) = snap.interactable {
         let kind = match i.kind.as_str() {
@@ -954,8 +1164,12 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         };
         world.insert(e, kind);
     }
-    if let Some(t) = snap.tint { world.insert(e, Tint(t)); }
-    if let Some(v) = snap.visible { world.insert(e, Visible(v)); }
+    if let Some(t) = snap.tint {
+        world.insert(e, Tint(t));
+    }
+    if let Some(v) = snap.visible {
+        world.insert(e, Visible(v));
+    }
     if let Some(size) = snap.texture_tiling {
         world.insert(e, TextureTiling::new(size));
     }
@@ -963,46 +1177,80 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         world.insert(e, el.to_elevator());
     }
     if let Some(sd) = snap.sliding_door {
-        world.insert(e, SlidingDoor {
-            open_amount: sd.open_amount,
-            target: sd.target,
-            speed: sd.speed,
-            slide_axis: glam::Vec3::from_array(sd.slide_axis),
-            slide_distance: sd.slide_distance,
-            closed_position: glam::Vec3::from_array(sd.closed_position),
-        });
+        world.insert(
+            e,
+            SlidingDoor {
+                open_amount: sd.open_amount,
+                target: sd.target,
+                speed: sd.speed,
+                slide_axis: glam::Vec3::from_array(sd.slide_axis),
+                slide_distance: sd.slide_distance,
+                closed_position: glam::Vec3::from_array(sd.closed_position),
+            },
+        );
     }
-
-    if let Some(rb) = snap.rigid_body { world.insert(e, rb); }
-    if let Some(col) = snap.collider { world.insert(e, col); }
-    if let Some(mat) = snap.physics_material { world.insert(e, mat); }
-
-    if let Some(l) = snap.dir_light { world.insert(e, l.to_light()); }
-    if let Some(l) = snap.point_light { world.insert(e, l.to_light()); }
-
+    if let Some(rb) = snap.rigid_body {
+        world.insert(e, rb);
+    }
+    if let Some(col) = snap.collider {
+        world.insert(e, col);
+    }
+    if let Some(mat) = snap.physics_material {
+        world.insert(e, mat);
+    }
+    if let Some(l) = snap.dir_light {
+        world.insert(e, l.to_light());
+    }
+    if let Some(l) = snap.point_light {
+        world.insert(e, l.to_light());
+    }
     if let Some(d) = snap.decal {
-        world.insert(e, Decal { texture: d.texture, tint: d.tint });
+        world.insert(
+            e,
+            Decal {
+                texture: d.texture,
+                tint: d.tint,
+            },
+        );
     }
-    if let Some(g) = snap.gold_value { world.insert(e, GoldValue(g)); }
-    if let Some(k) = snap.key_item { world.insert(e, KeyItem(k)); }
+    if let Some(g) = snap.gold_value {
+        world.insert(e, GoldValue(g));
+    }
+    if let Some(k) = snap.key_item {
+        world.insert(e, KeyItem(k));
+    }
     if let Some(c) = snap.chest {
-        world.insert(e, Chest { gold: c.gold, opened: c.opened });
+        world.insert(
+            e,
+            Chest {
+                gold: c.gold,
+                opened: c.opened,
+            },
+        );
     }
     if let Some(d) = snap.door {
-        world.insert(e, Door { needs_key: d.needs_key, open: d.open });
+        world.insert(
+            e,
+            Door {
+                needs_key: d.needs_key,
+                open: d.open,
+            },
+        );
     }
     if let Some(n) = snap.npc {
-        world.insert(e, Npc {
-            name: n.name,
-            lines: n.lines,
-            quest_id: n.quest_id,
-            spoken_to: n.spoken_to,
-        });
+        world.insert(
+            e,
+            Npc {
+                name: n.name,
+                lines: n.lines,
+                quest_id: n.quest_id,
+                spoken_to: n.spoken_to,
+            },
+        );
     }
     if let Some(q) = snap.quest_target {
         world.insert(e, QuestTarget { quest_id: q });
     }
-
     if let Some(a) = snap.ai_agent {
         world.insert(e, a.to_agent());
     }
@@ -1019,7 +1267,9 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         };
         let mut timer = Timer::with_mode(t.duration, mode);
         timer.elapsed = t.elapsed;
-        if t.paused { timer.pause(); }
+        if t.paused {
+            timer.pause();
+        }
         if t.finished && mode == TimerMode::Once {
             timer.elapsed = timer.duration;
         }
@@ -1034,19 +1284,28 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
     if snap.debug_path == Some(true) {
         world.insert(e, crate::game::ai::DebugPath);
     }
+    if let Some(sc) = snap.script {
+        world.insert(
+            e,
+            crate::scripting::ScriptComponent {
+                script: sc.script,
+                enabled: sc.enabled,
+                started: false,
+            },
+        );
+    }
 
     e
 }
 
 // ============================================================
-// === TERRAIN: restore + base64 ===
+// Terrain restore
 // ============================================================
 
-fn restore_terrain(
-    renderer: &mut Renderer,
-    tref: &TerrainRef,
-) -> anyhow::Result<()> {
-    use crate::render::terrain::{generate_terrain_mesh, generate_terrain_texture, Heightmap};
+fn restore_terrain(renderer: &mut Renderer, tref: &TerrainRef) -> anyhow::Result<()> {
+    use crate::render::terrain::{
+        generate_terrain_mesh, generate_terrain_texture, Heightmap,
+    };
 
     let r16 = b64_decode(&tref.heights_b64)
         .map_err(|e| anyhow::anyhow!("terrain base64 decode: {}", e))?;
@@ -1059,12 +1318,13 @@ fn restore_terrain(
     hm.recompute_min_max();
 
     if let Some(splat_b64) = &tref.splat_b64
-        && let Ok(splat) = b64_decode(splat_b64) {
-            let n = (hm.resolution * hm.resolution * 4) as usize;
-            if splat.len() >= n {
-                hm.splat[..n].copy_from_slice(&splat[..n]);
-            }
+        && let Ok(splat) = b64_decode(splat_b64)
+    {
+        let n = (hm.resolution * hm.resolution * 4) as usize;
+        if splat.len() >= n {
+            hm.splat[..n].copy_from_slice(&splat[..n]);
         }
+    }
 
     let mesh = generate_terrain_mesh(&renderer.device, &hm);
     renderer.add_mesh("terrain", mesh);
@@ -1089,66 +1349,14 @@ fn restore_terrain(
     Ok(())
 }
 
-// ---- base64 (без внешних крейтов) ----
-
-const B64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// ============================================================
+// base64 (через crate)
+// ============================================================
 
 fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(B64_ALPHABET[((n >> 18) & 63) as usize] as char);
-        out.push(B64_ALPHABET[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(B64_ALPHABET[((n >> 6) & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(B64_ALPHABET[(n & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    B64.encode(data)
 }
 
-fn b64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    let mut rev = [255u8; 256];
-    for (i, &c) in B64_ALPHABET.iter().enumerate() {
-        rev[c as usize] = i as u8;
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    let mut buf = [0u8; 4];
-    let mut buf_len = 0;
-    for &b in bytes {
-        if b == b'=' || b == b'\n' || b == b'\r' || b == b' ' { continue; }
-        let v = rev[b as usize];
-        if v == 255 { return Err("invalid base64 char"); }
-        buf[buf_len] = v;
-        buf_len += 1;
-        if buf_len == 4 {
-            let n = ((buf[0] as u32) << 18)
-                | ((buf[1] as u32) << 12)
-                | ((buf[2] as u32) << 6)
-                | (buf[3] as u32);
-            out.push(((n >> 16) & 0xFF) as u8);
-            out.push(((n >> 8) & 0xFF) as u8);
-            out.push((n & 0xFF) as u8);
-            buf_len = 0;
-        }
-    }
-    if buf_len >= 2 {
-        let n = ((buf[0] as u32) << 18) | ((buf[1] as u32) << 12);
-        out.push(((n >> 16) & 0xFF) as u8);
-        if buf_len >= 3 {
-            out.push(((n >> 8) & 0xFF) as u8);
-        }
-    }
-    Ok(out)
+fn b64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    B64.decode(s)
 }

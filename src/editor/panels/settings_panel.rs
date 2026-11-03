@@ -1,10 +1,7 @@
-//! Плавающее окно Settings: тема + hotkeys editor.
-
-use crate::editor::hotkeys::{HotkeyAction, HotkeyBinding};
+use crate::editor::hotkeys::HotkeyAction;
 use crate::editor::panels::Stats;
 use crate::editor::theme::Theme;
 use crate::editor::EditorState;
-use crate::engine::input_keys::Key;
 
 pub fn draw_window(
     ctx: &egui::Context,

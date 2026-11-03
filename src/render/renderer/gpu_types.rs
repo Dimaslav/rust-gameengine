@@ -17,7 +17,7 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
-pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 pub const VOLUMETRIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const VOLUMETRIC_GRID_W: u32 = 160;
@@ -30,8 +30,6 @@ pub const MAX_POINT_LIGHTS: usize = 16;
 pub const MAX_SHADOW_CUBES: usize = 4;
 
 pub const SHADOW_SLOT_COUNT: u64 = (3 + 6 * MAX_SHADOW_CUBES) as u64;
-
-pub const TAA_JITTER_SEQUENCE: u32 = 8;
 
 // ============================================================
 // GPU-структуры

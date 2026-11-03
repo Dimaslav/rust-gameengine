@@ -4,7 +4,7 @@
 //! `panels::mod::draw_all`, если в выделении есть entity с
 //! `AudioSource`.
 
-use crate::ecs::{Entity, World};
+use crate::ecs::World;
 use crate::editor::panels::AudioSnapshot;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::audio::{AudioBus, AudioSource};

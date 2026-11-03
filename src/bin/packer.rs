@@ -4,6 +4,9 @@
 //!   cargo run --bin packer             # дефолт: rust-engine, release
 //!   cargo run --bin packer mygame      # имя проекта mygame
 //!   cargo run --bin packer mygame debug
+//!
+//! ИЗМЕНЕНО: имя exe-файла зависит от платформы (`.exe` только на Windows).
+//! Раньше packer всегда искал `<name>.exe` и падал на Linux/macOS.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +34,9 @@ fn main() {
     // 2. Собрать бинарь
     print!("🔨 Building… ");
     let mut cargo_args = vec!["build"];
-    if profile == "release" { cargo_args.push("--release"); }
+    if profile == "release" {
+        cargo_args.push("--release");
+    }
     let status = Command::new("cargo")
         .args(&cargo_args)
         .current_dir(&root)
@@ -43,15 +48,19 @@ fn main() {
     }
     println!("ok");
 
-    // 3. Скопировать exe
-    let exe_name = format!("{}.exe", game_name);
+    // 3. Скопировать exe/bin. Расширение зависит от целевой платформы.
+    let exe_name = if cfg!(windows) {
+        format!("{}.exe", game_name)
+    } else {
+        game_name.clone()
+    };
     let exe_src = root.join("target").join(&profile).join(&exe_name);
     if !exe_src.exists() {
-        eprintln!("❌ exe не найден: {}", exe_src.display());
+        eprintln!("❌ executable не найден: {}", exe_src.display());
         eprintln!("   Подсказка: name в Cargo.toml = \"{}\"?", game_name);
         std::process::exit(1);
     }
-    fs::copy(&exe_src, dist.join(&exe_name)).expect("copy exe");
+    fs::copy(&exe_src, dist.join(&exe_name)).expect("copy executable");
     println!("  ✓ {}", exe_name);
 
     // 4. assets/
@@ -79,8 +88,8 @@ fn main() {
          Запуск: {exe}\n\
          \n\
          Требования:\n\
-           - Windows 10/11 x64\n\
-           - GPU с DirectX 12 или Vulkan\n\
+           - Windows 10/11 x64, Linux, macOS\n\
+           - GPU с DirectX 12 / Vulkan / Metal\n\
            - 4 GB RAM минимум\n\
          \n\
          Управление:\n\

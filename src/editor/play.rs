@@ -1,4 +1,11 @@
 //! Состояние Play-режима.
+//!
+//! ## Что нового
+//!
+//! * **`sprint_toggled`** — состояние sprint-toggle (когда в
+//!   `ControlsSettings::sprint_toggle == true`). Сбрасывается при
+//!   входе в play. При `sprint_toggle == false` (hold) поле не
+//!   используется.
 
 use crate::ecs::Entity;
 use glam::Vec3;
@@ -22,7 +29,7 @@ pub struct PlayState {
     pub floor_y: f32,
     pub look_sensitivity: f32,
 
-    // === ИЗМЕНЕНО (Фаза 5): платформерный контроллер ===
+    // === Платформерный контроллер ===
     //
     // `horizontal_velocity` — XZ-скорость, накопленная между кадрами.
     // Раньше движение было instant (`motion = dir * speed * dt`), что
@@ -65,6 +72,14 @@ pub struct PlayState {
     pub crouch_speed_mult: f32,
     pub current_eye_height: f32,
     pub crouching: bool,
+
+    // === Sprint (toggle) ===
+    //
+    /// Состояние sprint-toggle. Используется, только если
+    /// `AppSettings::controls::sprint_toggle == true`. При hold
+    ///
+    /// (default) — не читается. Сбрасывается при входе в play.
+    pub sprint_toggled: bool,
 
     pub push_strength: f32,
 
@@ -133,6 +148,8 @@ impl Default for PlayState {
             crouch_speed_mult: 0.5,
             current_eye_height: 1.7,
             crouching: false,
+
+            sprint_toggled: false,
 
             push_strength: 1.0,
 

@@ -10,11 +10,44 @@
             speaker: "Elder",
             text: "Приветствую тебя, путник. Я — старейшина этой деревни. Чем могу помочь?",
             options: [
+                // === Turn-in (сдача квестов) — только если готовы ===
+                (text: "Я убил стражников. Вот весть о победе.",
+                    next: Some("return_thanks_wolves"),
+                    condition: Some("quest_objectives_done:hunt_wolves"),
+                    effect: [CompleteQuest("hunt_wolves")]),
+                (text: "Владыка мёртв. Его сердце — моё.",
+                    next: Some("return_thanks_lord"),
+                    condition: Some("quest_objectives_done:slay_lord"),
+                    effect: [CompleteQuest("slay_lord")]),
+
+                // === In-progress hints ===
+                (text: "Я ещё работаю над стражниками.",
+                    next: Some("progress_wolves"),
+                    condition: Some("quest_active:hunt_wolves"), effect: []),
+                (text: "Я ищу Владыку.",
+                    next: Some("progress_lord"),
+                    condition: Some("quest_active:slay_lord"), effect: []),
+
+                // === Standard ===
                 (text: "Расскажи о деревне.", next: Some("lore_village"), effect: []),
                 (text: "Есть работа?", next: Some("quest_hub"), effect: []),
                 (text: "Что ты знаешь о цитадели?", next: Some("lore_citadel"), effect: []),
                 (text: "Мне нужно идти.", next: None, effect: []),
             ],
+        ),
+
+        // ============================================================
+        // PROGRESS
+        // ============================================================
+        "progress_wolves": (
+            speaker: "Elder",
+            text: "Стражники — во дворе, к востоку. Будь осторожен.",
+            options: [(text: "Понял.", next: Some("root"), effect: [])],
+        ),
+        "progress_lord": (
+            speaker: "Elder",
+            text: "Цитадель — на востоке. Ключ в сокровищнице, или портал у кузнеца.",
+            options: [(text: "Понял.", next: Some("root"), effect: [])],
         ),
 
         // ============================================================
@@ -82,16 +115,22 @@
         // ============================================================
         "quest_hub": (
             speaker: "Elder",
-            text: "Есть два дела. Первое — очистить лес от волков. Второе — открыть путь к цитадели. Что выберешь?",
+            text: "Есть два дела. Первое — очистить двор от стражников. Второе — открыть путь к цитадели. Что выберешь?",
             options: [
-                (text: "Дай мне волков.", next: Some("quest_wolves_confirm"), effect: []),
-                (text: "Расскажи про цитадель.", next: Some("quest_citadel_confirm"), effect: []),
+                (text: "Дай мне задание на стражников.",
+                    next: Some("quest_wolves_confirm"),
+                    condition: Some("quest_not_started:hunt_wolves"),
+                    effect: []),
+                (text: "Расскажи про цитадель.",
+                    next: Some("quest_citadel_confirm"),
+                    condition: Some("quest_not_started:slay_lord"),
+                    effect: []),
                 (text: "Я подумаю.", next: Some("root"), effect: []),
             ],
         ),
         "quest_wolves_confirm": (
             speaker: "Elder",
-            text: "Убей пять волков на опушке. За это получишь золото и славу. По рукам?",
+            text: "Убей двух стражников во дворе. Принеси мне весть о победе. По рукам?",
             options: [
                 (text: "По рукам.", next: Some("quest_wolves_started"),
                     effect: [StartQuest("hunt_wolves")]),
@@ -100,7 +139,7 @@
         ),
         "quest_wolves_started": (
             speaker: "Elder",
-            text: "Отлично. Волки — у опушки, к востоку от деревни. Возвращайся с победой!",
+            text: "Отлично. Стражники — во дворе, к востоку. Возвращайся с победой!",
             options: [
                 (text: "Иду.", next: None, effect: []),
             ],
@@ -127,18 +166,16 @@
         // ============================================================
         "return_thanks_wolves": (
             speaker: "Elder",
-            text: "Ты сделал это! Волки больше не тревожат деревню. Возьми награду — ты заслужил.",
+            text: "Ты сделал это! Двор очищен. Возьми награду — ты заслужил.",
             options: [
-                (text: "Рад помочь.", next: Some("root"),
-                    effect: [GiveGold(200), GiveXp(100)]),
+                (text: "Рад помочь.", next: Some("root"), effect: []),
             ],
         ),
         "return_thanks_lord": (
             speaker: "Elder",
             text: "Владыка пал. Тьма отступила. Ты — герой, и легенды будут петь о тебе веками.",
             options: [
-                (text: "Это было честью.", next: None,
-                    effect: [GiveGold(1000), GiveXp(500)]),
+                (text: "Это было честью.", next: None, effect: []),
             ],
         ),
 

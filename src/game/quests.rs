@@ -1,4 +1,9 @@
 //! Data-driven квесты.
+//!
+//! Загрузка (`load_from_dir`) терпима к битым `.ron` в папке: файл,
+//! который не парсится как `QuestDef`, пропускается с `log::warn`.
+//! Раньше `?` валил всю загрузку — один ошибочно положенный файл
+//! (например, DialogGraph в `assets/quests/`) ломал ВСЕ квесты в игре.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -63,6 +68,11 @@ impl QuestManager {
         }
     }
 
+    /// Загрузка всех `.ron` из папки.
+    ///
+    /// ИЗМЕНЕНО: файлы, которые не парсятся как `QuestDef`, **пропускаются**
+    /// с `log::warn`. Раньше `?` валил всю загрузку — один ошибочный файл
+    /// оставлял `QuestManager` пустым и ломал `start_quest`.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut manager = Self::new();
@@ -70,14 +80,36 @@ impl QuestManager {
             log::warn!("Quests dir {} not found, skipping.", dir.display());
             return Ok(manager);
         }
+
         let entries = std::fs::read_dir(dir).context("read quests dir")?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("ron") {
-                let text = std::fs::read_to_string(&path)?;
-                let quest: QuestDef = ron::from_str(&text)
-                    .with_context(|| format!("parse quest {}", path.display()))?;
-                manager.registry.insert(quest.id.clone(), quest);
+            if path.extension().and_then(|s| s.to_str()) != Some("ron") {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("quest '{}': read failed: {}", path.display(), e);
+                    continue;
+                }
+            };
+            match ron::from_str::<QuestDef>(&text) {
+                Ok(quest) => {
+                    log::info!(
+                        "quest: loaded '{}' ({} objectives, {} rewards) from {}",
+                        quest.id, quest.objectives.len(), quest.rewards.len(),
+                        path.display()
+                    );
+                    manager.registry.insert(quest.id.clone(), quest);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "quest '{}': parse failed ({}). Пропускаю файл. \
+                         Если это DialogGraph, перенесите его в assets/dialogs/.",
+                        path.display(), e
+                    );
+                }
             }
         }
         Ok(manager)
@@ -90,6 +122,8 @@ impl QuestManager {
         {
             self.active.insert(id.to_string(), 0);
             log::info!("Quest started: {}", id);
+        } else if !self.registry.contains_key(id) {
+            log::warn!("start_quest: '{}' not in registry", id);
         }
     }
 

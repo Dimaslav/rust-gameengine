@@ -4,16 +4,29 @@
 //! вызывает `ui.rect(...)`, `ui.text(...)`, `ui.button(...)` из
 //! `Game::collect_ui` — каждая функция добавляет квады и (для
 //! интерактивных элементов) возвращает interaction-статус.
+//!
+//! ИЗМЕНЕНО: `UiInput` теперь несёт модификаторы (`ctrl`/`shift`/`alt`).
+//! Раньше `inventory_ui` не мог отличить Ctrl+click от обычного —
+//! приходилось тащить состояние через `FortressDemo::update`.
 
 use super::font;
 use super::quad::UiQuad;
 
+/// Модификаторы клавиатуры, интересные для UI.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UiModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
 /// Состояние мыши, нужное для interaction.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UiInput {
     pub mouse_pos: (f32, f32),
     pub mouse_clicked: bool,
     pub mouse_down: bool,
+    pub modifiers: UiModifiers,
 }
 
 pub struct UiLayer {
@@ -21,12 +34,8 @@ pub struct UiLayer {
     screen_w: f32,
     screen_h: f32,
     input: UiInput,
-    /// Было ли interaction-событие (клик) потреблено UI в этом кадре.
-    /// Игровой код может использовать это, чтобы не дублировать клик
-    /// в 3D-сцену.
+    /// Был ли interaction-клик потреблён UI в этом кадре.
     pub consumed_click: bool,
-    /// Уникальный id для текущего интерактивного виджета — пригодится
-    /// для отладки и будущего widget tree.
     next_widget_id: u32,
 }
 
@@ -55,7 +64,6 @@ impl UiLayer {
     // Примитивы
     // ============================================================
 
-    /// Сплошной прямоугольник.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         if w <= 0.0 || h <= 0.0 || color[3] <= 0.0 { return; }
         self.quads.push(UiQuad {
@@ -65,7 +73,6 @@ impl UiLayer {
         });
     }
 
-    /// Рамка (4 прямоугольника).
     pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: [f32; 4]) {
         let t = thickness.max(0.5);
         self.rect(x, y, w, t, color);
@@ -74,7 +81,6 @@ impl UiLayer {
         self.rect(x + w - t, y + t, t, h - 2.0 * t, color);
     }
 
-    /// Текст. `size_px` — высота глифа. Оригинал 5×7.
     pub fn text(&mut self, x: f32, y: f32, text: &str, size_px: f32, color: [f32; 4]) {
         if size_px <= 0.0 || color[3] <= 0.0 { return; }
         let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
@@ -94,7 +100,6 @@ impl UiLayer {
         }
     }
 
-    /// Текст, центрированный по `(cx, cy)`.
     pub fn text_centered(&mut self, cx: f32, cy: f32, text: &str, size_px: f32, color: [f32; 4]) {
         if size_px <= 0.0 { return; }
         let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
@@ -105,7 +110,6 @@ impl UiLayer {
         self.text(x, y, text, size_px, color);
     }
 
-    /// Ширина текста в пикселях.
     pub fn text_width(&self, text: &str, size_px: f32) -> f32 {
         let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
         text.chars().count() as f32 * glyph_w
@@ -120,7 +124,6 @@ impl UiLayer {
         mx >= x && mx < x + w && my >= y && my < y + h
     }
 
-    /// Кнопка. Возвращает `true` если кликнута в этом кадре.
     pub fn button(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str) -> bool {
         self.next_widget_id += 1;
 
@@ -148,7 +151,6 @@ impl UiLayer {
         clicked
     }
 
-    /// Прогресс-бар. `frac` в [0, 1].
     pub fn bar(
         &mut self,
         x: f32,
@@ -165,7 +167,6 @@ impl UiLayer {
         self.rect_outline(x, y, w, h, 1.0, [0.0, 0.0, 0.0, 0.7]);
     }
 
-    /// Прицел — четыре линии крестом.
     pub fn crosshair(&mut self, cx: f32, cy: f32, size: f32, thickness: f32, color: [f32; 4]) {
         let t = thickness.max(1.0);
         self.rect(cx - size, cy - t * 0.5, size * 2.0, t, color);

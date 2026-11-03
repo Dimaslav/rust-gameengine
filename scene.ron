@@ -1,7 +1,10 @@
 (
     entities: [
         (
-            entity_id: Some(0),
+            entity_id: Some((
+                index: 0,
+                generation: 0,
+            )),
             name: Some("Terrain"),
             transform: Some((
                 position: (0.0, 0.0, 0.0),
@@ -43,9 +46,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(1),
+            entity_id: Some((
+                index: 1,
+                generation: 0,
+            )),
             name: Some("Act1_Floor"),
             transform: Some((
                 position: (-60.0, 0.0, 0.0),
@@ -100,9 +107,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(2),
+            entity_id: Some((
+                index: 2,
+                generation: 0,
+            )),
             name: Some("Act1_Wall_W"),
             transform: Some((
                 position: (-70.0, 2.5, 0.0),
@@ -157,9 +168,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(3),
+            entity_id: Some((
+                index: 3,
+                generation: 0,
+            )),
             name: Some("Act1_Wall_N"),
             transform: Some((
                 position: (-60.0, 2.5, -10.0),
@@ -214,9 +229,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(4),
+            entity_id: Some((
+                index: 4,
+                generation: 0,
+            )),
             name: Some("Act1_Wall_S"),
             transform: Some((
                 position: (-60.0, 2.5, 10.0),
@@ -271,9 +290,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(5),
+            entity_id: Some((
+                index: 5,
+                generation: 0,
+            )),
             name: Some("Act1_Wall_E1"),
             transform: Some((
                 position: (-50.0, 2.5, -6.5),
@@ -328,9 +351,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(6),
+            entity_id: Some((
+                index: 6,
+                generation: 0,
+            )),
             name: Some("Act1_Wall_E2"),
             transform: Some((
                 position: (-50.0, 2.5, 6.5),
@@ -385,9 +412,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(7),
+            entity_id: Some((
+                index: 7,
+                generation: 0,
+            )),
             name: Some("gate_east_1"),
             transform: Some((
                 position: (-50.0, 2.0, 0.0),
@@ -452,9 +483,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(8),
+            entity_id: Some((
+                index: 8,
+                generation: 0,
+            )),
             name: Some("Act1_Torch_1"),
             transform: Some((
                 position: (-69.0, 3.0, -9.0),
@@ -496,13 +531,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(9),
+            entity_id: Some((
+                index: 9,
+                generation: 0,
+            )),
             name: Some("Act1_Torch_1_Light"),
             transform: Some((
                 position: (-69.0, 4.55, -9.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -558,9 +597,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(10),
+            entity_id: Some((
+                index: 10,
+                generation: 0,
+            )),
             name: Some("Act1_Torch_2"),
             transform: Some((
                 position: (-69.0, 3.0, 9.0),
@@ -602,13 +645,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(11),
+            entity_id: Some((
+                index: 11,
+                generation: 0,
+            )),
             name: Some("Act1_Torch_2_Light"),
             transform: Some((
                 position: (-69.0, 4.55, 9.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -664,13 +711,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(12),
+            entity_id: Some((
+                index: 12,
+                generation: 0,
+            )),
             name: Some("Act1_Enemy_1"),
             transform: Some((
-                position: (-66.00653, 0.495, -5.7138333),
-                rotation: (0.0, -0.06425997, 0.0, 0.9979332),
+                position: (-65.903984, 0.495, -5.7924924),
+                rotation: (0.0, -0.25507042, 0.0, 0.96692246),
                 scale: (0.55, 0.55, 0.55),
             )),
             parent: None,
@@ -735,13 +786,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(13),
+            entity_id: Some((
+                index: 13,
+                generation: 0,
+            )),
             name: Some("Act1_Enemy_2"),
             transform: Some((
-                position: (-61.212883, 0.495, -1.7173367),
-                rotation: (0.0, 0.92451864, 0.0, 0.3811368),
+                position: (-61.087605, 0.495, -1.3387059),
+                rotation: (0.0, 0.9979038, 0.0, 0.06471479),
                 scale: (0.55, 0.55, 0.55),
             )),
             parent: None,
@@ -779,7 +834,7 @@
             npc: None,
             quest_target: None,
             ai_agent: Some((
-                state: Chase,
+                state: Attack,
                 speed: 3.2,
                 turn_speed: 8.0,
                 vision_range: 16.0,
@@ -806,13 +861,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(14),
+            entity_id: Some((
+                index: 14,
+                generation: 0,
+            )),
             name: Some("checkpoint_1"),
             transform: Some((
                 position: (-67.0, 0.02, 0.0),
-                rotation: (0.0, 0.99072903, 0.0, 0.13585307),
+                rotation: (0.0, 0.99943805, 0.0, -0.03352294),
                 scale: (0.6, 0.05, 0.6),
             )),
             parent: None,
@@ -834,6 +893,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 1.0, 0.7)),
@@ -864,13 +925,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(15),
+            entity_id: Some((
+                index: 15,
+                generation: 0,
+            )),
             name: Some("health_a1"),
             transform: Some((
                 position: (-67.0, 0.5, 7.0),
-                rotation: (0.0, -0.7856386, 0.0, 0.61868566),
+                rotation: (0.0, -0.26380572, 0.0, 0.9645751),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -892,6 +957,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 1.0, 0.3, 1.0)),
@@ -922,13 +989,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(16),
+            entity_id: Some((
+                index: 16,
+                generation: 0,
+            )),
             name: Some("ammo_a1"),
             transform: Some((
                 position: (-67.0, 0.5, -7.0),
-                rotation: (0.0, 0.17131387, 0.0, 0.98521614),
+                rotation: (0.0, 0.80535764, 0.0, 0.59278893),
                 scale: (0.4, 0.25, 0.25),
             )),
             parent: None,
@@ -950,6 +1021,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.2, 0.8, 0.2, 1.0)),
@@ -980,13 +1053,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(17),
+            entity_id: Some((
+                index: 17,
+                generation: 0,
+            )),
             name: Some("objective_gate1"),
             transform: Some((
                 position: (-50.0, 5.0, 0.0),
-                rotation: (0.0, -0.43019837, 0.0, -0.9027343),
+                rotation: (0.0, -0.76382625, 0.0, -0.6454219),
                 scale: (0.5, 0.5, 0.5),
             )),
             parent: None,
@@ -1031,9 +1108,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(18),
+            entity_id: Some((
+                index: 18,
+                generation: 0,
+            )),
             name: Some("dialog_intro"),
             transform: Some((
                 position: (-66.0, 1.0, 0.0),
@@ -1056,6 +1137,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: None,
@@ -1082,9 +1165,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(19),
+            entity_id: Some((
+                index: 19,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (-63.0, 0.02, 2.0),
@@ -1129,9 +1216,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(20),
+            entity_id: Some((
+                index: 20,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (-56.0, 0.02, -4.0),
@@ -1176,9 +1267,197 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(21),
+            entity_id: Some((
+                index: 21,
+                generation: 0,
+            )),
+            name: Some("npc_elder"),
+            transform: Some((
+                position: (-67.0, 0.9, -7.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("gold"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: None,
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: Some((
+                body_type: Static,
+                mass: 0.0,
+                velocity: (0.0, 0.0, 0.0),
+                angular_velocity: (0.0, 0.0, 0.0),
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                gravity_scale: 0.0,
+            )),
+            collider: Some(Capsule(
+                radius: 0.4,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: None,
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: None,
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 22,
+                generation: 0,
+            )),
+            name: Some("npc_blacksmith"),
+            transform: Some((
+                position: (-53.0, 0.9, -7.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("gold"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: None,
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: Some((
+                body_type: Static,
+                mass: 0.0,
+                velocity: (0.0, 0.0, 0.0),
+                angular_velocity: (0.0, 0.0, 0.0),
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                gravity_scale: 0.0,
+            )),
+            collider: Some(Capsule(
+                radius: 0.4,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: None,
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: None,
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 23,
+                generation: 0,
+            )),
+            name: Some("Act1_Archer"),
+            transform: Some((
+                position: (-60.62882, 0.67499995, 0.023471963),
+                rotation: (0.0, 0.66108644, 0.0, 0.75030977),
+                scale: (0.75, 0.75, 0.75),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("bark"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 70.0,
+                max: 70.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 2.8,
+                turn_speed: 8.0,
+                vision_range: 30.0,
+                vision_angle_cos: 0.57357645,
+                hearing_range: 25.0,
+                attack_range: 10.0,
+                damage: 20.0,
+                attack_cooldown: 1.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 24,
+                generation: 0,
+            )),
             name: Some("Act2_Floor"),
             transform: Some((
                 position: (0.0, 0.0, 0.0),
@@ -1233,9 +1512,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(22),
+            entity_id: Some((
+                index: 25,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_W1"),
             transform: Some((
                 position: (-30.0, 2.5, -16.5),
@@ -1290,9 +1573,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(23),
+            entity_id: Some((
+                index: 26,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_W2"),
             transform: Some((
                 position: (-30.0, 2.5, 16.5),
@@ -1347,9 +1634,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(24),
+            entity_id: Some((
+                index: 27,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_E1"),
             transform: Some((
                 position: (30.0, 2.5, -16.5),
@@ -1404,9 +1695,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(25),
+            entity_id: Some((
+                index: 28,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_E2"),
             transform: Some((
                 position: (30.0, 2.5, 16.5),
@@ -1461,9 +1756,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(26),
+            entity_id: Some((
+                index: 29,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_N"),
             transform: Some((
                 position: (0.0, 2.5, -30.0),
@@ -1518,9 +1817,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(27),
+            entity_id: Some((
+                index: 30,
+                generation: 0,
+            )),
             name: Some("Act2_Wall_S"),
             transform: Some((
                 position: (0.0, 2.5, 30.0),
@@ -1575,9 +1878,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(28),
+            entity_id: Some((
+                index: 31,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_NW"),
             transform: Some((
                 position: (-27.0, 3.0, -27.0),
@@ -1632,9 +1939,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(29),
+            entity_id: Some((
+                index: 32,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_NW_top"),
             transform: Some((
                 position: (-27.0, 6.4, -27.0),
@@ -1689,9 +2000,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(30),
+            entity_id: Some((
+                index: 33,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_NW"),
             transform: Some((
                 position: (-27.0, 7.2, -27.0),
@@ -1733,13 +2048,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(31),
+            entity_id: Some((
+                index: 34,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_NW_Light"),
             transform: Some((
                 position: (-27.0, 8.75, -27.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -1795,9 +2114,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(32),
+            entity_id: Some((
+                index: 35,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_NE"),
             transform: Some((
                 position: (27.0, 3.0, -27.0),
@@ -1852,9 +2175,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(33),
+            entity_id: Some((
+                index: 36,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_NE_top"),
             transform: Some((
                 position: (27.0, 6.4, -27.0),
@@ -1909,9 +2236,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(34),
+            entity_id: Some((
+                index: 37,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_NE"),
             transform: Some((
                 position: (27.0, 7.2, -27.0),
@@ -1953,13 +2284,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(35),
+            entity_id: Some((
+                index: 38,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_NE_Light"),
             transform: Some((
                 position: (27.0, 8.75, -27.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -2015,9 +2350,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(36),
+            entity_id: Some((
+                index: 39,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_SW"),
             transform: Some((
                 position: (-27.0, 3.0, 27.0),
@@ -2072,9 +2411,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(37),
+            entity_id: Some((
+                index: 40,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_SW_top"),
             transform: Some((
                 position: (-27.0, 6.4, 27.0),
@@ -2129,9 +2472,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(38),
+            entity_id: Some((
+                index: 41,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_SW"),
             transform: Some((
                 position: (-27.0, 7.2, 27.0),
@@ -2173,13 +2520,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(39),
+            entity_id: Some((
+                index: 42,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_SW_Light"),
             transform: Some((
                 position: (-27.0, 8.75, 27.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -2235,9 +2586,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(40),
+            entity_id: Some((
+                index: 43,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_SE"),
             transform: Some((
                 position: (27.0, 3.0, 27.0),
@@ -2292,9 +2647,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(41),
+            entity_id: Some((
+                index: 44,
+                generation: 0,
+            )),
             name: Some("Act2_Tower_SE_top"),
             transform: Some((
                 position: (27.0, 6.4, 27.0),
@@ -2349,9 +2708,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(42),
+            entity_id: Some((
+                index: 45,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_SE"),
             transform: Some((
                 position: (27.0, 7.2, 27.0),
@@ -2393,13 +2756,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(43),
+            entity_id: Some((
+                index: 46,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_SE_Light"),
             transform: Some((
                 position: (27.0, 8.75, 27.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -2455,9 +2822,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(44),
+            entity_id: Some((
+                index: 47,
+                generation: 0,
+            )),
             name: Some("Act2_Col_0"),
             transform: Some((
                 position: (12.0, 2.5, 0.0),
@@ -2509,9 +2880,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(45),
+            entity_id: Some((
+                index: 48,
+                generation: 0,
+            )),
             name: Some("Act2_Col_1"),
             transform: Some((
                 position: (8.485281, 2.5, 8.485281),
@@ -2563,9 +2938,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(46),
+            entity_id: Some((
+                index: 49,
+                generation: 0,
+            )),
             name: Some("Act2_Col_2"),
             transform: Some((
                 position: (-5.2453663e-7, 2.5, 12.0),
@@ -2617,9 +2996,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(47),
+            entity_id: Some((
+                index: 50,
+                generation: 0,
+            )),
             name: Some("Act2_Col_3"),
             transform: Some((
                 position: (-8.485281, 2.5, 8.485281),
@@ -2671,9 +3054,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(48),
+            entity_id: Some((
+                index: 51,
+                generation: 0,
+            )),
             name: Some("Act2_Col_4"),
             transform: Some((
                 position: (-12.0, 2.5, -1.0490733e-6),
@@ -2725,9 +3112,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(49),
+            entity_id: Some((
+                index: 52,
+                generation: 0,
+            )),
             name: Some("Act2_Col_5"),
             transform: Some((
                 position: (-8.48528, 2.5, -8.485283),
@@ -2779,9 +3170,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(50),
+            entity_id: Some((
+                index: 53,
+                generation: 0,
+            )),
             name: Some("Act2_Col_6"),
             transform: Some((
                 position: (1.4309856e-7, 2.5, -12.0),
@@ -2833,9 +3228,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(51),
+            entity_id: Some((
+                index: 54,
+                generation: 0,
+            )),
             name: Some("Act2_Col_7"),
             transform: Some((
                 position: (8.485284, 2.5, -8.485278),
@@ -2887,9 +3286,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(52),
+            entity_id: Some((
+                index: 55,
+                generation: 0,
+            )),
             name: Some("Act2_Altar_Step_0"),
             transform: Some((
                 position: (0.0, 0.25, 0.0),
@@ -2941,9 +3344,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(53),
+            entity_id: Some((
+                index: 56,
+                generation: 0,
+            )),
             name: Some("Act2_Altar_Step_1"),
             transform: Some((
                 position: (0.0, 0.75, 0.0),
@@ -2995,9 +3402,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(54),
+            entity_id: Some((
+                index: 57,
+                generation: 0,
+            )),
             name: Some("Act2_Altar_Step_2"),
             transform: Some((
                 position: (0.0, 1.25, 0.0),
@@ -3049,9 +3460,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(55),
+            entity_id: Some((
+                index: 58,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_W1"),
             transform: Some((
                 position: (21.0, 2.5, 23.25),
@@ -3106,9 +3521,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(56),
+            entity_id: Some((
+                index: 59,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_W2"),
             transform: Some((
                 position: (21.0, 2.5, 30.75),
@@ -3163,9 +3582,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(57),
+            entity_id: Some((
+                index: 60,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_N"),
             transform: Some((
                 position: (27.0, 2.5, 21.0),
@@ -3220,9 +3643,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(58),
+            entity_id: Some((
+                index: 61,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_S"),
             transform: Some((
                 position: (27.0, 2.5, 33.0),
@@ -3277,9 +3704,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(59),
+            entity_id: Some((
+                index: 62,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_E"),
             transform: Some((
                 position: (33.0, 2.5, 27.0),
@@ -3334,9 +3765,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(60),
+            entity_id: Some((
+                index: 63,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_Guard1"),
             transform: Some((
                 position: (29.0, 0.71999997, 25.0),
@@ -3396,9 +3831,13 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(61),
+            entity_id: Some((
+                index: 64,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_Guard2"),
             transform: Some((
                 position: (29.0, 0.71999997, 29.0),
@@ -3458,13 +3897,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(62),
+            entity_id: Some((
+                index: 65,
+                generation: 0,
+            )),
             name: Some("Act2_Chest_A"),
             transform: Some((
                 position: (31.0, 0.25, 24.0),
-                rotation: (0.0, 0.880014, 0.0, 0.4749477),
+                rotation: (0.0, 0.9332097, 0.0, 0.35933235),
                 scale: (0.9, 1.0, 1.0),
             )),
             parent: None,
@@ -3486,6 +3929,8 @@
                 once: false,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((1.0, 0.1, 0.0, 1.0)),
@@ -3525,13 +3970,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(63),
+            entity_id: Some((
+                index: 66,
+                generation: 0,
+            )),
             name: Some("Act2_Chest_B"),
             transform: Some((
                 position: (31.0, 0.25, 27.0),
-                rotation: (0.0, 0.880014, 0.0, 0.4749477),
+                rotation: (0.0, 0.9332097, 0.0, 0.35933235),
                 scale: (0.9, 1.0, 1.0),
             )),
             parent: None,
@@ -3553,6 +4002,8 @@
                 once: false,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((1.0, 0.175, 0.0, 1.0)),
@@ -3592,13 +4043,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(64),
+            entity_id: Some((
+                index: 67,
+                generation: 0,
+            )),
             name: Some("key_red"),
             transform: Some((
                 position: (27.0, 0.6, 27.0),
-                rotation: (0.14180672, 0.7090354, 0.28361437, 0.62985855),
+                rotation: (0.18001457, 0.9000722, 0.3600288, -0.16686127),
                 scale: (0.4, 0.4, 0.4),
             )),
             parent: None,
@@ -3620,6 +4075,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((1.0, 0.2, 0.2, 1.0)),
@@ -3650,13 +4107,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(65),
+            entity_id: Some((
+                index: 68,
+                generation: 0,
+            )),
             name: Some("objective_key"),
             transform: Some((
                 position: (27.0, 2.6, 27.0),
-                rotation: (0.0, -0.43019837, 0.0, -0.9027343),
+                rotation: (0.0, -0.76382625, 0.0, -0.6454219),
                 scale: (0.5, 0.5, 0.5),
             )),
             parent: None,
@@ -3701,9 +4162,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(66),
+            entity_id: Some((
+                index: 69,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_Torch"),
             transform: Some((
                 position: (27.0, 3.5, 27.0),
@@ -3745,13 +4210,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(67),
+            entity_id: Some((
+                index: 70,
+                generation: 0,
+            )),
             name: Some("Act2_Treasure_Torch_Light"),
             transform: Some((
                 position: (27.0, 5.05, 27.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -3807,9 +4276,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(68),
+            entity_id: Some((
+                index: 71,
+                generation: 0,
+            )),
             name: Some("gate_east_2"),
             transform: Some((
                 position: (30.0, 2.0, 0.0),
@@ -3874,9 +4347,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(69),
+            entity_id: Some((
+                index: 72,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C1"),
             transform: Some((
                 position: (-14.0, 3.0, -14.0),
@@ -3918,13 +4395,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(70),
+            entity_id: Some((
+                index: 73,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C1_Light"),
             transform: Some((
                 position: (-14.0, 4.55, -14.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -3980,9 +4461,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(71),
+            entity_id: Some((
+                index: 74,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C2"),
             transform: Some((
                 position: (14.0, 3.0, -14.0),
@@ -4024,13 +4509,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(72),
+            entity_id: Some((
+                index: 75,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C2_Light"),
             transform: Some((
                 position: (14.0, 4.55, -14.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -4086,9 +4575,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(73),
+            entity_id: Some((
+                index: 76,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C3"),
             transform: Some((
                 position: (-14.0, 3.0, 14.0),
@@ -4130,13 +4623,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(74),
+            entity_id: Some((
+                index: 77,
+                generation: 0,
+            )),
             name: Some("Act2_Torch_C3_Light"),
             transform: Some((
                 position: (-14.0, 4.55, 14.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -4192,9 +4689,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(75),
+            entity_id: Some((
+                index: 78,
+                generation: 0,
+            )),
             name: Some("Act2_Patrol_1"),
             transform: Some((
                 position: (-24.0, 0.495, -24.0),
@@ -4263,12 +4764,16 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(76),
+            entity_id: Some((
+                index: 79,
+                generation: 0,
+            )),
             name: Some("Act2_Patrol_2"),
             transform: Some((
-                position: (10.368088, 0.495, 10.368088),
+                position: (9.0826435, 0.495, 9.0826435),
                 rotation: (0.0, -0.38268346, 0.0, 0.9238795),
                 scale: (0.55, 0.55, 0.55),
             )),
@@ -4334,13 +4839,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(77),
+            entity_id: Some((
+                index: 80,
+                generation: 0,
+            )),
             name: Some("Act2_Patrol_3"),
             transform: Some((
-                position: (-9.432991, 0.495, -0.0039333226),
-                rotation: (0.0, 0.61724573, 0.0, 0.7867704),
+                position: (-9.441293, 0.495, -0.015663505),
+                rotation: (0.0, 0.6754851, 0.0, 0.73737365),
                 scale: (0.55, 0.55, 0.55),
             )),
             parent: None,
@@ -4405,13 +4914,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(78),
+            entity_id: Some((
+                index: 81,
+                generation: 0,
+            )),
             name: Some("Act2_Patrol_4"),
             transform: Some((
-                position: (-8.48011, 0.495, -0.09098326),
-                rotation: (0.0, -0.7311846, 0.0, 0.68217963),
+                position: (-8.482912, 0.495, -0.09967959),
+                rotation: (0.0, -0.73731184, 0.0, 0.67555255),
                 scale: (0.55, 0.55, 0.55),
             )),
             parent: None,
@@ -4476,9 +4989,13 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: Some(true),
+            script: None,
         ),
         (
-            entity_id: Some(79),
+            entity_id: Some((
+                index: 82,
+                generation: 0,
+            )),
             name: Some("Act2_Sniper_NW"),
             transform: Some((
                 position: (-27.0, 7.14, -27.0),
@@ -4538,9 +5055,13 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(80),
+            entity_id: Some((
+                index: 83,
+                generation: 0,
+            )),
             name: Some("Act2_Sniper_NE"),
             transform: Some((
                 position: (27.0, 7.14, -27.0),
@@ -4600,13 +5121,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(81),
+            entity_id: Some((
+                index: 84,
+                generation: 0,
+            )),
             name: Some("health_a2"),
             transform: Some((
                 position: (-20.0, 0.5, 20.0),
-                rotation: (0.0, -0.7856386, 0.0, 0.61868566),
+                rotation: (0.0, -0.26380572, 0.0, 0.9645751),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -4628,6 +5153,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.4, 1.0, 0.3, 1.0)),
@@ -4658,13 +5185,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(82),
+            entity_id: Some((
+                index: 85,
+                generation: 0,
+            )),
             name: Some("ammo_a2_1"),
             transform: Some((
                 position: (20.0, 0.5, -20.0),
-                rotation: (0.0, 0.17131387, 0.0, 0.98521614),
+                rotation: (0.0, 0.80535764, 0.0, 0.59278893),
                 scale: (0.4, 0.25, 0.25),
             )),
             parent: None,
@@ -4686,6 +5217,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 0.2, 1.0)),
@@ -4716,13 +5249,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(83),
+            entity_id: Some((
+                index: 86,
+                generation: 0,
+            )),
             name: Some("ammo_a2_2"),
             transform: Some((
                 position: (-24.0, 0.5, 0.0),
-                rotation: (0.0, 0.17131387, 0.0, 0.98521614),
+                rotation: (0.0, 0.80535764, 0.0, 0.59278893),
                 scale: (0.4, 0.25, 0.25),
             )),
             parent: None,
@@ -4744,6 +5281,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 0.2, 1.0)),
@@ -4774,9 +5313,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(84),
+            entity_id: Some((
+                index: 87,
+                generation: 0,
+            )),
             name: Some("dialog_act2"),
             transform: Some((
                 position: (-26.0, 1.0, 0.0),
@@ -4799,6 +5342,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: None,
@@ -4825,9 +5370,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(85),
+            entity_id: Some((
+                index: 88,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (-12.0, 0.02, -10.0),
@@ -4872,9 +5421,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(86),
+            entity_id: Some((
+                index: 89,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (10.0, 0.02, -13.0),
@@ -4919,9 +5472,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(87),
+            entity_id: Some((
+                index: 90,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (15.0, 0.02, 10.0),
@@ -4966,9 +5523,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(88),
+            entity_id: Some((
+                index: 91,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (-8.0, 0.02, 15.0),
@@ -5013,9 +5574,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(89),
+            entity_id: Some((
+                index: 92,
+                generation: 0,
+            )),
             name: Some("Decal_Blood"),
             transform: Some((
                 position: (5.0, 0.02, 5.0),
@@ -5060,9 +5625,277 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(90),
+            entity_id: Some((
+                index: 93,
+                generation: 0,
+            )),
+            name: Some("Act2_Mage_1"),
+            transform: Some((
+                position: (-20.0, 0.80999994, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.9, 0.9, 0.9),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("emissive_cold"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 80.0,
+                max: 80.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 2.0,
+                turn_speed: 8.0,
+                vision_range: 25.0,
+                vision_angle_cos: 0.34202015,
+                hearing_range: 20.0,
+                attack_range: 8.0,
+                damage: 20.0,
+                attack_cooldown: 1.8,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 94,
+                generation: 0,
+            )),
+            name: Some("Act2_Mage_2"),
+            transform: Some((
+                position: (20.0, 0.80999994, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.9, 0.9, 0.9),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("emissive_cold"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 80.0,
+                max: 80.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 2.0,
+                turn_speed: 8.0,
+                vision_range: 25.0,
+                vision_angle_cos: 0.34202015,
+                hearing_range: 20.0,
+                attack_range: 8.0,
+                damage: 20.0,
+                attack_cooldown: 1.8,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 95,
+                generation: 0,
+            )),
+            name: Some("Act2_Assassin_1"),
+            transform: Some((
+                position: (0.0, 0.54, 20.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 0.6),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("rpg_dungeon"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 45.0,
+                max: 45.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 6.5,
+                turn_speed: 8.0,
+                vision_range: 20.0,
+                vision_angle_cos: 0.64278764,
+                hearing_range: 30.0,
+                attack_range: 1.2,
+                damage: 18.0,
+                attack_cooldown: 0.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 96,
+                generation: 0,
+            )),
+            name: Some("Act2_Tank_1"),
+            transform: Some((
+                position: (0.0, 1.6199999, -20.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.8),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("arena_column"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 250.0,
+                max: 250.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 1.2,
+                turn_speed: 8.0,
+                vision_range: 14.0,
+                vision_angle_cos: 0.57357645,
+                hearing_range: 15.0,
+                attack_range: 2.0,
+                damage: 22.0,
+                attack_cooldown: 1.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 97,
+                generation: 0,
+            )),
             name: Some("Act3_Floor"),
             transform: Some((
                 position: (55.0, 0.0, 0.0),
@@ -5117,9 +5950,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(91),
+            entity_id: Some((
+                index: 98,
+                generation: 0,
+            )),
             name: Some("Act3_Wall_W1"),
             transform: Some((
                 position: (40.0, 2.5, -6.5),
@@ -5174,9 +6011,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(92),
+            entity_id: Some((
+                index: 99,
+                generation: 0,
+            )),
             name: Some("Act3_Wall_W2"),
             transform: Some((
                 position: (40.0, 2.5, 6.5),
@@ -5231,9 +6072,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(93),
+            entity_id: Some((
+                index: 100,
+                generation: 0,
+            )),
             name: Some("Act3_Wall_E"),
             transform: Some((
                 position: (70.0, 2.5, 0.0),
@@ -5288,9 +6133,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(94),
+            entity_id: Some((
+                index: 101,
+                generation: 0,
+            )),
             name: Some("Act3_Wall_N"),
             transform: Some((
                 position: (55.0, 2.5, -10.0),
@@ -5345,9 +6194,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(95),
+            entity_id: Some((
+                index: 102,
+                generation: 0,
+            )),
             name: Some("Act3_Wall_S"),
             transform: Some((
                 position: (55.0, 2.5, 10.0),
@@ -5402,13 +6255,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(96),
+            entity_id: Some((
+                index: 103,
+                generation: 0,
+            )),
             name: Some("portal_to_dungeon"),
             transform: Some((
                 position: (65.0, 1.5, 0.0),
-                rotation: (0.0, -0.7856386, 0.0, 0.61868566),
+                rotation: (0.0, -0.26380572, 0.0, 0.9645751),
                 scale: (2.0, 3.0, 0.5),
             )),
             parent: None,
@@ -5430,6 +6287,8 @@
                 once: false,
                 fired: false,
                 sound_name: None,
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.55, 0.25, 0.9, 0.75)),
@@ -5471,13 +6330,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(97),
+            entity_id: Some((
+                index: 104,
+                generation: 0,
+            )),
             name: Some("objective_portal"),
             transform: Some((
                 position: (65.0, 3.5, 0.0),
-                rotation: (0.0, -0.43019837, 0.0, -0.9027343),
+                rotation: (0.0, -0.76382625, 0.0, -0.6454219),
                 scale: (0.5, 0.5, 0.5),
             )),
             parent: None,
@@ -5522,9 +6385,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(98),
+            entity_id: Some((
+                index: 105,
+                generation: 0,
+            )),
             name: Some("Act3_Guard"),
             transform: Some((
                 position: (52.0, 0.71999997, 0.0),
@@ -5584,13 +6451,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(99),
+            entity_id: Some((
+                index: 106,
+                generation: 0,
+            )),
             name: Some("health_a3"),
             transform: Some((
                 position: (47.0, 0.5, 5.0),
-                rotation: (0.0, -0.7856386, 0.0, 0.61868566),
+                rotation: (0.0, -0.26380572, 0.0, 0.9645751),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -5612,6 +6483,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.5, 1.0, 0.3, 1.0)),
@@ -5642,13 +6515,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(100),
+            entity_id: Some((
+                index: 107,
+                generation: 0,
+            )),
             name: Some("ammo_a3_1"),
             transform: Some((
                 position: (47.0, 0.5, -5.0),
-                rotation: (0.0, 0.17131387, 0.0, 0.98521614),
+                rotation: (0.0, 0.80535764, 0.0, 0.59278893),
                 scale: (0.4, 0.25, 0.25),
             )),
             parent: None,
@@ -5670,6 +6547,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.4, 0.8, 0.2, 1.0)),
@@ -5700,13 +6579,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(101),
+            entity_id: Some((
+                index: 108,
+                generation: 0,
+            )),
             name: Some("ammo_a3_2"),
             transform: Some((
                 position: (55.0, 0.5, 6.0),
-                rotation: (0.0, 0.17131387, 0.0, 0.98521614),
+                rotation: (0.0, 0.80535764, 0.0, 0.59278893),
                 scale: (0.4, 0.25, 0.25),
             )),
             parent: None,
@@ -5728,6 +6611,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.4, 0.8, 0.2, 1.0)),
@@ -5758,13 +6643,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(102),
+            entity_id: Some((
+                index: 109,
+                generation: 0,
+            )),
             name: Some("checkpoint_3"),
             transform: Some((
                 position: (43.0, 0.02, 0.0),
-                rotation: (0.0, 0.99072903, 0.0, 0.13585307),
+                rotation: (0.0, 0.99943805, 0.0, -0.03352294),
                 scale: (0.6, 0.05, 0.6),
             )),
             parent: None,
@@ -5786,6 +6675,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 1.0, 0.7)),
@@ -5816,9 +6707,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(103),
+            entity_id: Some((
+                index: 110,
+                generation: 0,
+            )),
             name: Some("dialog_act3"),
             transform: Some((
                 position: (44.0, 1.0, 0.0),
@@ -5841,6 +6736,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: None,
@@ -5867,9 +6764,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(104),
+            entity_id: Some((
+                index: 111,
+                generation: 0,
+            )),
             name: Some("Act3_Torch_1"),
             transform: Some((
                 position: (42.0, 3.5, -8.0),
@@ -5911,13 +6812,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(105),
+            entity_id: Some((
+                index: 112,
+                generation: 0,
+            )),
             name: Some("Act3_Torch_1_Light"),
             transform: Some((
                 position: (42.0, 5.05, -8.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -5973,9 +6878,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(106),
+            entity_id: Some((
+                index: 113,
+                generation: 0,
+            )),
             name: Some("Act3_Torch_2"),
             transform: Some((
                 position: (42.0, 3.5, 8.0),
@@ -6017,13 +6926,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(107),
+            entity_id: Some((
+                index: 114,
+                generation: 0,
+            )),
             name: Some("Act3_Torch_2_Light"),
             transform: Some((
                 position: (42.0, 5.05, 8.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -6079,9 +6992,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(108),
+            entity_id: Some((
+                index: 115,
+                generation: 0,
+            )),
             name: Some("Act4_Floor"),
             transform: Some((
                 position: (55.0, -12.0, -40.0),
@@ -6136,9 +7053,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(109),
+            entity_id: Some((
+                index: 116,
+                generation: 0,
+            )),
             name: Some("Act4_Ceiling"),
             transform: Some((
                 position: (55.0, -6.0, -40.0),
@@ -6193,9 +7114,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(110),
+            entity_id: Some((
+                index: 117,
+                generation: 0,
+            )),
             name: Some("Act4_Wall_W"),
             transform: Some((
                 position: (35.0, 3.0, -40.0),
@@ -6250,9 +7175,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(111),
+            entity_id: Some((
+                index: 118,
+                generation: 0,
+            )),
             name: Some("Act4_Wall_E"),
             transform: Some((
                 position: (75.0, 3.0, -40.0),
@@ -6307,9 +7236,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(112),
+            entity_id: Some((
+                index: 119,
+                generation: 0,
+            )),
             name: Some("Act4_Wall_S"),
             transform: Some((
                 position: (55.0, 3.0, -20.0),
@@ -6364,9 +7297,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(113),
+            entity_id: Some((
+                index: 120,
+                generation: 0,
+            )),
             name: Some("Act4_Wall_N1"),
             transform: Some((
                 position: (43.5, 3.0, -60.0),
@@ -6421,9 +7358,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(114),
+            entity_id: Some((
+                index: 121,
+                generation: 0,
+            )),
             name: Some("Act4_Wall_N2"),
             transform: Some((
                 position: (66.5, 3.0, -60.0),
@@ -6478,9 +7419,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(115),
+            entity_id: Some((
+                index: 122,
+                generation: 0,
+            )),
             name: Some("gate_boss"),
             transform: Some((
                 position: (55.0, -9.5, -60.0),
@@ -6545,13 +7490,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(116),
+            entity_id: Some((
+                index: 123,
+                generation: 0,
+            )),
             name: Some("Act4_Crystal_A"),
             transform: Some((
                 position: (45.0, -10.5, -45.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -6596,13 +7545,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(117),
+            entity_id: Some((
+                index: 124,
+                generation: 0,
+            )),
             name: Some("Act4_Crystal_B"),
             transform: Some((
                 position: (65.0, -10.5, -45.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -6647,13 +7600,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(118),
+            entity_id: Some((
+                index: 125,
+                generation: 0,
+            )),
             name: Some("Act4_Crystal_C"),
             transform: Some((
                 position: (55.0, -10.5, -30.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -6698,9 +7655,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(119),
+            entity_id: Some((
+                index: 126,
+                generation: 0,
+            )),
             name: Some("Act4_Wolf_1"),
             transform: Some((
                 position: (45.0, -11.505, -35.0),
@@ -6760,9 +7721,13 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(120),
+            entity_id: Some((
+                index: 127,
+                generation: 0,
+            )),
             name: Some("Act4_Wolf_2"),
             transform: Some((
                 position: (65.0, -11.505, -35.0),
@@ -6822,9 +7787,13 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(121),
+            entity_id: Some((
+                index: 128,
+                generation: 0,
+            )),
             name: Some("Act4_Wolf_3"),
             transform: Some((
                 position: (55.0, -11.505, -50.0),
@@ -6884,13 +7853,281 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(122),
+            entity_id: Some((
+                index: 129,
+                generation: 0,
+            )),
+            name: Some("Act4_Mage"),
+            transform: Some((
+                position: (40.0, -11.190001, -55.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.9, 0.9, 0.9),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("emissive_cold"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 80.0,
+                max: 80.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 2.0,
+                turn_speed: 8.0,
+                vision_range: 25.0,
+                vision_angle_cos: 0.34202015,
+                hearing_range: 20.0,
+                attack_range: 8.0,
+                damage: 20.0,
+                attack_cooldown: 1.8,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 130,
+                generation: 0,
+            )),
+            name: Some("Act4_Archer"),
+            transform: Some((
+                position: (70.0, -11.325, -55.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.75, 0.75, 0.75),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("bark"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 70.0,
+                max: 70.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 2.8,
+                turn_speed: 8.0,
+                vision_range: 30.0,
+                vision_angle_cos: 0.57357645,
+                hearing_range: 25.0,
+                attack_range: 10.0,
+                damage: 20.0,
+                attack_cooldown: 1.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 131,
+                generation: 0,
+            )),
+            name: Some("Act4_Assassin"),
+            transform: Some((
+                position: (55.0, -11.46, -25.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 0.6),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("rpg_dungeon"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 45.0,
+                max: 45.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 6.5,
+                turn_speed: 8.0,
+                vision_range: 20.0,
+                vision_angle_cos: 0.64278764,
+                hearing_range: 30.0,
+                attack_range: 1.2,
+                damage: 18.0,
+                attack_cooldown: 0.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 132,
+                generation: 0,
+            )),
+            name: Some("Act4_Tank"),
+            transform: Some((
+                position: (40.0, -10.38, -25.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.8),
+            )),
+            parent: None,
+            mesh: Some("capsule"),
+            material: Some("arena_column"),
+            skeleton: None,
+            animation: None,
+            spinner: None,
+            velocity: None,
+            health: Some((
+                current: 250.0,
+                max: 250.0,
+            )),
+            chase: None,
+            trigger: None,
+            interactable: None,
+            tint: None,
+            visible: None,
+            texture_tiling: None,
+            elevator: None,
+            sliding_door: None,
+            rigid_body: None,
+            collider: Some(Capsule(
+                radius: 0.5,
+                height: 1.8,
+            )),
+            physics_material: None,
+            dir_light: None,
+            point_light: None,
+            decal: None,
+            gold_value: None,
+            key_item: None,
+            chest: None,
+            door: None,
+            npc: None,
+            quest_target: None,
+            ai_agent: Some((
+                state: Idle,
+                speed: 1.2,
+                turn_speed: 8.0,
+                vision_range: 14.0,
+                vision_angle_cos: 0.57357645,
+                hearing_range: 15.0,
+                attack_range: 2.0,
+                damage: 22.0,
+                attack_cooldown: 1.5,
+                lose_target_time: 3.0,
+                emits_noise: false,
+            )),
+            patrol_path: None,
+            audio_source: None,
+            timer: None,
+            ai_target: None,
+            enemy: Some(true),
+            debug_path: None,
+            script: None,
+        ),
+        (
+            entity_id: Some((
+                index: 133,
+                generation: 0,
+            )),
             name: Some("Act4_Chest_A"),
             transform: Some((
                 position: (41.0, -11.75, -26.0),
-                rotation: (0.0, 0.880014, 0.0, 0.4749477),
+                rotation: (0.0, 0.9332097, 0.0, 0.35933235),
                 scale: (0.9, 1.0, 1.0),
             )),
             parent: None,
@@ -6912,6 +8149,8 @@
                 once: false,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((1.0, 0.375, 0.0, 1.0)),
@@ -6951,13 +8190,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(123),
+            entity_id: Some((
+                index: 134,
+                generation: 0,
+            )),
             name: Some("Act4_Chest_B"),
             transform: Some((
                 position: (69.0, -11.75, -26.0),
-                rotation: (0.0, 0.880014, 0.0, 0.4749477),
+                rotation: (0.0, 0.9332097, 0.0, 0.35933235),
                 scale: (0.9, 1.0, 1.0),
             )),
             parent: None,
@@ -6979,6 +8222,8 @@
                 once: false,
                 fired: false,
                 sound_name: Some("pickup"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((1.0, 0.5, 0.0, 1.0)),
@@ -7018,13 +8263,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(124),
+            entity_id: Some((
+                index: 135,
+                generation: 0,
+            )),
             name: Some("portal_back_3"),
             transform: Some((
                 position: (40.0, -10.5, -25.0),
-                rotation: (0.0, -0.7856386, 0.0, 0.61868566),
+                rotation: (0.0, -0.26380572, 0.0, 0.9645751),
                 scale: (2.0, 3.0, 0.5),
             )),
             parent: None,
@@ -7046,6 +8295,8 @@
                 once: false,
                 fired: false,
                 sound_name: None,
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.9, 0.5, 0.2, 0.75)),
@@ -7087,13 +8338,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(125),
+            entity_id: Some((
+                index: 136,
+                generation: 0,
+            )),
             name: Some("checkpoint_4"),
             transform: Some((
                 position: (55.0, -11.98, -30.0),
-                rotation: (0.0, 0.99072903, 0.0, 0.13585307),
+                rotation: (0.0, 0.99943805, 0.0, -0.03352294),
                 scale: (0.6, 0.05, 0.6),
             )),
             parent: None,
@@ -7115,6 +8370,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 1.0, 0.7)),
@@ -7145,9 +8402,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(126),
+            entity_id: Some((
+                index: 137,
+                generation: 0,
+            )),
             name: Some("dialog_act4"),
             transform: Some((
                 position: (55.0, -11.0, -32.0),
@@ -7170,6 +8431,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: None,
@@ -7196,9 +8459,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(127),
+            entity_id: Some((
+                index: 138,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (63.0, -11.98, -40.0),
@@ -7243,9 +8510,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(128),
+            entity_id: Some((
+                index: 139,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (59.0, -11.98, -33.071796),
@@ -7290,9 +8561,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(129),
+            entity_id: Some((
+                index: 140,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (51.0, -11.98, -33.071796),
@@ -7337,9 +8612,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(130),
+            entity_id: Some((
+                index: 141,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (47.0, -11.98, -40.0),
@@ -7384,9 +8663,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(131),
+            entity_id: Some((
+                index: 142,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (51.0, -11.98, -46.928204),
@@ -7431,9 +8714,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(132),
+            entity_id: Some((
+                index: 143,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (59.0, -11.98, -46.928204),
@@ -7478,9 +8765,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(133),
+            entity_id: Some((
+                index: 144,
+                generation: 0,
+            )),
             name: Some("Act4_Torch_1"),
             transform: Some((
                 position: (40.0, -8.0, -55.0),
@@ -7522,13 +8813,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(134),
+            entity_id: Some((
+                index: 145,
+                generation: 0,
+            )),
             name: Some("Act4_Torch_1_Light"),
             transform: Some((
                 position: (40.0, -6.45, -55.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -7584,9 +8879,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(135),
+            entity_id: Some((
+                index: 146,
+                generation: 0,
+            )),
             name: Some("Act4_Torch_2"),
             transform: Some((
                 position: (70.0, -8.0, -55.0),
@@ -7628,13 +8927,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(136),
+            entity_id: Some((
+                index: 147,
+                generation: 0,
+            )),
             name: Some("Act4_Torch_2_Light"),
             transform: Some((
                 position: (70.0, -6.45, -55.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -7690,9 +8993,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(137),
+            entity_id: Some((
+                index: 148,
+                generation: 0,
+            )),
             name: Some("Boss_Floor"),
             transform: Some((
                 position: (55.0, -12.0, -67.0),
@@ -7747,9 +9054,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(138),
+            entity_id: Some((
+                index: 149,
+                generation: 0,
+            )),
             name: Some("Boss_Ceiling"),
             transform: Some((
                 position: (55.0, -4.0, -67.0),
@@ -7804,9 +9115,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(139),
+            entity_id: Some((
+                index: 150,
+                generation: 0,
+            )),
             name: Some("Boss_Wall_W"),
             transform: Some((
                 position: (47.0, -8.0, -67.0),
@@ -7861,9 +9176,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(140),
+            entity_id: Some((
+                index: 151,
+                generation: 0,
+            )),
             name: Some("Boss_Wall_E"),
             transform: Some((
                 position: (63.0, -8.0, -67.0),
@@ -7918,9 +9237,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(141),
+            entity_id: Some((
+                index: 152,
+                generation: 0,
+            )),
             name: Some("Boss_Wall_N1"),
             transform: Some((
                 position: (22.0, -8.0, -74.0),
@@ -7975,9 +9298,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(142),
+            entity_id: Some((
+                index: 153,
+                generation: 0,
+            )),
             name: Some("Boss_Wall_N2"),
             transform: Some((
                 position: (33.0, -8.0, -74.0),
@@ -8032,9 +9359,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(143),
+            entity_id: Some((
+                index: 154,
+                generation: 0,
+            )),
             name: Some("Boss_Pedestal"),
             transform: Some((
                 position: (55.0, -11.6, -67.0),
@@ -8086,9 +9417,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(144),
+            entity_id: Some((
+                index: 155,
+                generation: 0,
+            )),
             name: Some("Boss_Dungeon"),
             transform: Some((
                 position: (55.0, -10.56, -67.0),
@@ -8148,13 +9483,17 @@
             ai_target: None,
             enemy: Some(true),
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(145),
+            entity_id: Some((
+                index: 156,
+                generation: 0,
+            )),
             name: Some("Boss_Crystal_1"),
             transform: Some((
                 position: (50.0, -10.0, -71.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -8199,13 +9538,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(146),
+            entity_id: Some((
+                index: 157,
+                generation: 0,
+            )),
             name: Some("Boss_Crystal_2"),
             transform: Some((
                 position: (60.0, -10.0, -71.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -8250,9 +9593,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(147),
+            entity_id: Some((
+                index: 158,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (61.0, -11.98, -67.0),
@@ -8297,9 +9644,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(148),
+            entity_id: Some((
+                index: 159,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (59.24264, -11.98, -62.75736),
@@ -8344,9 +9695,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(149),
+            entity_id: Some((
+                index: 160,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (55.0, -11.98, -61.0),
@@ -8391,9 +9746,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(150),
+            entity_id: Some((
+                index: 161,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (50.75736, -11.98, -62.75736),
@@ -8438,9 +9797,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(151),
+            entity_id: Some((
+                index: 162,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (49.0, -11.98, -67.0),
@@ -8485,9 +9848,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(152),
+            entity_id: Some((
+                index: 163,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (50.75736, -11.98, -71.242645),
@@ -8532,9 +9899,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(153),
+            entity_id: Some((
+                index: 164,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (55.0, -11.98, -73.0),
@@ -8579,9 +9950,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(154),
+            entity_id: Some((
+                index: 165,
+                generation: 0,
+            )),
             name: Some("Decal_Rune"),
             transform: Some((
                 position: (59.24264, -11.98, -71.24264),
@@ -8626,9 +10001,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(155),
+            entity_id: Some((
+                index: 166,
+                generation: 0,
+            )),
             name: Some("gate_north_4"),
             transform: Some((
                 position: (55.0, -9.5, -80.0),
@@ -8693,9 +10072,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(156),
+            entity_id: Some((
+                index: 167,
+                generation: 0,
+            )),
             name: Some("Act5_Floor"),
             transform: Some((
                 position: (55.0, -12.0, -75.0),
@@ -8750,9 +10133,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(157),
+            entity_id: Some((
+                index: 168,
+                generation: 0,
+            )),
             name: Some("Act5_Ceiling"),
             transform: Some((
                 position: (55.0, -6.0, -75.0),
@@ -8807,9 +10194,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(158),
+            entity_id: Some((
+                index: 169,
+                generation: 0,
+            )),
             name: Some("Act5_Wall_W"),
             transform: Some((
                 position: (43.0, 3.0, -75.0),
@@ -8864,9 +10255,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(159),
+            entity_id: Some((
+                index: 170,
+                generation: 0,
+            )),
             name: Some("Act5_Wall_E"),
             transform: Some((
                 position: (67.0, 3.0, -75.0),
@@ -8921,9 +10316,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(160),
+            entity_id: Some((
+                index: 171,
+                generation: 0,
+            )),
             name: Some("Act5_Wall_N"),
             transform: Some((
                 position: (55.0, 3.0, -83.0),
@@ -8978,13 +10377,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(161),
+            entity_id: Some((
+                index: 172,
+                generation: 0,
+            )),
             name: Some("exit_zone"),
             transform: Some((
                 position: (55.0, -10.5, -80.0),
-                rotation: (0.0, 0.77670896, 0.0, 0.6298593),
+                rotation: (0.0, 0.98598045, 0.0, -0.16686094),
                 scale: (1.5, 1.5, 1.5),
             )),
             parent: None,
@@ -9006,6 +10409,8 @@
                 once: false,
                 fired: false,
                 sound_name: Some("explosion"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: None,
@@ -9036,13 +10441,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(162),
+            entity_id: Some((
+                index: 173,
+                generation: 0,
+            )),
             name: Some("Act5_Crystal_0"),
             transform: Some((
                 position: (45.0, -10.0, -81.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -9087,13 +10496,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(163),
+            entity_id: Some((
+                index: 174,
+                generation: 0,
+            )),
             name: Some("Act5_Crystal_1"),
             transform: Some((
                 position: (65.0, -10.0, -81.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -9138,13 +10551,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(164),
+            entity_id: Some((
+                index: 175,
+                generation: 0,
+            )),
             name: Some("Act5_Crystal_2"),
             transform: Some((
                 position: (45.0, -10.0, -69.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -9189,13 +10606,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(165),
+            entity_id: Some((
+                index: 176,
+                generation: 0,
+            )),
             name: Some("Act5_Crystal_3"),
             transform: Some((
                 position: (65.0, -10.0, -69.0),
-                rotation: (-0.2589591, -0.8631967, -0.17263962, -0.39753005),
+                rotation: (-0.2807895, -0.9359656, -0.18719344, 0.10041788),
                 scale: (0.35, 0.35, 0.35),
             )),
             parent: None,
@@ -9240,13 +10661,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(166),
+            entity_id: Some((
+                index: 177,
+                generation: 0,
+            )),
             name: Some("checkpoint_5"),
             transform: Some((
                 position: (55.0, -11.98, -70.0),
-                rotation: (0.0, 0.99072903, 0.0, 0.13585307),
+                rotation: (0.0, 0.99943805, 0.0, -0.03352294),
                 scale: (0.6, 0.05, 0.6),
             )),
             parent: None,
@@ -9268,6 +10693,8 @@
                 once: true,
                 fired: false,
                 sound_name: Some("ding"),
+                elevator: None,
+                floor_idx: None,
             )),
             interactable: None,
             tint: Some((0.3, 0.8, 1.0, 0.7)),
@@ -9298,9 +10725,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(167),
+            entity_id: Some((
+                index: 178,
+                generation: 0,
+            )),
             name: Some("Bridge_Act1_Act2"),
             transform: Some((
                 position: (-40.0, 0.0, 0.0),
@@ -9355,9 +10786,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(168),
+            entity_id: Some((
+                index: 179,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Rail_N"),
             transform: Some((
                 position: (-40.0, 0.5, -4.0),
@@ -9412,9 +10847,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(169),
+            entity_id: Some((
+                index: 180,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Rail_S"),
             transform: Some((
                 position: (-40.0, 0.5, 4.0),
@@ -9469,9 +10908,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(170),
+            entity_id: Some((
+                index: 181,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Torch1"),
             transform: Some((
                 position: (-45.0, 3.0, 0.0),
@@ -9513,13 +10956,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(171),
+            entity_id: Some((
+                index: 182,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Torch1_Light"),
             transform: Some((
                 position: (-45.0, 4.55, 0.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -9575,9 +11022,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(172),
+            entity_id: Some((
+                index: 183,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Torch2"),
             transform: Some((
                 position: (-35.0, 3.0, 0.0),
@@ -9619,13 +11070,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(173),
+            entity_id: Some((
+                index: 184,
+                generation: 0,
+            )),
             name: Some("Bridge_A1A2_Torch2_Light"),
             transform: Some((
                 position: (-35.0, 4.55, 0.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -9681,9 +11136,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(174),
+            entity_id: Some((
+                index: 185,
+                generation: 0,
+            )),
             name: Some("Bridge_Act2_Act3"),
             transform: Some((
                 position: (35.0, 0.0, 0.0),
@@ -9738,9 +11197,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(175),
+            entity_id: Some((
+                index: 186,
+                generation: 0,
+            )),
             name: Some("Bridge_A2A3_Rail_N"),
             transform: Some((
                 position: (35.0, 0.5, -4.0),
@@ -9795,9 +11258,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(176),
+            entity_id: Some((
+                index: 187,
+                generation: 0,
+            )),
             name: Some("Bridge_A2A3_Rail_S"),
             transform: Some((
                 position: (35.0, 0.5, 4.0),
@@ -9852,9 +11319,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(177),
+            entity_id: Some((
+                index: 188,
+                generation: 0,
+            )),
             name: Some("Bridge_A2A3_Torch"),
             transform: Some((
                 position: (35.0, 3.0, 0.0),
@@ -9896,13 +11367,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(178),
+            entity_id: Some((
+                index: 189,
+                generation: 0,
+            )),
             name: Some("Bridge_A2A3_Torch_Light"),
             transform: Some((
                 position: (35.0, 4.55, 0.0),
-                rotation: (0.0, 0.83592206, 0.0, -0.5488492),
+                rotation: (0.0, 0.67066497, 0.0, -0.7417608),
                 scale: (0.2, 0.2, 0.2),
             )),
             parent: None,
@@ -9958,9 +11433,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(179),
+            entity_id: Some((
+                index: 190,
+                generation: 0,
+            )),
             name: Some("Sun"),
             transform: Some((
                 position: (0.0, 40.0, 0.0),
@@ -10006,9 +11485,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(180),
+            entity_id: Some((
+                index: 191,
+                generation: 0,
+            )),
             name: Some("Fill"),
             transform: Some((
                 position: (0.0, 10.0, 0.0),
@@ -10054,9 +11537,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(181),
+            entity_id: Some((
+                index: 192,
+                generation: 0,
+            )),
             name: Some("Player"),
             transform: Some((
                 position: (-60.0, 0.9, 0.0),
@@ -10101,9 +11588,13 @@
             ai_target: Some(true),
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(182),
+            entity_id: Some((
+                index: 193,
+                generation: 0,
+            )),
             name: Some("Act1_Crate_0"),
             transform: Some((
                 position: (-66.0, 0.5, -6.0),
@@ -10158,9 +11649,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(183),
+            entity_id: Some((
+                index: 194,
+                generation: 0,
+            )),
             name: Some("Act1_Crate_1"),
             transform: Some((
                 position: (-65.2, 0.5, -6.0),
@@ -10215,9 +11710,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(184),
+            entity_id: Some((
+                index: 195,
+                generation: 0,
+            )),
             name: Some("Act1_Crate_2"),
             transform: Some((
                 position: (-64.4, 0.5, -6.0),
@@ -10272,9 +11771,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(185),
+            entity_id: Some((
+                index: 196,
+                generation: 0,
+            )),
             name: Some("Act1_Barrel_0"),
             transform: Some((
                 position: (-65.0, 0.6, 6.0),
@@ -10329,9 +11832,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(186),
+            entity_id: Some((
+                index: 197,
+                generation: 0,
+            )),
             name: Some("Act1_Barrel_1"),
             transform: Some((
                 position: (-64.5, 0.6, 6.0),
@@ -10386,9 +11893,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(187),
+            entity_id: Some((
+                index: 198,
+                generation: 0,
+            )),
             name: Some("Act1_Barrel_2"),
             transform: Some((
                 position: (-64.0, 0.6, 6.0),
@@ -10443,9 +11954,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(188),
+            entity_id: Some((
+                index: 199,
+                generation: 0,
+            )),
             name: Some("Act1_Rock_1"),
             transform: Some((
                 position: (-68.0, 0.0, 8.0),
@@ -10487,9 +12002,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(189),
+            entity_id: Some((
+                index: 200,
+                generation: 0,
+            )),
             name: Some("Act1_Grave_0"),
             transform: Some((
                 position: (-68.0, 0.0, 8.5),
@@ -10531,9 +12050,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(190),
+            entity_id: Some((
+                index: 201,
+                generation: 0,
+            )),
             name: Some("Act1_Grave_1"),
             transform: Some((
                 position: (-66.8, 0.0, 8.5),
@@ -10575,9 +12098,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(191),
+            entity_id: Some((
+                index: 202,
+                generation: 0,
+            )),
             name: Some("Act1_Grave_2"),
             transform: Some((
                 position: (-65.6, 0.0, 8.5),
@@ -10619,9 +12146,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(192),
+            entity_id: Some((
+                index: 203,
+                generation: 0,
+            )),
             name: Some("Act1_Grave_3"),
             transform: Some((
                 position: (-64.4, 0.0, 8.5),
@@ -10663,9 +12194,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(193),
+            entity_id: Some((
+                index: 204,
+                generation: 0,
+            )),
             name: Some("Act2_Tree_0"),
             transform: Some((
                 position: (-40.0, 0.0, -40.0),
@@ -10707,9 +12242,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(194),
+            entity_id: Some((
+                index: 205,
+                generation: 0,
+            )),
             name: Some("Act2_Tree_1"),
             transform: Some((
                 position: (40.0, 0.0, -40.0),
@@ -10751,9 +12290,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(195),
+            entity_id: Some((
+                index: 206,
+                generation: 0,
+            )),
             name: Some("Act2_Tree_2"),
             transform: Some((
                 position: (-40.0, 0.0, 40.0),
@@ -10795,9 +12338,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(196),
+            entity_id: Some((
+                index: 207,
+                generation: 0,
+            )),
             name: Some("Act2_Tree_3"),
             transform: Some((
                 position: (40.0, 0.0, 40.0),
@@ -10839,9 +12386,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(197),
+            entity_id: Some((
+                index: 208,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_0"),
             transform: Some((
                 position: (-26.0, 0.5, -26.0),
@@ -10896,9 +12447,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(198),
+            entity_id: Some((
+                index: 209,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_1"),
             transform: Some((
                 position: (-24.8, 0.5, -26.0),
@@ -10953,9 +12508,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(199),
+            entity_id: Some((
+                index: 210,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_2"),
             transform: Some((
                 position: (-23.6, 0.5, -26.0),
@@ -11010,9 +12569,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(200),
+            entity_id: Some((
+                index: 211,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_3"),
             transform: Some((
                 position: (-22.4, 0.5, -26.0),
@@ -11067,9 +12630,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(201),
+            entity_id: Some((
+                index: 212,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_4"),
             transform: Some((
                 position: (-21.2, 0.5, -26.0),
@@ -11124,9 +12691,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(202),
+            entity_id: Some((
+                index: 213,
+                generation: 0,
+            )),
             name: Some("Act2_Crate_5"),
             transform: Some((
                 position: (-20.0, 0.5, -26.0),
@@ -11181,9 +12752,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(203),
+            entity_id: Some((
+                index: 214,
+                generation: 0,
+            )),
             name: Some("Act2_Barrel_0"),
             transform: Some((
                 position: (24.0, 0.6, 26.0),
@@ -11238,9 +12813,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(204),
+            entity_id: Some((
+                index: 215,
+                generation: 0,
+            )),
             name: Some("Act2_Barrel_1"),
             transform: Some((
                 position: (24.0, 0.6, 26.0),
@@ -11295,9 +12874,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(205),
+            entity_id: Some((
+                index: 216,
+                generation: 0,
+            )),
             name: Some("Act2_Barrel_2"),
             transform: Some((
                 position: (24.0, 1.5, 26.0),
@@ -11352,9 +12935,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(206),
+            entity_id: Some((
+                index: 217,
+                generation: 0,
+            )),
             name: Some("Act2_Barrel_3"),
             transform: Some((
                 position: (24.0, 1.5, 26.0),
@@ -11409,9 +12996,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(207),
+            entity_id: Some((
+                index: 218,
+                generation: 0,
+            )),
             name: Some("Act2_Barrel_4"),
             transform: Some((
                 position: (24.0, 2.4, 26.0),
@@ -11466,9 +13057,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(208),
+            entity_id: Some((
+                index: 219,
+                generation: 0,
+            )),
             name: Some("Act3_Col_0"),
             transform: Some((
                 position: (-12.0, 2.5, -9.0),
@@ -11510,9 +13105,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(209),
+            entity_id: Some((
+                index: 220,
+                generation: 0,
+            )),
             name: Some("Act3_Col_1"),
             transform: Some((
                 position: (-6.0, 2.5, -9.0),
@@ -11554,9 +13153,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(210),
+            entity_id: Some((
+                index: 221,
+                generation: 0,
+            )),
             name: Some("Act3_Col_2"),
             transform: Some((
                 position: (0.0, 2.5, -9.0),
@@ -11598,9 +13201,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(211),
+            entity_id: Some((
+                index: 222,
+                generation: 0,
+            )),
             name: Some("Act3_Col_3"),
             transform: Some((
                 position: (6.0, 2.5, -9.0),
@@ -11642,9 +13249,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(212),
+            entity_id: Some((
+                index: 223,
+                generation: 0,
+            )),
             name: Some("Act3_Col_4"),
             transform: Some((
                 position: (12.0, 2.5, -9.0),
@@ -11686,9 +13297,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(213),
+            entity_id: Some((
+                index: 224,
+                generation: 0,
+            )),
             name: Some("Act4_Pillar_0"),
             transform: Some((
                 position: (47.0, -12.0, -40.0),
@@ -11730,9 +13345,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(214),
+            entity_id: Some((
+                index: 225,
+                generation: 0,
+            )),
             name: Some("Act4_Pillar_1"),
             transform: Some((
                 position: (63.0, -12.0, -40.0),
@@ -11774,9 +13393,13 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(215),
+            entity_id: Some((
+                index: 226,
+                generation: 0,
+            )),
             name: Some("Act4_Pillar_2"),
             transform: Some((
                 position: (55.0, -12.0, -48.0),
@@ -11818,13 +13441,17 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
         (
-            entity_id: Some(216),
+            entity_id: Some((
+                index: 227,
+                generation: 0,
+            )),
             name: Some("Bell"),
             transform: Some((
                 position: (0.0, 6.0, 0.0),
-                rotation: (0.0, 0.9753798, 0.0, -0.22052814),
+                rotation: (0.0, 0.9070342, 0.0, -0.42105722),
                 scale: (0.4, 0.4, 0.4),
             )),
             parent: None,
@@ -11874,7 +13501,7 @@
             )),
             timer: Some((
                 duration: 8.0,
-                elapsed: 7.172609,
+                elapsed: 0.0180549,
                 mode: "once",
                 paused: false,
                 finished: false,
@@ -11882,21 +13509,169 @@
             ai_target: None,
             enemy: None,
             debug_path: None,
+            script: None,
         ),
     ],
     player_spawn: Some((0.0, 1.7, 45.0)),
     materials: {
-        "glass": (
-            base_color: (0.7, 0.85, 1.0, 0.35),
+        "arena_barrel": (
+            base_color: (0.55, 0.3, 0.15, 1.0),
             base_color_texture: None,
-            metallic: 0.2,
-            roughness: 0.05,
+            metallic: 0.3,
+            roughness: 0.6,
             metallic_roughness_texture: None,
             normal_texture: None,
             normal_scale: 1.0,
             emissive: (0.0, 0.0, 0.0),
             emissive_texture: None,
-            alpha_mode: Blend,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "foliage": (
+            base_color: (0.2, 0.45, 0.15, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.95,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "emissive": (
+            base_color: (1.0, 1.0, 1.0, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.5,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (2.5, 2.2, 0.6),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "arena_crate": (
+            base_color: (0.65, 0.45, 0.25, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.85,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "arena_platform": (
+            base_color: (0.55, 0.58, 0.62, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.8,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "arena_column": (
+            base_color: (0.68, 0.65, 0.58, 1.0),
+            base_color_texture: None,
+            metallic: 0.1,
+            roughness: 0.7,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "arena_floor": (
+            base_color: (0.42, 0.46, 0.5, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.92,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "rpg_dungeon": (
+            base_color: (0.13, 0.11, 0.16, 1.0),
+            base_color_texture: None,
+            metallic: 0.0,
+            roughness: 0.95,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
             sampler: (
@@ -11928,11 +13703,32 @@
                 mip_filter: Linear,
             ),
         ),
-        "arena_platform": (
-            base_color: (0.55, 0.58, 0.62, 1.0),
+        "arena_marker": (
+            base_color: (1.0, 0.9, 0.4, 1.0),
             base_color_texture: None,
             metallic: 0.0,
-            roughness: 0.8,
+            roughness: 0.5,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (2.5, 2.2, 0.6),
+            emissive_texture: None,
+            alpha_mode: Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
+        "gold": (
+            base_color: (1.0, 0.85, 0.3, 1.0),
+            base_color_texture: None,
+            metallic: 1.0,
+            roughness: 0.25,
             metallic_roughness_texture: None,
             normal_texture: None,
             normal_scale: 1.0,
@@ -11991,90 +13787,6 @@
                 mip_filter: Linear,
             ),
         ),
-        "arena_floor": (
-            base_color: (0.42, 0.46, 0.5, 1.0),
-            base_color_texture: None,
-            metallic: 0.0,
-            roughness: 0.92,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "foliage": (
-            base_color: (0.2, 0.45, 0.15, 1.0),
-            base_color_texture: None,
-            metallic: 0.0,
-            roughness: 0.95,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "arena_column": (
-            base_color: (0.68, 0.65, 0.58, 1.0),
-            base_color_texture: None,
-            metallic: 0.1,
-            roughness: 0.7,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "emissive": (
-            base_color: (1.0, 1.0, 1.0, 1.0),
-            base_color_texture: None,
-            metallic: 0.0,
-            roughness: 0.5,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (2.5, 2.2, 0.6),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
         "emissive_cold": (
             base_color: (0.5, 0.75, 1.0, 1.0),
             base_color_texture: None,
@@ -12084,69 +13796,6 @@
             normal_texture: None,
             normal_scale: 1.0,
             emissive: (0.8, 1.5, 3.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "gold": (
-            base_color: (1.0, 0.85, 0.3, 1.0),
-            base_color_texture: None,
-            metallic: 1.0,
-            roughness: 0.25,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "arena_crate": (
-            base_color: (0.65, 0.45, 0.25, 1.0),
-            base_color_texture: None,
-            metallic: 0.0,
-            roughness: 0.85,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "arena_barrel": (
-            base_color: (0.55, 0.3, 0.15, 1.0),
-            base_color_texture: None,
-            metallic: 0.3,
-            roughness: 0.6,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (0.0, 0.0, 0.0),
             emissive_texture: None,
             alpha_mode: Opaque,
             alpha_cutoff: 0.5,
@@ -12180,36 +13829,15 @@
                 mip_filter: Linear,
             ),
         ),
-        "rpg_dungeon": (
-            base_color: (0.13, 0.11, 0.16, 1.0),
+        "bark": (
+            base_color: (0.3, 0.2, 0.12, 1.0),
             base_color_texture: None,
             metallic: 0.0,
-            roughness: 0.95,
+            roughness: 0.9,
             metallic_roughness_texture: None,
             normal_texture: None,
             normal_scale: 1.0,
             emissive: (0.0, 0.0, 0.0),
-            emissive_texture: None,
-            alpha_mode: Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-            sampler: (
-                wrap_u: Repeat,
-                wrap_v: Repeat,
-                mag_filter: Linear,
-                min_filter: Linear,
-                mip_filter: Linear,
-            ),
-        ),
-        "arena_marker": (
-            base_color: (1.0, 0.9, 0.4, 1.0),
-            base_color_texture: None,
-            metallic: 0.0,
-            roughness: 0.5,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-            normal_scale: 1.0,
-            emissive: (2.5, 2.2, 0.6),
             emissive_texture: None,
             alpha_mode: Opaque,
             alpha_cutoff: 0.5,
@@ -12243,9 +13871,30 @@
                 mip_filter: Linear,
             ),
         ),
+        "glass": (
+            base_color: (0.7, 0.85, 1.0, 0.35),
+            base_color_texture: None,
+            metallic: 0.2,
+            roughness: 0.05,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            emissive: (0.0, 0.0, 0.0),
+            emissive_texture: None,
+            alpha_mode: Blend,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            sampler: (
+                wrap_u: Repeat,
+                wrap_v: Repeat,
+                mag_filter: Linear,
+                min_filter: Linear,
+                mip_filter: Linear,
+            ),
+        ),
     },
     texture_paths: {},
-    game_state_ron: Some("(campaign:(stage:Act1,kills_total:0,kills_in_stage:0,kills_required:2,has_key_red:false,gold:0,objective:\"Убей 2 стражников\",processed:[],dialog_shown:[],checkpoints:[],dialog:None,victory_time:None,playtime:0.0),camera_pos:(-61.426327,5.1290846,5.1290193),camera_target:(-37.9003,1.0239794,2.7469666),camera_distance:24.0,camera_yaw:-3.2425005,camera_pitch:0.17250022,hp:76.0,current_weapon:0,weapon_runtimes:[(mag:12,reserve:48),(mag:6,reserve:24),(mag:30,reserve:120),(mag:5,reserve:20)],player_stats:(attributes:(strength:5,dexterity:5,intelligence:5,vitality:5,luck:5),experience:(level:1,xp:0,xp_to_next:100,total_xp:0),unspent_points:0),inventory:(slots:[None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None],capacity:20),equipment:(weapon_id:None,armor_id:None,trinket_id:None))"),
+    game_state_ron: Some("(campaign:(stage:Act1,kills_total:0,kills_in_stage:0,kills_required:2,has_key_red:false,gold:0,objective:\"Убей 2 стражников\",processed:[],dialog_shown:[],checkpoints:[],dialog:None,victory_time:None,playtime:0.0),camera_pos:(-59.461815,6.1694684,4.227621),camera_target:(-38.100266,-1.4816295,-3.5919101),camera_distance:24.0,camera_yaw:-3.4924994,camera_pitch:0.32500026,hp:24.0,current_weapon:0,weapon_runtimes:[(mag:25,reserve:150),(mag:10,reserve:60),(mag:100,reserve:200),(mag:12,reserve:48),(mag:6,reserve:30),(mag:6,reserve:24),(mag:30,reserve:120),(mag:5,reserve:20)],player_stats:(attributes:(strength:5,dexterity:5,intelligence:5,vitality:5,luck:5),experience:(level:1,xp:0,xp_to_next:100,total_xp:0),unspent_points:0),inventory:(slots:[None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None],capacity:20),equipment:(weapon_id:None,armor_id:None,trinket_id:None))"),
     terrain: Some((
         resolution: 256,
         size: 2000.0,

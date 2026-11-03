@@ -3,7 +3,7 @@
 use glam::Vec3;
 use rhai::Engine;
 
-use super::host::{SharedHost, ScriptHost};
+use super::host::SharedHost;
 
 pub fn register_all(engine: &mut Engine) {
     register_vec3(engine);

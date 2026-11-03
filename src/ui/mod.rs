@@ -11,6 +11,6 @@ pub use crafting_ui::CraftingAction;
 pub use dialog::DialogUi;
 pub use hud::{Hud, Notification};
 pub use inventory_ui::{InvDragState, InvLocation, InventoryAction};
-pub use layer::{UiInput, UiLayer};
+pub use layer::{UiInput, UiLayer, UiModifiers};
 pub use quad::{UiGlobal, UiQuad};
 pub use vendor_ui::VendorAction;

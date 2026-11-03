@@ -14,7 +14,6 @@ pub struct BloomMip {
 
 pub struct BloomChain {
     pub mips: Vec<BloomMip>,
-    pub sampler: wgpu::Sampler,
     pub prefilter_bgs: [wgpu::BindGroup; 3],
     pub downsample_bgs: Vec<wgpu::BindGroup>,
     pub upsample_bgs: Vec<wgpu::BindGroup>,
@@ -110,7 +109,6 @@ pub struct SizeDependent {
     pub taa_read_bgs: [wgpu::BindGroup; 2],
     pub taa_uniform: wgpu::Buffer,
 
-    pub volumetric_fog_view: wgpu::TextureView,
     pub _volumetric_fog_tex: wgpu::Texture,
     pub volumetric_compute_bg: wgpu::BindGroup,
     pub volumetric_composite_bg: wgpu::BindGroup,
@@ -636,7 +634,6 @@ pub fn build_size_dependent(
         _taa_resolved_tex: taa_resolved_tex,
         taa_read_bgs,
         taa_uniform,
-        volumetric_fog_view,
         _volumetric_fog_tex: volumetric_fog_tex,
         volumetric_compute_bg,
         volumetric_composite_bg,
@@ -827,7 +824,6 @@ fn build_bloom_chain(
 
     BloomChain {
         mips,
-        sampler,
         prefilter_bgs,
         downsample_bgs,
         upsample_bgs,

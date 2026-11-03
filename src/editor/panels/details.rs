@@ -8,11 +8,11 @@ use crate::game::audio::AudioSource;
 use crate::game::components::{
     AnimationPlayer, Chase, Elevator, Health, Interactable, MaterialHandle, MeshHandle, Name,
     Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint, Transform, Trigger,
-    TriggerAction, Velocity, Visible,
+    Velocity, Visible,
 };
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::physics::{BodyType, Collider, PhysicsMaterial, RigidBody};
-use crate::render::{AlphaMode, Material};
+use crate::render::Material;
 use glam::Vec3;
 
 // ============================================================

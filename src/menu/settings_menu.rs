@@ -1,65 +1,83 @@
+//! Окно Settings: Window + Graphics + Audio + Language.
+
 use super::MenuActions;
 use crate::app_state::{
     AppSettings, AudioSettings, GraphicsSettings, QualityPreset, WindowSettings,
     RESOLUTIONS,
 };
+use crate::render::Tonemapper;
 use crate::t;
 
 pub fn draw(ctx: &egui::Context, settings: &mut AppSettings, actions: &mut MenuActions) {
-    // ИЗМЕНЕНО (egui 0.37)
     let screen = ctx.input(|i| i.content_rect());
     let center = screen.center();
 
     egui::Area::new(egui::Id::unique("settings_menu"))
-        .fixed_pos(egui::pos2(center.x - 300.0, center.y - 280.0))
+        .fixed_pos(egui::pos2(center.x - 340.0, center.y - 340.0))
         .show(ctx, |ui| {
-            ui.set_width(600.0);
+            ui.set_width(680.0);
             ui.vertical_centered(|ui| {
                 ui.add_space(16.0);
-                ui.label(egui::RichText::new(t!("settings.title")).size(32.0).strong()
-                    .color(egui::Color32::from_rgb(200, 210, 230)));
-                ui.add_space(24.0);
+                ui.label(
+                    egui::RichText::new(t!("settings.title"))
+                        .size(32.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(200, 210, 230)),
+                );
+                ui.add_space(16.0);
             });
 
             egui::ScrollArea::vertical()
-                .max_height(460.0).auto_shrink([false; 2])
+                .max_height(560.0)
+                .auto_shrink([false; 2])
                 .show(ui, |ui| {
-                    egui::CollapsingHeader::new(t!("settings.window")).default_open(true)
+                    egui::CollapsingHeader::new(t!("settings.window"))
+                        .default_open(true)
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             draw_window(ui, &mut settings.window);
                             ui.add_space(4.0);
                         });
                     ui.add_space(6.0);
-                    egui::CollapsingHeader::new(t!("settings.graphics")).default_open(true)
+
+                    egui::CollapsingHeader::new(t!("settings.graphics"))
+                        .default_open(true)
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             draw_graphics(ui, &mut settings.graphics);
                             ui.add_space(4.0);
                         });
                     ui.add_space(6.0);
-                    egui::CollapsingHeader::new(t!("settings.audio")).default_open(true)
+
+                    egui::CollapsingHeader::new(t!("settings.audio"))
+                        .default_open(true)
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             draw_audio(ui, &mut settings.audio);
                             ui.add_space(4.0);
                         });
                     ui.add_space(6.0);
-                    
-                    // === LANGUAGE ===
-                    egui::CollapsingHeader::new(t!("settings.language")).default_open(true)
+
+                    egui::CollapsingHeader::new(t!("settings.language"))
+                        .default_open(true)
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 if ui
-                                    .selectable_label(settings.language == "ru", t!("settings.language.ru"))
+                                    .selectable_label(
+                                        settings.language == "ru",
+                                        t!("settings.language.ru"),
+                                    )
                                     .clicked()
                                 {
                                     settings.language = "ru".to_string();
                                     crate::game::locale::set_language("ru");
                                 }
                                 if ui
-                                    .selectable_label(settings.language == "en", t!("settings.language.en"))
+                                    .selectable_label(
+                                        settings.language == "en",
+                                        t!("settings.language.en"),
+                                    )
                                     .clicked()
                                 {
                                     settings.language = "en".to_string();
@@ -69,7 +87,7 @@ pub fn draw(ctx: &egui::Context, settings: &mut AppSettings, actions: &mut MenuA
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(
-                                    "Изменения применяются сразу и сохраняются в settings.ron.",
+                                    "Changes are applied immediately and saved to settings.ron.",
                                 )
                                 .small()
                                 .weak()
@@ -81,26 +99,47 @@ pub fn draw(ctx: &egui::Context, settings: &mut AppSettings, actions: &mut MenuA
 
             ui.add_space(20.0);
             ui.horizontal(|ui| {
-                if ui.add_sized([160.0, 38.0], egui::Button::new(t!("settings.back"))).clicked() {
+                if ui
+                    .add_sized([160.0, 38.0], egui::Button::new(t!("settings.back")))
+                    .clicked()
+                {
                     actions.back = true;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_sized([160.0, 38.0], egui::Button::new(t!("settings.apply"))).clicked() {
-                        actions.apply_settings = true;
-                    }
-                });
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui
+                            .add_sized(
+                                [160.0, 38.0],
+                                egui::Button::new(t!("settings.apply")),
+                            )
+                            .clicked()
+                        {
+                            actions.apply_settings = true;
+                        }
+                    },
+                );
             });
         });
 }
 
+// ============================================================
+// Window
+// ============================================================
+
 fn draw_window(ui: &mut egui::Ui, s: &mut WindowSettings) {
-    ui.checkbox(&mut s.vsync, t!("settings.vsync")).on_hover_text("Синхронизация с частотой монитора.");
+    ui.checkbox(&mut s.vsync, t!("settings.vsync"))
+        .on_hover_text("Sync with monitor refresh rate. Disable for uncapped FPS.");
     ui.checkbox(&mut s.fullscreen, t!("settings.fullscreen"));
     ui.horizontal(|ui| {
         ui.label(format!("{}:", t!("settings.resolution")));
-        let current = RESOLUTIONS.get(s.resolution_index).map(|r| r.2).unwrap_or("?");
+        let current = RESOLUTIONS
+            .get(s.resolution_index)
+            .map(|r| r.2)
+            .unwrap_or("?");
         egui::ComboBox::from_id_salt("res_combo")
-            .selected_text(current).width(220.0)
+            .selected_text(current)
+            .width(220.0)
             .show_ui(ui, |ui| {
                 for (i, (_, _, label)) in RESOLUTIONS.iter().enumerate() {
                     ui.selectable_value(&mut s.resolution_index, i, *label);
@@ -109,22 +148,304 @@ fn draw_window(ui: &mut egui::Ui, s: &mut WindowSettings) {
     });
 }
 
+// ============================================================
+// Graphics
+// ============================================================
+
 fn draw_graphics(ui: &mut egui::Ui, s: &mut GraphicsSettings) {
-    ui.horizontal(|ui| {
-        ui.label(format!("{}:", t!("settings.quality")));
+    // --- Presets ---
+    ui.label(egui::RichText::new("Quality preset").strong());
+    ui.horizontal_wrapped(|ui| {
         for preset in QualityPreset::all() {
-            if ui.selectable_label(s.quality_preset == preset, preset.label())
-                .on_hover_text(preset.description()).clicked()
+            let selected = s.quality_preset == preset;
+            if ui
+                .selectable_label(selected, preset.label())
+                .on_hover_text(preset.description())
+                .clicked()
             {
-                s.quality_preset = preset;
+                s.apply_preset(preset);
             }
         }
     });
-    ui.label(egui::RichText::new(s.quality_preset.description()).small().weak().italics());
-    ui.add(egui::Slider::new(&mut s.render_scale, 0.5..=1.0).text(t!("settings.render_scale")));
-    ui.add(egui::Slider::new(&mut s.fov, 60.0..=110.0).text(t!("settings.fov")));
-    ui.checkbox(&mut s.show_fps, t!("settings.show_fps"));
+    ui.label(
+        egui::RichText::new(s.quality_preset.description())
+            .small()
+            .weak()
+            .italics(),
+    );
+
+    ui.separator();
+
+    // --- Camera ---
+    ui.add(
+        egui::Slider::new(&mut s.fov, 60.0..=110.0)
+            .text("FOV (vertical)")
+            .suffix("°"),
+    );
+
+    ui.separator();
+
+    // --- Exposure / tonemapper ---
+    egui::CollapsingHeader::new("Exposure & Tone")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.exposure, 0.1..=3.0)
+                    .text("Exposure")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.exposure_bias, 0.25..=4.0)
+                    .logarithmic(true)
+                    .text("Exposure bias")
+                    .fixed_decimals(2),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Tonemapper:");
+                let tm = &mut s.postfx.tonemapper;
+                for (id, label) in [
+                    (Tonemapper::AgX, "AgX"),
+                    (Tonemapper::ACESFilmic, "ACES"),
+                    (Tonemapper::Reinhard, "Reinhard"),
+                    (Tonemapper::Uncharted2, "Uncharted2"),
+                    (Tonemapper::None, "None"),
+                ] {
+                    if ui.selectable_label(*tm == id, label).clicked() {
+                        *tm = id;
+                    }
+                }
+            });
+        });
+
+    // --- Anti-aliasing ---
+    egui::CollapsingHeader::new("Anti-aliasing")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.taa_strength, 0.0..=1.0)
+                    .text("TAA strength")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.taa_sharpening, 0.0..=1.0)
+                    .text("TAA sharpening")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.fxaa_strength, 0.0..=1.0)
+                    .text("FXAA strength")
+                    .fixed_decimals(2),
+            );
+        });
+
+    // --- SSAO ---
+    egui::CollapsingHeader::new("Ambient occlusion (SSAO)")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.ssao_strength, 0.0..=2.0)
+                    .text("Strength")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.ssao_radius, 0.05..=2.0)
+                    .text("Radius")
+                    .fixed_decimals(2),
+            );
+        });
+
+    // --- Bloom ---
+    egui::CollapsingHeader::new("Bloom")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.bloom_threshold, 0.1..=5.0)
+                    .text("Threshold")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.bloom_strength, 0.0..=3.0)
+                    .text("Strength")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.bloom_knee, 0.01..=2.0)
+                    .text("Knee")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.bloom_radius, 0.5..=3.0)
+                    .text("Radius")
+                    .fixed_decimals(2),
+            );
+        });
+
+    // --- Volumetric fog ---
+    egui::CollapsingHeader::new("Volumetric fog")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.volumetric_density, 0.0..=0.02)
+                    .logarithmic(true)
+                    .text("Density")
+                    .fixed_decimals(4),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.volumetric_scattering, 0.0..=1.0)
+                    .text("Scattering")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.volumetric_phase_g, 0.0..=0.9)
+                    .text("Phase g")
+                    .fixed_decimals(2),
+            );
+        });
+
+    // --- Height fog ---
+    egui::CollapsingHeader::new("Height fog")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut c = s.postfx.fog_color;
+            if ui.color_edit_button_rgb(&mut c).changed() {
+                s.postfx.fog_color = c;
+            }
+            ui.add(
+                egui::Slider::new(&mut s.postfx.fog_density, 0.0..=0.2)
+                    .text("Density")
+                    .fixed_decimals(4),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.fog_height_base, -10.0..=20.0)
+                    .text("Height base")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.fog_height_falloff, 0.0..=0.5)
+                    .text("Height falloff")
+                    .fixed_decimals(3),
+            );
+        });
+
+    // --- DoF ---
+    egui::CollapsingHeader::new("Depth of Field")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut enabled = s.postfx.dof_enabled > 0.5;
+            if ui.checkbox(&mut enabled, "Enable").changed() {
+                s.postfx.dof_enabled = if enabled { 1.0 } else { 0.0 };
+            }
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut s.postfx.dof_focus_distance, 0.5..=100.0)
+                        .logarithmic(true)
+                        .text("Focus distance (m)")
+                        .fixed_decimals(1),
+                );
+                ui.add(
+                    egui::Slider::new(&mut s.postfx.dof_focus_range, 0.0..=30.0)
+                        .text("Focus range (m)")
+                        .fixed_decimals(2),
+                );
+                ui.add(
+                    egui::Slider::new(&mut s.postfx.dof_max_blur, 0.0..=32.0)
+                        .text("Max blur (px)")
+                        .fixed_decimals(1),
+                );
+            });
+        });
+
+    // --- Motion blur ---
+    egui::CollapsingHeader::new("Motion blur")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut enabled = s.postfx.motion_blur_enabled > 0.5;
+            if ui.checkbox(&mut enabled, "Enable").changed() {
+                s.postfx.motion_blur_enabled = if enabled { 1.0 } else { 0.0 };
+            }
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut s.postfx.motion_blur_intensity, 0.0..=2.0)
+                        .text("Intensity")
+                        .fixed_decimals(2),
+                );
+                ui.add(
+                    egui::Slider::new(&mut s.postfx.motion_blur_max_px, 4.0..=120.0)
+                        .logarithmic(true)
+                        .text("Max blur length (px)")
+                        .fixed_decimals(1),
+                );
+            });
+        });
+
+    // --- Lens flare ---
+    egui::CollapsingHeader::new("Lens flare")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.lens_flare_intensity, 0.0..=1.5)
+                    .text("Intensity")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.lens_flare_threshold, 0.5..=8.0)
+                    .logarithmic(true)
+                    .text("Threshold")
+                    .fixed_decimals(2),
+            );
+        });
+
+    // --- Screen effects ---
+    egui::CollapsingHeader::new("Screen effects")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.vignette_strength, 0.0..=1.0)
+                    .text("Vignette")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.film_grain, 0.0..=1.0)
+                    .text("Film grain")
+                    .fixed_decimals(3),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.chromatic_aberration, 0.0..=1.0)
+                    .text("Chromatic aberration")
+                    .fixed_decimals(3),
+            );
+        });
+
+    // --- Color grading ---
+    egui::CollapsingHeader::new("Color grading")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut s.postfx.color_temperature, -1.0..=1.0)
+                    .text("Temperature")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.color_tint, -1.0..=1.0)
+                    .text("Tint")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.color_contrast, 0.5..=2.0)
+                    .text("Contrast")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.postfx.color_saturation, 0.0..=2.0)
+                    .text("Saturation")
+                    .fixed_decimals(2),
+            );
+        });
 }
+
+// ============================================================
+// Audio
+// ============================================================
 
 fn draw_audio(ui: &mut egui::Ui, s: &mut AudioSettings) {
     ui.add(egui::Slider::new(&mut s.master, 0.0..=1.0).text(t!("settings.master")));

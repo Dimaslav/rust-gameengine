@@ -13,10 +13,10 @@ use glam::Vec3;
 
 use crate::ecs::{Entity, World};
 use crate::game::components::Visible;
-use crate::physics::{BodyType, Collider, RigidBody};
+use crate::physics::Collider;
 use crate::render::terrain::Heightmap;
 
-use super::collision_cache::{capsule_hits_aabb, ColliderCache};
+use super::collision_cache::ColliderCache;
 
 const SUPPORT_TOLERANCE: f32 = 0.15;
 const SUBSTEP_SIZE: f32 = 0.15;

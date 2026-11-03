@@ -4,6 +4,8 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use super::world::Entity;
+
 pub struct ComponentStorage<T> {
     data: Vec<T>,
     entities: Vec<Entity>,
@@ -36,8 +38,6 @@ impl<T> ComponentStorage<T> {
         let idx = self.lookup.remove(&e)?;
         self.entities.swap_remove(idx);
         let removed = self.data.swap_remove(idx);
-        // Если swap_remove переместил последний элемент на место idx —
-        // обновляем его индекс в lookup.
         if idx < self.entities.len() {
             self.lookup.insert(self.entities[idx], idx);
         }
@@ -72,36 +72,21 @@ impl<T> ComponentStorage<T> {
         self.data.is_empty()
     }
 
-    /// Ссылка на внутренний список entity без копирования.
-    ///
-    /// ИЗМЕНЕНО (#9): используется `World::for_each_pair` для заполнения
-    /// скретч-буфера — без промежуточной аллокации `Vec<Entity>`.
-    ///
-    /// Раньше здесь был `entity_list() -> Vec<Entity>` с `.clone()`,
-    /// который аллоцировал на каждый вызов `for_each_pair` (то есть на
-    /// каждый кадр в `MovementSystem::update`).
-    ///
-    /// Возвращаемый `slice::Iter` живёт ровно столько, сколько живёт
-    /// borrow `self`. Клонирование больше не нужно: caller сам решает,
-    /// куда сложить результат (в скретч-буфер World).
     pub fn entities_iter(&self) -> std::slice::Iter<'_, Entity> {
         self.entities.iter()
     }
 
     /// Оставлено для обратной совместимости внешнего API.
-    ///
-    /// **Внутри движка не используется** — `World::for_each_pair`
-    /// предпочитает `entities_iter()` + скретч-буфер. Метод сохранён
-    /// публичным, потому что `ComponentStorage` экспортируется из
-    /// `ecs::mod` и может использоваться извне.
+    /// Внутри движка не используется — `World::for_each_pair`
+    /// предпочитает `entities_iter()` + скретч-буфер.
     pub fn entity_list(&self) -> Vec<Entity> {
         self.entities.clone()
     }
 }
 
-use super::world::Entity;
-
-// === Type-erased trait, чтобы хранить разные ComponentStorage<T> в одной HashMap ===
+// ============================================================
+// Type-erased trait
+// ============================================================
 
 pub trait AnyStorage: Send + Sync {
     fn as_any(&self) -> &dyn Any;

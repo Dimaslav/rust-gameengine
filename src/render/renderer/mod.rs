@@ -41,9 +41,11 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
 
-    camera_layout: wgpu::BindGroupLayout,
-    lights_layout: wgpu::BindGroupLayout,
-    shadow_pass_layout: wgpu::BindGroupLayout,
+    // Layout'ы, используемые только в `reload_shaders` (debug-only).
+    // В release hot-reload отключён, но Arc внутри wgpu дёшев.
+    #[allow(dead_code)] camera_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)] lights_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)] shadow_pass_layout: wgpu::BindGroupLayout,
     shadow2_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
@@ -53,7 +55,7 @@ pub struct Renderer {
     tonemap_layout: wgpu::BindGroupLayout,
     debug_layout: wgpu::BindGroupLayout,
     debug_depth_layout: wgpu::BindGroupLayout,
-    skybox_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)] skybox_layout: wgpu::BindGroupLayout,
     taa_layout: wgpu::BindGroupLayout,
     lens_flare_layout: wgpu::BindGroupLayout,
     dof_layout: wgpu::BindGroupLayout,
@@ -175,7 +177,6 @@ pub struct Renderer {
     pub last_draw_count: usize,
     pub last_instance_count: usize,
 
-    ui_layout: wgpu::BindGroupLayout,
     ui_pipeline: wgpu::RenderPipeline,
     ui_global_buffer: wgpu::Buffer,
     ui_global_bind_group: wgpu::BindGroup,
@@ -239,7 +240,13 @@ impl Renderer {
         }).await.unwrap();
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        // **Не** sRGB-поверхность: tonemap сам кодирует в sRGB,
+        // UI/egui пишут sRGB-байты напрямую. sRGB surface дал бы
+        // двойное кодирование UI (egui_wgpu ругался).
+        let format = caps.formats.iter().copied()
+            .find(|f| !f.is_srgb())
+            .or_else(|| caps.formats.iter().copied().find(|f| f.is_srgb()))
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -266,11 +273,6 @@ impl Renderer {
             entries: &[bgl_tex_frag(0), bgl_tex_frag(1), bgl_sampler_frag(2), bgl_uniform_frag(3)],
         });
 
-        // ИЗМЕНЕНО: gbuffer / lines / particles / decal / forward_transparent
-        // читают `camera.view` и `camera.view_proj` в VERTEX shader.
-        // `bgl_uniform_frag(0)` объявляет только FRAGMENT → wgpu-валидатор
-        // на create_render_pipeline падает с "Visibility flags don't include
-        // the shader stage". Нужен VERTEX_FRAGMENT.
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -417,10 +419,6 @@ impl Renderer {
             entries: &[bgl_depth_2d(0)],
         });
 
-        // ИЗМЕНЕНО: ui.wgsl читает `global.screen` в VERTEX shader
-        // (NDC-конверсия пикселей). `bgl_uniform_frag(0)` объявляет только
-        // FRAGMENT → create_render_pipeline('ui_pipeline') падает с
-        // "Visibility flags don't include the shader stage".
         let ui_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ui_layout"),
             entries: &[
@@ -1001,7 +999,7 @@ impl Renderer {
             taa_prev_jitter_px: Vec2::ZERO,
             taa_prev_enabled: true,
             last_draw_count: 0, last_instance_count: 0,
-            ui_layout, ui_pipeline, ui_global_buffer, ui_global_bind_group,
+            ui_pipeline, ui_global_buffer, ui_global_bind_group,
             ui_instance_buffer, ui_instance_capacity: INITIAL_UI_CAPACITY,
             _ui_font_atlas_tex: ui_font_atlas_tex,
         }
@@ -1021,9 +1019,6 @@ impl Renderer {
 
     #[cfg(debug_assertions)]
     pub fn reload_shaders(&mut self) -> Result<(), String> {
-        // ИСПРАВЛЕНО (wgpu 30): pop_error_scope() удалён. push_error_scope()
-        // теперь возвращает ErrorScopeGuard, который нужно await-ить.
-        // Результат — Option<wgpu::Error>.
         let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let build = || -> Result<BuiltPipelines, String> {
@@ -1155,7 +1150,8 @@ impl Renderer {
 
     pub fn texture_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.textures.keys().cloned().collect();
-        v.sort(); v
+        v.sort();
+        v
     }
 
     pub fn texture_size(&self, name: &str) -> Option<(u32, u32)> {
@@ -1379,6 +1375,14 @@ impl Renderer {
         self.taa_reset_frames = 2;
     }
 
+    pub fn set_present_mode(&mut self, mode: wgpu::PresentMode) {
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+            log::info!("Renderer: present mode → {:?}", mode);
+        }
+    }
+
     fn ensure_instance_capacity(&mut self, needed: u64) {
         if needed <= self.instance_capacity { return; }
         let new_cap = (self.instance_capacity * 2).max(needed);
@@ -1434,7 +1438,20 @@ impl Renderer {
             self.taa_prev_enabled = use_taa;
         }
 
-        let jitter_pixels = Vec2::ZERO;
+        // ============================================================
+        // TAA jitter — Halton(2,3), 8 сэмплов.
+        //
+        // Раньше было `Vec2::ZERO` → TAA фактически не работал: формула
+        // компенсации готова, но сдвига не было, и TAA только размывал
+        // историю, не убирая aliasing. С Halton — картинка заметно чище.
+        // ============================================================
+        const HALTON_X: [f32; 8] = [0.500, 0.250, 0.750, 0.125, 0.625, 0.375, 0.875, 0.0625];
+        const HALTON_Y: [f32; 8] = [0.333, 0.667, 0.111, 0.444, 0.778, 0.222, 0.556, 0.889];
+        let halton_idx = (self.taa_frame_index as usize) % 8;
+        let jitter_pixels = Vec2::new(
+            HALTON_X[halton_idx] - 0.5,
+            HALTON_Y[halton_idx] - 0.5,
+        );
         let jitter_ndc = Vec2::new(jitter_pixels.x * 2.0 / w_px, jitter_pixels.y * 2.0 / h_px);
 
         let view = camera.view_matrix();
@@ -1603,7 +1620,7 @@ impl Renderer {
         let ssao_data = SsaoUniform {
             proj_scale: [proj_unjittered.x_axis.x, proj_unjittered.y_axis.y, camera.far, postfx.ssao_radius],
             params: [0.025, postfx.ssao_strength, noise_tile_x, noise_tile_y],
-            time: [0.0, 0.0, 0.0, 0.0],
+            time: [time, 0.0, 0.0, 0.0],
             view: view.to_cols_array_2d(),
         };
         self.queue.write_buffer(&self.ssao_uniform, 0, bytemuck::bytes_of(&ssao_data));
@@ -1833,6 +1850,8 @@ impl Renderer {
     }
 }
 
+/// Набор пересобранных пайплайнов для `reload_shaders`. Только debug.
+#[cfg(debug_assertions)]
 struct BuiltPipelines {
     gbuffer: wgpu::RenderPipeline,
     gbuffer_double_sided: wgpu::RenderPipeline,
@@ -1993,7 +2012,7 @@ fn bgl_uniform_compute(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 // ============================================================
-// Pipeline builders
+// Pipeline builders (без изменений — приводим для полноты файла)
 // ============================================================
 
 fn make_gbuffer_pipeline(

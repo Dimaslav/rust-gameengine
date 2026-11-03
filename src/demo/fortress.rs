@@ -9,14 +9,14 @@ use winit::keyboard::KeyCode;
 
 use crate::ecs::{Entity, System, World};
 use crate::engine::{Game, Input, InputMap, Key, ShotFired, WorldLoadRequest};
-use crate::game::ai::{AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath};
+use crate::game::ai::{AiAgent, AiState, AiTarget, DebugPath};
 use crate::game::animation::{AnimationEventTriggered, AnimationEvents, AnimationRuntime};
 use crate::game::audio::{AudioBus, AudioSource};
 use crate::game::components::*;
 use crate::game::decals::Decal;
 use crate::game::dialogs::{DialogEffect, DialogGraph, DialogNpc, DialogSession};
 use crate::game::items::{
-    roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry, SortKey,
+    roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
 };
 use crate::game::vendors::{VendorDef, VendorNpc, VendorRegistry, VendorSession};
 use crate::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
@@ -275,8 +275,6 @@ pub struct FortressDemo {
     /// ПКМ нажата в этом кадре. `UiInput` не несёт правую кнопку,
     /// поэтому сохраняем здесь из `update()`.
     rmb_pressed_this_frame: bool,
-    /// Ctrl зажат в этом кадре. Используется для Ctrl+click (split).
-    ctrl_held: bool,
 
     last_play_mode: bool,
     hud: Hud,
@@ -291,7 +289,6 @@ pub struct FortressDemo {
     // === Save / Load ===
     save_manager: crate::scene::SaveManager,
     pending_world_request: Option<WorldLoadRequest>,
-    show_save_panel: bool,
     save_slots_cache: Vec<(u32, Option<crate::scene::SaveHeader>)>,
     save_slots_cache_dirty: bool,
     pending_autosave: bool,
@@ -372,7 +369,6 @@ impl FortressDemo {
             show_inventory: false,
             inv_drag: InvDragState::default(),
             rmb_pressed_this_frame: false,
-            ctrl_held: false,
 
             vendor_registry: VendorRegistry::empty(),
             vendor_session: None,
@@ -393,7 +389,6 @@ impl FortressDemo {
 
             save_manager: crate::scene::SaveManager::new("saves"),
             pending_world_request: None,
-            show_save_panel: false,
             save_slots_cache: Vec::new(),
             save_slots_cache_dirty: true,
             pending_autosave: false,
@@ -623,8 +618,6 @@ impl FortressDemo {
     // ============================================================
 
     /// Hit-test: какой слот инвентаря / экипировки под курсором.
-    /// Layout — копия layout'а из `inventory_ui::draw`. Должен
-    /// совпадать, иначе ПКМ не работает.
     fn hit_test_inventory(&self, sw: f32, sh: f32, mx: f32, my: f32) -> Option<InvLocation> {
         let px = (sw - INV_PANEL_W) * 0.5;
         let py = (sh - INV_PANEL_H) * 0.5;
@@ -1658,6 +1651,19 @@ impl Game for FortressDemo {
         renderer.add_mesh("weapon_rack",     props::weapon_rack(&renderer.device));
         renderer.add_mesh("skull",           props::skull(&renderer.device));
 
+        // === Viewmodel оружия (#8) ===
+        // Соответствие assets/weapons/*.ron: mesh: Some("weapon_*")
+        renderer.add_mesh("weapon_pistol",  props::weapon_pistol(&renderer.device));
+        renderer.add_mesh("weapon_smg",     props::weapon_smg(&renderer.device));
+        renderer.add_mesh("weapon_shotgun", props::weapon_shotgun(&renderer.device));
+        renderer.add_mesh("weapon_sniper",  props::weapon_sniper(&renderer.device));
+        renderer.add_mesh("weapon_default", props::weapon_default(&renderer.device));
+        if !renderer.has_material("weapon_gunmetal") {
+            renderer.add_material("weapon_gunmetal",
+                Material::new([0.25, 0.25, 0.28, 1.0])
+                    .with_metallic_roughness(0.85, 0.35));
+        }
+
         let mut data = vec![0u8; 64 * 64 * 4];
         for y in 0..64 {
             for x in 0..64 {
@@ -1786,11 +1792,8 @@ impl Game for FortressDemo {
         let in_play = input.play_mode;
         self.last_play_mode = in_play;
 
-        // `UiInput` (в `collect_ui`) не несёт модификаторы и ПКМ,
-        // поэтому запоминаем их здесь.
+        // `UiInput` не несёт ПКМ — запоминаем здесь.
         self.rmb_pressed_this_frame = input.mouse_pressed(MouseButton::Right);
-        self.ctrl_held = input.key_down(KeyCode::ControlLeft)
-            || input.key_down(KeyCode::ControlRight);
         self.vendor_esc_pressed = input.key_pressed(KeyCode::Escape)
             && self.vendor_session.is_some();
         self.crafting_esc_pressed = input.key_pressed(KeyCode::Escape)
@@ -2386,11 +2389,18 @@ impl Game for FortressDemo {
 
             let dist = (world_center - cam_pos).length();
             let dist_eff = (dist - world_radius).max(0.0) / lod_bias;
-            let lod_level = if mesh.lods.is_empty() || dist_eff < lod_dists[0] { 0 }
-                else if dist_eff < lod_dists[1] || mesh.lods.len() < 1 { 1 }
-                else if dist_eff < lod_dists[1] || mesh.lods.is_empty() { 1 }
-                else if dist_eff < lod_dists[2] || mesh.lods.len() < 2 { 2.min(mesh.lods.len()) }
-                else { 3.min(mesh.lods.len()) };
+            // Шкала LOD: 0..3, ограниченная фактическим числом уровней
+            // в меше (mesh.lods.len() = 0..=3). Раньше здесь были две
+            // недостижимые ветки.
+            let lod_level = if mesh.lods.is_empty() || dist_eff < lod_dists[0] {
+                0
+            } else if dist_eff < lod_dists[1] {
+                1.min(mesh.lods.len())
+            } else if dist_eff < lod_dists[2] {
+                2.min(mesh.lods.len())
+            } else {
+                3.min(mesh.lods.len())
+            };
 
             let mesh_name = if lod_level == 0 {
                 m.0.clone()
@@ -2537,8 +2547,6 @@ impl Game for FortressDemo {
             self.crafting_session = None;
             self.crafting_esc_pressed = false;
         }
-        // Vendor закрывает Esc — но Esc может быть уже "съеден" паузой.
-        // Игра выставляет флаг из update().        
 
         let is_victory = self.campaign.stage == Stage::Victory;
 
@@ -2877,7 +2885,9 @@ impl Game for FortressDemo {
                 }
             }
 
-            // ЛКМ: drag / swap / split / drop.
+            // ЛКМ: drag / swap / split / drop. Split приходит как
+            // `InventoryAction::Split` напрямую из UI через
+            // `UiInput::modifiers.ctrl`.
             let action = inventory_ui::draw(
                 ui,
                 &self.inventory,
@@ -2887,15 +2897,8 @@ impl Game for FortressDemo {
             );
             match action {
                 InventoryAction::None => {}
-                InventoryAction::StartDrag(loc) => {
-                    // Ctrl+click на стаке — split вместо drag.
-                    if self.ctrl_held
-                        && let InvLocation::Inventory(idx) = loc
-                        && self.inventory.split_stack(idx).is_some()
-                    {
-                        self.hud.push("Stack split");
-                        self.inv_drag.cancel();
-                    }
+                InventoryAction::StartDrag(_) => {
+                    // Ничего — drag уже сохранён в `self.inv_drag`.
                 }
                 InventoryAction::Swap(a, b) => self.handle_inv_swap(a, b),
                 InventoryAction::Split(idx) => {
@@ -2924,7 +2927,6 @@ impl Game for FortressDemo {
                     self.hud.push(format!("Sorted: {:?}", key));
                 }
             }
-
         }
 
         // === Vendor UI ===
@@ -3072,7 +3074,7 @@ impl Game for FortressDemo {
                                         .dialog_session
                                         .as_ref()
                                         .map(|s| s.npc_entity)
-                                        .unwrap_or(0);
+                                        .unwrap_or(crate::ecs::Entity::INVALID);
                                     self.vendor_session =
                                         Some(VendorSession::new(&def, npc_entity));
                                     self.dialog_session = None;
@@ -3089,7 +3091,7 @@ impl Game for FortressDemo {
                                         .dialog_session
                                         .as_ref()
                                         .map(|s| s.npc_entity)
-                                        .unwrap_or(0);
+                                        .unwrap_or(crate::ecs::Entity::INVALID);
                                     self.crafting_session = Some(CraftingSession::new(
                                         &bench_id, npc_entity, &self.crafting_registry,
                                     ));

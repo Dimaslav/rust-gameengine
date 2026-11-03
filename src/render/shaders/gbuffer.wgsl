@@ -1,4 +1,9 @@
 // G-buffer pass. MRT: albedo, world-normal + linear-depth, emissive, motion.
+//
+// ИЗМЕНЕНО: добавлен Specular AA (Toksvig). Для металлических
+// поверхностей с шумной нормал-мапой roughness увеличивается, чтобы
+// GGX-блики не «кипели» на дальних дистанциях. Оценка вариации
+// нормали — по длине векторной суммы 3×3 окрестности.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -103,8 +108,8 @@ fn vs_main(in: VsIn) -> VsOut {
 
     let view_pos = camera.view * world_pos;
 
-    // ИСПРАВЛЕНО: выбираем UV-оси в зависимости от нормали грани,
-    // чтобы избежать растяжения текстур на полу и стенах.
+    // UV-оси выбираются по доминирующей оси локальной нормали —
+    // иначе на полу/стенах текстуры растягиваются.
     let l_n = abs(normalize(in.normal));
     var uv_scale = in.uv_scale.xy;
     if (l_n.y > 0.5) {
@@ -137,6 +142,31 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
 
     let invmax = inverseSqrt(max(max(dot(T, T), dot(B, B)), 0.0001));
     return mat3x3<f32>(T * invmax, B * invmax, N);
+}
+
+/// Specular AA (Toksvig 2005). Возвращает множитель [0, 1] —
+/// насколько «шумная» нормал-мапа в 3×3 окрестности:
+///   0.0 — гладко, все нормали совпадают;
+///   1.0 — максимальный шум.
+///
+/// Идея: если после усреднения нормалей их сумма короткая (близка к 0),
+/// значит нормали смотрят в разные стороны — пиксель покрывает
+/// несколько текселей с разными нормалями → GGX-блик будет кипеть.
+/// Компенсируем увеличением roughness.
+fn specular_aa_boost(tbn: mat3x3<f32>, uv: vec2<f32>) -> f32 {
+    let texel = vec2<f32>(textureDimensions(normal_tex));
+    let du = 1.0 / texel;
+    var sum = vec3<f32>(0.0);
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let o = vec2<f32>(f32(x), f32(y)) * du;
+            let n_sample = textureSample(normal_tex, mat_samp, uv + o).xyz * 2.0 - 1.0;
+            let n_scaled = vec3<f32>(n_sample.xy * mat.params.z, n_sample.z);
+            sum += normalize(tbn * n_scaled);
+        }
+    }
+    let avg_len = clamp(length(sum) / 9.0, 0.0, 1.0);
+    return 1.0 - avg_len;
 }
 
 struct FsOut {
@@ -181,8 +211,17 @@ fn fs_main(
     let tbn = cotangent_frame(n_world, in.world_pos, in.uv);
     let n_mapped = normalize(tbn * n_scaled);
 
-    let metallic  = clamp(mat.params.x * mr_sample.b, 0.0, 1.0);
-    let roughness = clamp(mat.params.y * mr_sample.g, 0.04, 1.0);
+    let metallic       = clamp(mat.params.x * mr_sample.b, 0.0, 1.0);
+    let roughness_base = clamp(mat.params.y * mr_sample.g, 0.04, 1.0);
+
+    // Specular AA: на металлах с шумной нормал-мапой увеличиваем
+    // roughness, чтобы блик не кипел. Ограничиваем boost в [0, 0.5]:
+    // даже полностью шумная нормаль даёт roughness максимум 1.0.
+    // Для металлов это критично (у диэлектриков блики тусклые, шум
+    // незаметен). Поэтому считаем boost только при metallic > 0.1 —
+    // экономим 8 texture-samples для обычных материалов.
+    let aa_boost = select(0.0, specular_aa_boost(tbn, in.uv), metallic > 0.1);
+    let roughness = clamp(roughness_base + aa_boost * 0.5, 0.04, 1.0);
 
     let emissive = emissive_sample.rgb * mat.emissive.rgb;
 

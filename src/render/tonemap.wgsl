@@ -1,8 +1,13 @@
 // Tonemap + post-processing финал.
 //
+// ИЗМЕНЕНО (sRGB pipeline fix): LDR-таргет теперь non-sRGB
+// (`Rgba8Unorm`). Значит, GPU больше не кодирует linear → sRGB за нас.
+// Кодируем вручную в `srgb_encode` перед записью. Это убирает двойное
+// sRGB-кодирование UI/egui (egui_wgpu ругался на sRGB surface).
+//
 // ИЗМЕНЕНО (Спринт 1.1 + 1.2):
-//   * добавлен выбор тонального маппера (AgX / ACES / Reinhard / Uncharted2 / None);
-//   * добавлен color grading: temperature, tint, contrast, saturation,
+//   * выбор тонального маппера (AgX / ACES / Reinhard / Uncharted2 / None);
+//   * color grading: temperature, tint, contrast, saturation,
 //     ASC CDL (slope/gain + offset/lift + power/gamma);
 //   * exposure_bias (множитель к exposure).
 
@@ -51,6 +56,19 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     out.clip = vec4<f32>(positions[idx], 0.0, 1.0);
     out.uv = uvs[idx];
     return out;
+}
+
+// ============================================================
+// sRGB encode (linear → sRGB)
+// ============================================================
+// LDR-таргет non-sRGB, поэтому кодируем вручную. Формула из
+// IEC 61966-2-1: piecewise, линейный сегмент около нуля,
+// gamma 2.4 выше cutoff.
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = 0.0031308;
+    let below = c * 12.92;
+    let above = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(above, below, c < vec3<f32>(cutoff));
 }
 
 // ============================================================
@@ -277,5 +295,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_rgb = clamp(out_rgb + g * grain * 0.08 * grain_mod, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
-    return vec4<f32>(clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    // --- sRGB encode (LDR-таргет non-sRGB) ---
+    let c = clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(srgb_encode(c), 1.0);
 }

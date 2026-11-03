@@ -16,4 +16,15 @@
     pellets: 1,
     range: 500.0,
     ammo_pickup: 10,
+
+    // === VIEWMODEL ===
+    mesh: Some("weapon_sniper"),
+    material: Some("weapon_gunmetal"),
+    scale: 0.9,
+    hip_pos: (0.24, -0.22, -0.55),
+    ads_pos: (0.0, -0.075, -0.30),
+    hip_rot: (0.0, 0.0, 0.0),
+    ads_rot: (0.0, 0.0, 0.0),
+    muzzle_pos: (0.0, 0.0, -0.65),
+    kick_back: 0.10,
 )

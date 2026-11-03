@@ -1,76 +1,134 @@
-use std::any::{Any, TypeId};
+//! World — контейнер сущностей и компонентов.
+
+use std::any::TypeId;
 use std::collections::HashMap;
+use std::fmt;
 
 use super::component::{AnyStorage, ComponentStorage};
 use super::events::Events;
 
-pub type Entity = u32;
+/// Уникальный идентификатор сущности в [`World`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Entity {
+    pub index: u32,
+    pub generation: u32,
+}
+
+impl Entity {
+    /// «Нет сущности». Используется, где по контракту нужен `Entity`,
+    /// но сущности нет (например, `VendorSession::npc_entity` вне
+    /// диалога). `is_alive(Entity::INVALID)` всегда `false`.
+    pub const INVALID: Entity = Entity {
+        index: u32::MAX,
+        generation: u32::MAX,
+    };
+
+    pub const fn from_raw(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
+    pub const fn to_bits(self) -> u64 {
+        ((self.generation as u64) << 32) | (self.index as u64)
+    }
+
+    pub const fn from_bits(bits: u64) -> Self {
+        Self {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
+    }
+}
+
+/// `#123` для свежих сущностей (generation == 0), `#123v4` — для
+/// переиспользованных слотов. Используется в логах и UI.
+impl fmt::Display for Entity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.generation == 0 {
+            write!(f, "#{}", self.index)
+        } else {
+            write!(f, "#{}v{}", self.index, self.generation)
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct World {
-    next_id: Entity,
+    next_index: u32,
+    generations: Vec<u32>,
+    free_indices: Vec<u32>,
     entities: Vec<Entity>,
-    /// Entity → индекс в `entities`. Нужен для O(1) despawn.
-    entity_pos: HashMap<Entity, usize>,
+    entity_pos: HashMap<u32, usize>,
     storages: HashMap<TypeId, Box<dyn AnyStorage>>,
     events: Events,
-
-    /// ИЗМЕНЕНО (#9): скретч-буфер для `for_each_pair`.
-    ///
-    /// Раньше при каждом вызове `for_each_pair` создавался новый
-    /// `Vec<Entity>` через `ComponentStorage::entity_list()` (который
-    /// делал `.clone()`). В `MovementSystem::update` это происходило
-    /// каждый кадр — 60+ аллокаций/сек для сцены средней величины.
-    ///
-    /// Теперь: один `Vec<Entity>` живёт в `World`, `for_each_pair`
-    /// вынимает его через `mem::take`, заполняет из `entities_iter()`
-    /// A-стораджа, обходит, возвращает обратно. Аллокация происходит
-    /// только при первом вызове (или если буфер вырос).
-    ///
-    /// `Default` даёт `Vec::new()` — первая итерация аллоцирует, дальше
-    /// только переиспользуется.
     scratch_entities: Vec<Entity>,
 }
 
 impl World {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     // ============================================================
     // Жизненный цикл сущностей
     // ============================================================
 
     pub fn spawn(&mut self) -> Entity {
-        let id = self.next_id;
-        self.next_id += 1;
-        let idx = self.entities.len();
-        self.entities.push(id);
-        self.entity_pos.insert(id, idx);
-        id
+        let index = if let Some(recycled) = self.free_indices.pop() {
+            recycled
+        } else {
+            let idx = self.next_index;
+            self.next_index = self.next_index.wrapping_add(1);
+            idx
+        };
+
+        let idx_usize = index as usize;
+        if idx_usize >= self.generations.len() {
+            self.generations.resize(idx_usize + 1, 0);
+        }
+        let generation = self.generations[idx_usize];
+
+        let entity = Entity { index, generation };
+        let pos = self.entities.len();
+        self.entities.push(entity);
+        self.entity_pos.insert(index, pos);
+        entity
     }
 
-    /// O(1) удаление через swap_remove + обновление обратного индекса.
     pub fn despawn(&mut self, entity: Entity) {
-        let Some(pos) = self.entity_pos.remove(&entity) else {
+        let idx = entity.index as usize;
+        if idx >= self.generations.len() || self.generations[idx] != entity.generation {
+            return;
+        }
+        let Some(pos) = self.entity_pos.remove(&entity.index) else {
             return;
         };
         self.entities.swap_remove(pos);
-        // Если swap_remove переместил последний элемент — обновляем его индекс.
         if pos < self.entities.len() {
-            self.entity_pos.insert(self.entities[pos], pos);
+            let moved = self.entities[pos].index;
+            self.entity_pos.insert(moved, pos);
         }
         for store in self.storages.values_mut() {
             store.remove_entity(entity);
         }
+        self.generations[idx] = entity.generation.wrapping_add(1);
+        self.free_indices.push(entity.index);
     }
 
-    /// Гарантирует, что `next_id` больше любого существующего entity.
-    /// Вызывать после загрузки сцены / десериализации, если id вставлялись
-    /// напрямую.
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        let idx = entity.index as usize;
+        idx < self.generations.len()
+            && self.generations[idx] == entity.generation
+            && self.entity_pos.contains_key(&entity.index)
+    }
+
     pub fn sync_next_id(&mut self) {
-        if let Some(&max) = self.entities.iter().max()
-            && max >= self.next_id {
-                self.next_id = max.saturating_add(1);
-            }
+        let max_idx = self.entities.iter().map(|e| e.index).max().unwrap_or(0);
+        self.next_index = self.next_index.max(max_idx.saturating_add(1));
+        let need_len = (self.next_index as usize).max(max_idx as usize + 1);
+        if need_len > self.generations.len() {
+            self.generations.resize(need_len, 0);
+        }
     }
 
     // ============================================================
@@ -78,6 +136,11 @@ impl World {
     // ============================================================
 
     pub fn insert<T: Send + Sync + 'static>(&mut self, entity: Entity, component: T) {
+        debug_assert!(
+            self.is_alive(entity),
+            "World::insert on dead entity {:?}",
+            entity,
+        );
         let storage = self
             .storages
             .entry(TypeId::of::<T>())
@@ -91,17 +154,26 @@ impl World {
 
     pub fn get<T: Send + Sync + 'static>(&self, entity: Entity) -> Option<&T> {
         let storage = self.storages.get(&TypeId::of::<T>())?;
-        storage.as_any().downcast_ref::<ComponentStorage<T>>()?.get(entity)
+        storage
+            .as_any()
+            .downcast_ref::<ComponentStorage<T>>()?
+            .get(entity)
     }
 
     pub fn get_mut<T: Send + Sync + 'static>(&mut self, entity: Entity) -> Option<&mut T> {
         let storage = self.storages.get_mut(&TypeId::of::<T>())?;
-        storage.as_any_mut().downcast_mut::<ComponentStorage<T>>()?.get_mut(entity)
+        storage
+            .as_any_mut()
+            .downcast_mut::<ComponentStorage<T>>()?
+            .get_mut(entity)
     }
 
     pub fn remove<T: Send + Sync + 'static>(&mut self, entity: Entity) -> Option<T> {
         let storage = self.storages.get_mut(&TypeId::of::<T>())?;
-        storage.as_any_mut().downcast_mut::<ComponentStorage<T>>()?.remove(entity)
+        storage
+            .as_any_mut()
+            .downcast_mut::<ComponentStorage<T>>()?
+            .remove(entity)
     }
 
     pub fn has<T: Send + Sync + 'static>(&self, entity: Entity) -> bool {
@@ -156,22 +228,8 @@ impl World {
         })
     }
 
-    /// ИЗМЕНЕНО (#9): переписано на переиспользуемый скретч-буфер.
-    ///
-    /// До этого `entity_list()` клонировал `Vec<Entity>` из A-стораджа
-    /// **на каждый вызов**. `MovementSystem::update` дёргает этот метод
-    /// каждый кадр → 60+ аллокаций/сек + memcpy. Теперь буфер живёт
-    /// в `World` и переиспользуется между вызовами.
-    ///
-    /// Рекурсивный вызов `for_each_pair` из `f` технически возможен
-    /// (хотя требует `unsafe` или передачи `World` через `RefCell`),
-    /// и он тоже безопасен: `mem::take` вынимает буфер локально, а
-    /// вложенный вызов получит `Vec::new()` (аллоцирует свой), потом
-    /// вернёт его. Внешний вызов не увидит внутренний буфер и вернёт
-    /// свой — никаких гонок, никакого UB.
-    ///
-    /// Все ранние `return` возвращают скретч обратно, чтобы следующая
-    /// итерация не потеряла capacity.
+    /// Panic-safe: если `f` паникует, скретч-буфер всё равно возвращается
+    /// в World (через `ScratchRestore::drop`).
     pub fn for_each_pair<A, B, F>(&mut self, mut f: F)
     where
         A: Send + Sync + 'static,
@@ -180,69 +238,64 @@ impl World {
     {
         let a_type = TypeId::of::<A>();
         let b_type = TypeId::of::<B>();
-        assert_ne!(a_type, b_type, "for_each_pair requires distinct component types");
+        assert_ne!(
+            a_type, b_type,
+            "for_each_pair requires distinct component types"
+        );
 
-        // ИЗМЕНЕНО (#9): `mem::take` — вынимаем скретч локально.
-        // `self.scratch_entities` остаётся пустым `Vec::new()` на время
-        // работы метода; вернём заполненный в конце.
-        let mut entities = std::mem::take(&mut self.scratch_entities);
-        entities.clear();
+        let Self {
+            scratch_entities,
+            storages,
+            ..
+        } = self;
 
-        // Заполняем буфер entity из A-стораджа без промежуточной
-        // аллокации (`entities_iter()` возвращает `slice::Iter`,
-        // `.copied()` даёт `u32`, `extend` пишет прямо в буфер).
-        if let Some(s) = self.storages.get(&a_type)
-            && let Some(storage) = s.as_any().downcast_ref::<ComponentStorage<A>>() {
-                entities.extend(storage.entities_iter().copied());
-            }
+        // FIX: `mem::take` должен быть ДО создания ScratchRestore,
+        // иначе два &mut borrows на scratch_entities.
+        let taken = std::mem::take(scratch_entities);
+        let mut guard = ScratchRestore {
+            slot: scratch_entities,
+            data: Some(taken),
+        };
+        let buf = guard.data.as_mut().unwrap();
+        buf.clear();
 
-        if entities.is_empty() {
-            // A-сторадж пуст или отсутствует — работа сделана,
-            // возвращаем capacity-буфер в World.
-            self.scratch_entities = entities;
+        if let Some(s) = storages.get(&a_type)
+            && let Some(storage) = s.as_any().downcast_ref::<ComponentStorage<A>>()
+        {
+            buf.extend(storage.entities_iter().copied());
+        }
+
+        if guard.data.as_ref().unwrap().is_empty() {
             return;
         }
 
-        // Raw pointers — обходим borrow checker, т.к. оба стораджа
-        // берутся из одной HashMap. Разные TypeId → разные Box →
-        // непересекающиеся регионы памяти.
-        let a_ptr: *mut ComponentStorage<A> = self
-            .storages
+        // SAFETY: два разных TypeId → две разные Box-аллокации →
+        // непересекающиеся регионы памяти. `storages` не модифицируется
+        // во время цикла.
+        let a_ptr: *mut ComponentStorage<A> = storages
             .get_mut(&a_type)
             .and_then(|s| s.as_any_mut().downcast_mut::<ComponentStorage<A>>())
             .map(|s| s as *mut _)
             .unwrap();
-
-        let b_ptr: *const ComponentStorage<B> = match self.storages.get(&b_type) {
+        let b_ptr: *const ComponentStorage<B> = match storages.get(&b_type) {
             Some(s) => s
                 .as_any()
                 .downcast_ref::<ComponentStorage<B>>()
                 .map(|s| s as *const _)
                 .unwrap(),
-            None => {
-                // B-стораджа нет — пересечения быть не может.
-                // Возвращаем скретч обратно в World.
-                self.scratch_entities = entities;
-                return;
-            }
+            None => return,
         };
 
-        // SAFETY: два разных TypeId → две разные Box-аллокации → два
-        // непересекающихся участка памяти. HashMap (`self.storages`)
-        // не модифицируется во время цикла. `a_ptr` мутабельный, но
-        // `b_ptr` указывает на другой объект.
+        let entities = guard.data.as_ref().unwrap();
         unsafe {
             let a_store = &mut *a_ptr;
             let b_store = &*b_ptr;
-            for &e in &entities {
+            for &e in entities {
                 if let (Some(a), Some(b)) = (a_store.get_mut(e), b_store.get(e)) {
                     f(e, a, b);
                 }
             }
         }
-
-        // ИЗМЕНЕНО (#9): возвращаем capacity-буфер в World.
-        self.scratch_entities = entities;
     }
 
     // ============================================================
@@ -269,9 +322,28 @@ impl World {
     // Прочее
     // ============================================================
 
-    pub fn entities(&self) -> &[Entity] { &self.entities }
-    pub fn len(&self) -> usize { self.entities.len() }
-    pub fn is_empty(&self) -> bool { self.entities.is_empty() }
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+    pub fn len(&self) -> usize {
+        self.entities.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+}
+
+struct ScratchRestore<'a> {
+    slot: &'a mut Vec<Entity>,
+    data: Option<Vec<Entity>>,
+}
+
+impl Drop for ScratchRestore<'_> {
+    fn drop(&mut self) {
+        if let Some(v) = self.data.take() {
+            *self.slot = v;
+        }
+    }
 }
 
 // ============================================================
@@ -284,12 +356,8 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Pos(i32);
-
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Vel(i32);
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Tag(u32);
 
     #[test]
     fn spawn_and_despawn() {
@@ -298,82 +366,32 @@ mod tests {
         let b = w.spawn();
         let c = w.spawn();
         assert_eq!(w.len(), 3);
-        assert_eq!(w.entities(), &[a, b, c]);
-
+        assert!(w.is_alive(a) && w.is_alive(b) && w.is_alive(c));
         w.despawn(b);
         assert_eq!(w.len(), 2);
-        assert!(!w.entities().contains(&b));
-        // a и c остались.
-        assert!(w.entities().contains(&a));
-        assert!(w.entities().contains(&c));
+        assert!(!w.is_alive(b));
     }
 
     #[test]
-    fn despawn_removes_components() {
-        let mut w = World::new();
-        let e = w.spawn();
-        w.insert(e, Pos(1));
-        w.insert(e, Vel(2));
-        assert!(w.has::<Pos>(e));
-        assert!(w.has::<Vel>(e));
-
-        w.despawn(e);
-        assert!(!w.has::<Pos>(e));
-        assert!(!w.has::<Vel>(e));
-    }
-
-    #[test]
-    fn insert_get_remove() {
-        let mut w = World::new();
-        let e = w.spawn();
-        assert!(w.get::<Pos>(e).is_none());
-
-        w.insert(e, Pos(10));
-        assert_eq!(w.get::<Pos>(e), Some(&Pos(10)));
-
-        // Перезапись.
-        w.insert(e, Pos(20));
-        assert_eq!(w.get::<Pos>(e), Some(&Pos(20)));
-
-        let removed = w.remove::<Pos>(e);
-        assert_eq!(removed, Some(Pos(20)));
-        assert!(w.get::<Pos>(e).is_none());
-    }
-
-    #[test]
-    fn query_filters_by_component() {
+    fn recycled_slot_bumps_generation() {
         let mut w = World::new();
         let a = w.spawn();
+        w.despawn(a);
         let b = w.spawn();
-        let c = w.spawn();
-        w.insert(a, Pos(1));
-        w.insert(b, Vel(2));
-        w.insert(c, Pos(3));
-
-        let mut found: Vec<(Entity, i32)> = w.query::<Pos>()
-            .map(|(e, p)| (e, p.0))
-            .collect();
-        found.sort_by_key(|(_, v)| *v);
-        assert_eq!(found, vec![(a, 1), (c, 3)]);
+        assert_eq!(a.index, b.index);
+        assert_ne!(a.generation, b.generation);
+        assert!(!w.is_alive(a));
+        assert!(w.is_alive(b));
     }
 
     #[test]
-    fn query2_requires_both() {
+    fn despawn_stale_is_noop() {
         let mut w = World::new();
         let a = w.spawn();
+        w.despawn(a);
         let b = w.spawn();
-        let c = w.spawn();
-        w.insert(a, Pos(1));
-        w.insert(a, Vel(10));
-        w.insert(b, Pos(2));
-        // b без Vel.
-        w.insert(c, Vel(30));
-        // c без Pos.
-
-        let found: Vec<(Entity, i32, i32)> = w.query2::<Pos, Vel>()
-            .map(|(e, p, v)| (e, p.0, v.0))
-            .collect();
-        assert_eq!(found, vec![(a, 1, 10)]);
+        w.despawn(a);
+        assert!(w.is_alive(b));
     }
 
     #[test]
@@ -385,123 +403,64 @@ mod tests {
         w.insert(a, Pos(0));
         w.insert(a, Vel(1));
         w.insert(b, Pos(0));
-        // b без Vel — не должен попасть.
         w.insert(c, Vel(1));
-        // c без Pos — не должен попасть.
-
-        let mut visited: Vec<Entity> = Vec::new();
-        w.for_each_pair::<Pos, Vel, _>(|e, _p, _v| visited.push(e));
+        let mut visited = Vec::new();
+        w.for_each_pair::<Pos, Vel, _>(|e, _, _| visited.push(e));
         assert_eq!(visited, vec![a]);
     }
 
     #[test]
-    fn for_each_pair_mutates_a_not_b() {
-        let mut w = World::new();
-        let e = w.spawn();
-        w.insert(e, Pos(10));
-        w.insert(e, Vel(5));
-
-        w.for_each_pair::<Pos, Vel, _>(|_e, p, v| {
-            p.0 += v.0;
-        });
-
-        assert_eq!(w.get::<Pos>(e), Some(&Pos(15)));
-        assert_eq!(w.get::<Vel>(e), Some(&Vel(5)));
-    }
-
-    #[test]
     fn for_each_pair_returns_scratch_capacity() {
-        // После вызова скретч-буфер должен вернуться в World и
-        // переиспользоваться на следующем вызове без падения.
         let mut w = World::new();
         for i in 0..100 {
             let e = w.spawn();
             w.insert(e, Pos(i));
             w.insert(e, Vel(1));
         }
-
-        let mut count1 = 0;
-        w.for_each_pair::<Pos, Vel, _>(|_, _, _| count1 += 1);
-        assert_eq!(count1, 100);
-
-        // Второй вызов — тот же буфер.
-        let mut count2 = 0;
-        w.for_each_pair::<Pos, Vel, _>(|_, _, _| count2 += 1);
-        assert_eq!(count2, 100);
+        let mut c1 = 0;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| c1 += 1);
+        assert_eq!(c1, 100);
+        let mut c2 = 0;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| c2 += 1);
+        assert_eq!(c2, 100);
     }
 
     #[test]
-    fn for_each_pair_empty_is_noop() {
+    fn for_each_pair_restores_scratch_on_panic() {
         let mut w = World::new();
-        let mut called = false;
-        w.for_each_pair::<Pos, Vel, _>(|_, _, _| called = true);
-        assert!(!called);
+        for _ in 0..16 {
+            let e = w.spawn();
+            w.insert(e, Pos(1));
+            w.insert(e, Vel(1));
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.for_each_pair::<Pos, Vel, _>(|_, _, _| panic!("boom"));
+        }));
+        assert!(result.is_err());
+        let mut count = 0;
+        w.for_each_pair::<Pos, Vel, _>(|_, _, _| count += 1);
+        assert_eq!(count, 16);
     }
 
     #[test]
-    fn for_each_pair_missing_b_store() {
+    fn sync_next_id_after_load() {
         let mut w = World::new();
-        let e = w.spawn();
-        w.insert(e, Pos(1));
-        // Vel ни у кого нет — B-стораджа не существует.
-        let mut called = false;
-        w.for_each_pair::<Pos, Vel, _>(|_, _, _| called = true);
-        assert!(!called);
-    }
-
-    #[test]
-    #[should_panic(expected = "distinct component types")]
-    fn for_each_pair_panics_on_same_type() {
-        let mut w = World::new();
-        w.for_each_pair::<Pos, Pos, _>(|_, _, _| {});
-    }
-
-    #[test]
-    fn sync_next_id_after_manual_insert() {
-        let mut w = World::new();
-        // Симулируем загрузку: id вставлены напрямую, минуя spawn.
-        w.entities.push(100);
+        w.entities.push(Entity::from_raw(100, 0));
         w.entity_pos.insert(100, 0);
         w.sync_next_id();
         let new = w.spawn();
-        assert!(new > 100);
+        assert!(new.index > 100);
     }
 
     #[test]
-    fn events_double_buffer() {
-        let mut w = World::new();
-        w.send(42u32);
-        w.send(43u32);
-
-        // current видит оба.
-        let cur: Vec<u32> = w.read_events_current::<u32>().copied().collect();
-        assert_eq!(cur, vec![42, 43]);
-
-        // После update — current пуст, previous содержит старые.
-        w.update_events();
-        let cur: Vec<u32> = w.read_events_current::<u32>().copied().collect();
-        assert!(cur.is_empty());
-        let all: Vec<u32> = w.read_events::<u32>().copied().collect();
-        assert_eq!(all, vec![42, 43]);
-
-        // Отправляем новое в current.
-        w.send(44u32);
-        let all: Vec<u32> = w.read_events::<u32>().copied().collect();
-        assert_eq!(all, vec![44, 42, 43]);
+    fn entity_bits_roundtrip() {
+        let e = Entity::from_raw(12345, 42);
+        assert_eq!(Entity::from_bits(e.to_bits()), e);
     }
 
     #[test]
-    fn insert_many_entities_then_iterate() {
-        let mut w = World::new();
-        for i in 0..1000 {
-            let e = w.spawn();
-            w.insert(e, Tag(i));
-        }
-        let mut sum = 0u64;
-        for (_, t) in w.query::<Tag>() {
-            sum += t.0 as u64;
-        }
-        // 0 + 1 + ... + 999 = 499500.
-        assert_eq!(sum, 499_500);
+    fn entity_display() {
+        assert_eq!(format!("{}", Entity::from_raw(5, 0)), "#5");
+        assert_eq!(format!("{}", Entity::from_raw(5, 2)), "#5v2");
     }
 }

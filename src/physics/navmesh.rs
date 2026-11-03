@@ -55,6 +55,7 @@ pub struct Navmesh {
     cell_size: f32,
     grid_w: u32,
     grid_h: u32,
+    #[allow(dead_code)]
     step_height: f32,
     cells: Vec<Cell>,
 }

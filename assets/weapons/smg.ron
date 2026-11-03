@@ -16,4 +16,15 @@
     pellets: 1,
     range: 60.0,
     ammo_pickup: 60,
+
+    // === VIEWMODEL ===
+    mesh: Some("weapon_smg"),
+    material: Some("weapon_gunmetal"),
+    scale: 1.0,
+    hip_pos: (0.24, -0.22, -0.50),
+    ads_pos: (0.0, -0.11, -0.32),
+    hip_rot: (0.0, 0.0, 0.0),
+    ads_rot: (0.0, 0.0, 0.0),
+    muzzle_pos: (0.0, 0.0, -0.55),
+    kick_back: 0.03,
 )

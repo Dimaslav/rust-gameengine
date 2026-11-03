@@ -43,7 +43,12 @@ impl DialogGraph {
     /// Загружает все `.ron` из папки с учётом языка.
     ///
     /// Приоритет: `<name>.<lang>.ron` > `<name>.ron`.
-    /// Если английского файла нет — используется базовый (русский).
+    /// Если файла для `lang` нет — используется базовый (без суффикса).
+    ///
+    /// ИЗМЕНЕНО: pass 2 (fallback) теперь **пропускает** файлы с чужим
+    /// `.<2 ascii-буквы>.ron` суффиксом. Раньше для `lang="ru"` файл
+    /// `blacksmith.en.ron` шёл раньше `blacksmith.ron` по алфавиту,
+    /// попадал в `loaded_ids`, и русский перевод молча отбрасывался.
     pub fn load_from_dir(
         dir: impl AsRef<Path>,
         lang: &str,
@@ -62,37 +67,59 @@ impl DialogGraph {
             .collect();
         files.sort();
 
-        // Сначала грузим локализованные версии (приоритет)
+        // Pass 1: локализованные версии (приоритет)
         let suffix = format!(".{}.ron", lang);
         let mut loaded_ids: HashSet<String> = HashSet::new();
 
         for path in &files {
             let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if filename.ends_with(&suffix) {
-                match Self::load_from_file(path) {
-                    Ok(g) => {
-                        log::info!("dialog loaded: '{}' [{}] ({} nodes)", g.id, lang, g.nodes.len());
-                        loaded_ids.insert(g.id.clone());
-                        out.insert(g.id.clone(), g);
-                    }
-                    Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
+            if !filename.ends_with(&suffix) {
+                continue;
+            }
+            match Self::load_from_file(path) {
+                Ok(g) => {
+                    log::info!(
+                        "dialog loaded: '{}' [{}] ({} nodes)",
+                        g.id, lang, g.nodes.len()
+                    );
+                    loaded_ids.insert(g.id.clone());
+                    out.insert(g.id.clone(), g);
                 }
+                Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
             }
         }
 
-        // Потом грузим базовые (fallback)
+        // Pass 2: fallback — только файлы БЕЗ языкового суффикса.
         for path in &files {
             let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !filename.ends_with(&suffix) {
-                match Self::load_from_file(path) {
-                    Ok(g) => {
-                        if !loaded_ids.contains(&g.id) {
-                            log::info!("dialog loaded: '{}' [fallback] ({} nodes)", g.id, g.nodes.len());
-                            out.insert(g.id.clone(), g);
-                        }
+            if filename.ends_with(&suffix) {
+                continue;
+            }
+            // Пропускаем файлы с чужим `.XX.ron` суффиксом (XX — 2 ascii-буквы).
+            // Иначе для lang="ru" английский blacksmith.en.ron "выиграет"
+            // алфавитную сортировку и русский blacksmith.ron будет отброшен.
+            let is_foreign_localized = filename
+                .strip_suffix(".ron")
+                .and_then(|stem| stem.rsplit_once('.'))
+                .map(|(_, code)| {
+                    code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic())
+                })
+                .unwrap_or(false);
+            if is_foreign_localized {
+                continue;
+            }
+
+            match Self::load_from_file(path) {
+                Ok(g) => {
+                    if !loaded_ids.contains(&g.id) {
+                        log::info!(
+                            "dialog loaded: '{}' [fallback] ({} nodes)",
+                            g.id, g.nodes.len()
+                        );
+                        out.insert(g.id.clone(), g);
                     }
-                    Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
                 }
+                Err(e) => log::warn!("dialog load failed {}: {:#}", path.display(), e),
             }
         }
 

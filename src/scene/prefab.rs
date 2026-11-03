@@ -1,9 +1,10 @@
 //! Префабы: сохранение группы entity в файл `.prefab.ron`,
 //! спавн инстансов из файла.
 //!
-//! `Parent` внутри префаба кодируется **индексом в массиве**, а не real
-//! entity id. При `instantiate_prefab` индексы конвертируются в новые
-//! entity id второго прохода.
+//! `Parent` внутри префаба кодируется **индексом в массиве**
+//! (в виде `Entity { index: i, generation: 0 }`), а не real entity id.
+//! При `instantiate_prefab` индексы конвертируются в новые entity id
+//! второго прохода.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,8 @@ pub struct PrefabFile {
 /// Построить префаб из выделенных entity.
 ///
 /// `Parent` для ссылок внутри выделения перекодируется в индекс в массиве
-/// (0..N-1). Ссылки наружу — отбрасываются (`None`).
+/// (`Entity { index: i, generation: 0 }`). Ссылки наружу — отбрасываются
+/// (`None`).
 pub fn prefab_from_selection(
     world: &World,
     selected: &[Entity],
@@ -37,10 +39,10 @@ pub fn prefab_from_selection(
     sorted.sort();
     sorted.dedup();
 
-    let id_to_idx: HashMap<Entity, u32> = sorted
+    let id_to_idx: HashMap<Entity, Entity> = sorted
         .iter()
         .enumerate()
-        .map(|(i, &e)| (e, i as u32))
+        .map(|(i, &e)| (e, Entity::from_raw(i as u32, 0)))
         .collect();
 
     let mut entities: Vec<EntitySnapshot> = Vec::with_capacity(sorted.len());
@@ -48,8 +50,6 @@ pub fn prefab_from_selection(
         let Some(mut snap) = snapshot_entity(world, e) else {
             continue;
         };
-        // Перекодируем Parent: real entity → index в префабе.
-        // Ссылки наружу префаба → None.
         if let Some(p) = snap.parent {
             snap.parent = id_to_idx.get(&p).copied();
         }
@@ -59,7 +59,6 @@ pub fn prefab_from_selection(
     PrefabFile { name, entities }
 }
 
-/// Сохранить префаб в файл.
 pub fn save_prefab_to_file(prefab: &PrefabFile, path: impl AsRef<Path>) -> Result<()> {
     let text = ron::ser::to_string_pretty(prefab, ron::ser::PrettyConfig::default())
         .context("serialize prefab")?;
@@ -72,7 +71,6 @@ pub fn save_prefab_to_file(prefab: &PrefabFile, path: impl AsRef<Path>) -> Resul
     Ok(())
 }
 
-/// Загрузить префаб из файла.
 pub fn load_prefab_from_file(path: impl AsRef<Path>) -> Result<PrefabFile> {
     let text = std::fs::read_to_string(path.as_ref())
         .with_context(|| format!("read prefab {}", path.as_ref().display()))?;
@@ -80,11 +78,6 @@ pub fn load_prefab_from_file(path: impl AsRef<Path>) -> Result<PrefabFile> {
 }
 
 /// Спавнит все entity из префаба. Возвращает список новых entity.
-///
-/// Смещение `offset` применяется **только к корневым** entity префаба
-/// (у которых `parent == None` или указывает за пределы префаба).
-/// Иначе дочерние entity получили бы offset дважды: один раз через
-/// свой локальный Transform, второй — через родителя.
 pub fn instantiate_prefab(
     world: &mut World,
     prefab: &PrefabFile,
@@ -92,14 +85,14 @@ pub fn instantiate_prefab(
 ) -> Vec<Entity> {
     let n = prefab.entities.len() as u32;
 
-    let is_root = |parent: Option<u32>| -> bool {
+    let is_root = |parent: Option<Entity>| -> bool {
         match parent {
             None => true,
-            Some(p) => p >= n,
+            Some(p) => p.index >= n,
         }
     };
 
-    let mut idx_to_entity: HashMap<u32, Entity> = HashMap::new();
+    let mut idx_to_entity: HashMap<Entity, Entity> = HashMap::new();
     let mut new_entities: Vec<Entity> = Vec::with_capacity(prefab.entities.len());
 
     // Первый проход: spawn всех без Parent.
@@ -108,27 +101,29 @@ pub fn instantiate_prefab(
         s.parent = None;
 
         if is_root(snap.parent)
-            && let Some(ref mut t) = s.transform {
-                t.position[0] += offset.x;
-                t.position[1] += offset.y;
-                t.position[2] += offset.z;
-            }
+            && let Some(ref mut t) = s.transform
+        {
+            t.position[0] += offset.x;
+            t.position[1] += offset.y;
+            t.position[2] += offset.z;
+        }
 
         let e = spawn_snapshot(world, s);
-        idx_to_entity.insert(idx as u32, e);
+        idx_to_entity.insert(Entity::from_raw(idx as u32, 0), e);
         new_entities.push(e);
     }
 
     // Второй проход: восстановить Parent через маппинг индексов.
     for (idx, snap) in prefab.entities.iter().enumerate() {
-        let Some(old_parent_idx) = snap.parent else { continue };
-        // Ссылки наружу префаба отбрасываем.
-        if old_parent_idx >= n {
+        let Some(old_parent) = snap.parent else {
+            continue;
+        };
+        if old_parent.index >= n {
             continue;
         }
         let (Some(&new_parent), Some(&new_self)) = (
-            idx_to_entity.get(&old_parent_idx),
-            idx_to_entity.get(&(idx as u32)),
+            idx_to_entity.get(&old_parent),
+            idx_to_entity.get(&Entity::from_raw(idx as u32, 0)),
         ) else {
             continue;
         };
@@ -138,7 +133,6 @@ pub fn instantiate_prefab(
     new_entities
 }
 
-/// Список файлов `*.prefab.ron` в папке. Сортирован по имени.
 pub fn list_prefabs(dir: impl AsRef<Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir.as_ref()) else {
@@ -160,7 +154,6 @@ pub fn list_prefabs(dir: impl AsRef<Path>) -> Vec<PathBuf> {
     out
 }
 
-/// Отображаемое имя файла префаба (без `.prefab.ron`).
 pub fn prefab_display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())

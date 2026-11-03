@@ -1,4 +1,8 @@
 //! UI рендеринг диалогового окна (с поддержкой условий и локализации).
+//!
+//! ИЗМЕНЕНО: высота панели теперь зависит от числа доступных опций.
+//! Раньше было жёстко 250 px, а у `elder.en.ron` в `root` бывает 7–8
+//! опций → кнопки уезжали за панель. Теперь высота = min(нужно, sh-100).
 
 use crate::game::dialogs::{DialogContext, DialogSession};
 use crate::t;
@@ -23,8 +27,15 @@ impl DialogUi {
         let sw = ui.screen_w();
         let sh = ui.screen_h();
 
+        // Опции считаем заранее — от них зависит высота панели.
+        let options = session.available_options(ctx);
+        let opt_count = options.len().max(1);
+
         let panel_w = (sw * 0.75).min(920.0);
-        let panel_h = 250.0;
+
+        // 92 (шапка+текст) + опции + 30 (подсказка) + отступ.
+        let needed = 92.0 + opt_count as f32 * 32.0 + 30.0;
+        let panel_h = needed.clamp(220.0, sh - 100.0);
         let panel_x = (sw - panel_w) * 0.5;
         let panel_y = sh - panel_h - 40.0;
 
@@ -44,7 +55,7 @@ impl DialogUi {
         ui.text(panel_x + 20.0, panel_y + 14.0, &node.speaker, 20.0,
             [1.0, 0.9, 0.5, 1.0]);
 
-        // Кнопка закрытия (X) справа сверху.
+        // Кнопка закрытия.
         let close_size = 26.0;
         let close_x = panel_x + panel_w - close_size - 10.0;
         let close_y = panel_y + 10.0;
@@ -60,16 +71,21 @@ impl DialogUi {
         ui.text(panel_x + 20.0, panel_y + 60.0, &node.text, 15.0,
             [1.0, 1.0, 1.0, 1.0]);
 
-        // Опции (фильтрованные по условиям).
-        let options = session.available_options(ctx);
+        // Опции.
         let mut y = panel_y + 92.0;
         let mut clicked: Option<usize> = None;
-
         let opt_h = 28.0;
+        let list_bottom = panel_y + panel_h - 30.0;
+
         for (display_i, (original_idx, opt)) in options.iter().enumerate() {
+            // Защита от overflow: если не влезает, дальше не рисуем.
+            // При большом числе опций это значит, что часть не видна —
+            // но не «уезжает за панель» и не ломает клики по панели.
+            if y + opt_h > list_bottom {
+                break;
+            }
             let btn_x = panel_x + 20.0;
             let btn_w = panel_w - 40.0;
-
             let label = format!("{}.  {}", display_i + 1, opt.text);
             if ui.button(btn_x, y, btn_w, opt_h, &label) {
                 clicked = Some(*original_idx);

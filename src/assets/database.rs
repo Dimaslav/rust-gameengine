@@ -1,5 +1,10 @@
 //! AssetDatabase: сканирует `assets/`, строит индекс, следит за
 //! изменениями, обеспечивает lookup по ID и по пути.
+//!
+//! ИЗМЕНЕНО: `hash_file` хеширует целиком файлы ≤ 256 KB. Раньше всегда
+//! брались только head/tail-4KB + размер — hot-reload не замечал правки
+//! в середине `.ron`-файла (а именно их правят чаще всего). Для больших
+//! файлов (текстуры, модели) head/tail стратегия сохранена.
 
 use std::collections::HashMap;
 use std::hash::Hasher;
@@ -15,11 +20,13 @@ pub struct AssetDatabase {
     by_id: HashMap<AssetId, AssetMeta>,
     by_path: HashMap<PathBuf, AssetId>,
     root: PathBuf,
-    /// Счётчик изменений с последнего скана.
     pub revision: u64,
 }
 
 const HASH_CHUNK: usize = 4096;
+/// Файлы до этого размера хешируются целиком (ловим правки в середине).
+/// Файлы больше — только head/tail (память O(1) от размера).
+const FULL_HASH_THRESHOLD: u64 = 256 * 1024;
 
 impl AssetDatabase {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
@@ -187,13 +194,17 @@ impl AssetDatabase {
         path.with_file_name(format!("{}.meta", name))
     }
 
-    /// Быстрая свёртка: первые 4KB + последние 4KB + размер.
+    /// Хэш содержимого файла.
     ///
-    /// ИЗМЕНЕНО (bugfix #3): раньше использовался `std::fs::read`,
-    /// который грузил **весь** файл в RAM — для 500-МБ `.exr` или
-    /// `.glb` это дорого, а `detect_changes` проходит по всем
-    /// ассетам раз в 0.75 с. Теперь читаем только два куска через
-    /// `File::seek`, память O(1) от размера файла.
+    /// Стратегия:
+    ///   * `len ≤ FULL_HASH_THRESHOLD` (256 KB) — читаем весь файл.
+    ///     Маленькие файлы — это `.ron`, `.toml`, `.json`, мелкие текстуры.
+    ///     Их правят **в середине** (правка одного числа в сцене), и
+    ///     head/tail-хеш эту правку не увидит. Цена — O(size), но size
+    ///     ограничен 256 KB.
+    ///   * `len > FULL_HASH_THRESHOLD` — head+tail по 4 KB + размер.
+    ///     Для больших `.exr`/`.glb` это спасает от чтения сотен MB в RAM
+    ///     на каждый скан (`detect_changes` бежит раз в 0.75 с).
     fn hash_file(path: &Path) -> std::io::Result<u64> {
         let mut f = std::fs::File::open(path)?;
         let len = f.metadata()?.len();
@@ -201,7 +212,7 @@ impl AssetDatabase {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         h.write_u64(len);
 
-        if len <= (HASH_CHUNK as u64) * 2 {
+        if len <= FULL_HASH_THRESHOLD {
             let mut buf = Vec::with_capacity(len as usize);
             f.read_to_end(&mut buf)?;
             h.write(&buf);

@@ -48,8 +48,9 @@ impl IblResources {
     ) -> Result<Self> {
         let path_ref = path.as_ref();
         if !path_ref.exists() {
-            log::warn!(
-                "IBL: '{}' не найден → процедурное небо",
+            log::info!(
+                "IBL: '{}' не найден → процедурное небо (положите HDR-панораму \
+                 в assets/sky.hdr для HDRI-освещения)",
                 path_ref.display()
             );
             return Self::procedural(device, queue);

@@ -1,5 +1,7 @@
 use glam::{Mat4, Quat, Vec3};
 
+use crate::ecs::Entity;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vec3,
@@ -9,25 +11,49 @@ pub struct Transform {
 
 impl Transform {
     pub fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { position: Vec3::new(x, y, z), rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            position: Vec3::new(x, y, z),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
     pub fn at(position: Vec3) -> Self {
-        Self { position, rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            position,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
-    pub fn with_scale(mut self, s: f32) -> Self { self.scale = Vec3::splat(s); self }
-    pub fn with_scale_xyz(mut self, x: f32, y: f32, z: f32) -> Self { self.scale = Vec3::new(x, y, z); self }
-    pub fn with_rotation(mut self, q: Quat) -> Self { self.rotation = q; self }
+    pub fn with_scale(mut self, s: f32) -> Self {
+        self.scale = Vec3::splat(s);
+        self
+    }
+    pub fn with_scale_xyz(mut self, x: f32, y: f32, z: f32) -> Self {
+        self.scale = Vec3::new(x, y, z);
+        self
+    }
+    pub fn with_rotation(mut self, q: Quat) -> Self {
+        self.rotation = q;
+        self
+    }
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 }
 
+/// Ссылка на родителя. **Изменилось с u32 на Entity** — теперь
+/// Parent, указывающий на despawn'нутую сущность, детектируется
+/// через `world.is_alive(parent.0)`.
 #[derive(Debug, Clone, Copy)]
-pub struct Parent(pub u32);
+pub struct Parent(pub Entity);
 
 #[derive(Debug, Clone)]
 pub struct Name(pub String);
-impl Name { pub fn new(s: impl Into<String>) -> Self { Self(s.into()) } }
+impl Name {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MeshHandle(pub String);
@@ -50,7 +76,9 @@ pub struct TextureTiling {
 }
 
 impl Default for TextureTiling {
-    fn default() -> Self { Self { size: 1.0 } }
+    fn default() -> Self {
+        Self { size: 1.0 }
+    }
 }
 
 impl TextureTiling {
@@ -66,9 +94,15 @@ pub struct AnimationPlayer {
     pub speed: f32,
     pub looping: bool,
 }
+
 impl AnimationPlayer {
     pub fn new(clip: impl Into<String>) -> Self {
-        Self { clip: clip.into(), time: 0.0, speed: 1.0, looping: true }
+        Self {
+            clip: clip.into(),
+            time: 0.0,
+            speed: 1.0,
+            looping: true,
+        }
     }
 }
 
@@ -77,14 +111,20 @@ pub struct Spinner {
     pub axis: Vec3,
     pub speed: f32,
 }
-impl Spinner { pub fn new(axis: Vec3, speed: f32) -> Self { Self { axis, speed } } }
+impl Spinner {
+    pub fn new(axis: Vec3, speed: f32) -> Self {
+        Self { axis, speed }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Velocity {
     pub value: Vec3,
 }
 impl Velocity {
-    pub fn new(x: f32, y: f32, z: f32) -> Self { Self { value: Vec3::new(x, y, z) } }
+    pub fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { value: Vec3::new(x, y, z) }
+    }
 }
 
 // ============================================================
@@ -97,7 +137,9 @@ pub struct Health {
     pub max: f32,
 }
 impl Health {
-    pub fn new(max: f32) -> Self { Self { current: max, max } }
+    pub fn new(max: f32) -> Self {
+        Self { current: max, max }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,16 +166,28 @@ pub enum TriggerAction {
     Teleport([f32; 3]),
     Tint([f32; 4]),
     Despawn,
-    CallElevator { elevator: u32, floor_idx: u32 },
+    /// **Изменилось: elevator теперь Entity, а не u32.** Позволяет
+    /// отловить dangling-ссылку через `world.is_alive`.
+    CallElevator { elevator: Entity, floor_idx: u32 },
     PlaySound(String),
 }
 
 impl Trigger {
     pub fn new(radius: f32, action: TriggerAction) -> Self {
-        Self { radius, action, once: true, fired: false }
+        Self {
+            radius,
+            action,
+            once: true,
+            fired: false,
+        }
     }
     pub fn repeatable(radius: f32, action: TriggerAction) -> Self {
-        Self { radius, action, once: false, fired: false }
+        Self {
+            radius,
+            action,
+            once: false,
+            fired: false,
+        }
     }
 }
 
@@ -159,40 +213,20 @@ pub enum ElevatorState {
     DoorsClosing,
 }
 
-
-/// Логика лифта с trapezoid-профилем скорости и sensor-дверью.
-///
-/// **КРИТИЧНО:** сама платформа двигается через `RigidBody::kinematic()`.
-/// `ElevatorSystem` пишет `velocity.y` kinematic-тела, а `physics.step`
-/// интегрирует позицию. Прямое изменение `Transform.position` сломает
-/// динамику: dynamic-объекты (ящики) на платформе не поедут.
 #[derive(Debug, Clone)]
 pub struct Elevator {
-    /// Y-координаты этажей (обычно 2+).
     pub floors: Vec<f32>,
     pub current_floor: usize,
     pub target_floor: usize,
-
-    /// Максимальная скорость (м/с).
     pub speed: f32,
-    /// Ускорение (м/с²). Отвечает за плавный разгон/торможение.
-    /// 0.01 — мгновенный старт; 5.0 — «плавно как лифт в отеле».
     pub acceleration: f32,
-    /// Текущая линейная скорость по Y со знаком. Пишется в
-    /// `RigidBody.velocity.y` kinematic-тела каждый кадр.
     pub current_velocity: f32,
-
     pub state: ElevatorState,
     pub doors_open: f32,
     pub door_speed: f32,
     pub dwell: f32,
     pub dwell_timer: f32,
-
-    /// Радиус XZ сенсора двери. Игрок внутри — двери не закрываются.
-    /// Должен быть немного больше ширины кабины, чтобы ловить
-    /// стоящих в проёме.
     pub sensor_radius: f32,
-    /// true — игрок в sensor-зоне в этом кадре (обновляется App).
     pub player_inside: bool,
 }
 
@@ -219,27 +253,27 @@ impl Elevator {
     pub fn floor_y(&self, idx: usize) -> f32 {
         self.floors.get(idx).copied().unwrap_or(0.0)
     }
-
     pub fn current_y(&self) -> f32 {
         self.floor_y(self.current_floor)
     }
 
-    /// Вызвать лифт на этаж `floor_idx`.
     pub fn call(&mut self, floor_idx: usize) {
-        if floor_idx >= self.floors.len() { return; }
-
+        if floor_idx >= self.floors.len() {
+            return;
+        }
         if self.state == ElevatorState::Moving {
             self.target_floor = floor_idx;
             return;
         }
-
         if floor_idx == self.current_floor {
-            if matches!(self.state, ElevatorState::Idle | ElevatorState::DoorsClosing) {
+            if matches!(
+                self.state,
+                ElevatorState::Idle | ElevatorState::DoorsClosing
+            ) {
                 self.state = ElevatorState::DoorsOpening;
             }
             return;
         }
-
         self.target_floor = floor_idx;
         if self.doors_open > 0.01 {
             self.state = ElevatorState::DoorsClosing;
@@ -248,37 +282,21 @@ impl Elevator {
         }
     }
 
-    /// Обновление состояния `Moving` для одного кадра.
-    /// Возвращает `true`, если приехали на этаж.
-    ///
-    /// `current_y` — текущая Y платформы (из Transform).
-    /// Логика: trapezoid (разгон → круиз → торможение).
     pub fn update_moving(&mut self, current_y: f32, dt: f32) -> bool {
         let target_y = self.floor_y(self.target_floor);
         let diff = target_y - current_y;
         let dist = diff.abs();
-
-        // Если можем доехать за один кадр — финализируем точно.
-        // Иначе из-за интегрирования позиции в physics.step
-        // перескочим на пару сантиметров выше/ниже этажа.
         let finish_threshold = (self.current_velocity.abs() * dt * 2.0).max(0.02);
         if dist <= finish_threshold {
-            // velocity такой, чтобы за один шаг физики попасть ровно.
             self.current_velocity = diff / dt.max(1e-4);
             self.current_floor = self.target_floor;
             return true;
         }
-
         let sign = diff.signum();
         let a = self.acceleration.max(0.01);
-
-        // Скорость торможения: v = sqrt(2 * a * distance).
-        // С ней комфортно остановиться ровно на этаже.
         let braking_speed = (2.0 * a * dist).sqrt();
         let desired_speed = self.speed.min(braking_speed);
         let desired_velocity = sign * desired_speed;
-
-        // Плавно двигаемся к целевой скорости с ускорением `a`.
         let dv = desired_velocity - self.current_velocity;
         let max_dv = a * dt;
         if dv.abs() <= max_dv {
@@ -286,21 +304,14 @@ impl Elevator {
         } else {
             self.current_velocity += dv.signum() * max_dv;
         }
-
         false
     }
 
-    /// Общая частота вызовов в секунду для FSM.
-    /// Если приехали — velocity обнуляется при завершении.
     pub fn stop_velocity(&mut self) {
         self.current_velocity = 0.0;
     }
 }
 
-/// Дверь-створка. Двигается по `slide_axis` от `closed_position`.
-///
-/// Обычно привязана к платформе лифта через `Parent`. `closed_position`
-/// и `slide_axis` задаются в **локальных координатах** родителя.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingDoor {
     pub open_amount: f32,
