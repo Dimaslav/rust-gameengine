@@ -23,6 +23,14 @@
 // - group 2: CSM depth, cube shadow array, SSAO, IBL (irr/pref/brdf/env), contact shadow
 // - group 3: clustered point lights (storage) + cluster counts/lights + params
 // - group 4: reflection probes (4 cube textures + sampler + uniform)
+//
+// # FIX (WGSL parse)
+//
+// Поле `@builtin(position)` в `VOut` раньше называлось `clip`, а в
+// `fs_main` код обращался к `in.frag_coord.x`. WGSL смотрит на имя поля,
+// а не на атрибут — парсер Naga падал с «invalid field accessor `frag_coord`».
+// Поле переименовано в `frag_coord` (как в gbuffer.wgsl / tonemap.wgsl),
+// и `out.clip = ...` в vertex-шейдере заменён на `out.frag_coord = ...`.
 
 const PI: f32 = 3.14159265359;
 
@@ -119,8 +127,17 @@ struct ProbeLightingUniform {
 @group(4) @binding(4) var s_probe: sampler;
 @group(4) @binding(5) var<uniform> probe_lighting: ProbeLightingUniform;
 
+// FIX: поле @builtin(position) переименовано из `clip` в `frag_coord`.
+// В WGSL имя поля = имя accessor'а в `in.<имя>`, атрибут @builtin(position)
+// на имя не влияет. В fs_main код использует `in.frag_coord.x/y` для
+// определения кластера — теперь имена совпадают.
+//
+// @invariant — для консистентности с gbuffer.wgsl. TAA вычисляет motion
+// vectors по позициям фрагментов; если бы wgpu переупорядочил вершинные
+// выходы между проходами, значения @builtin(position) могли бы отличаться
+// на ±1 ULP. @invariant это запрещает.
 struct VOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant frag_coord: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
@@ -137,7 +154,8 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
         vec2<f32>(0.0, -1.0),
     );
     var out: VOut;
-    out.clip = vec4<f32>(positions[idx], 0.0, 1.0);
+    // FIX: было `out.clip` — переименовано в `out.frag_coord`.
+    out.frag_coord = vec4<f32>(positions[idx], 0.0, 1.0);
     out.uv = uvs[idx];
     return out;
 }
@@ -451,6 +469,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let slice_f = clamp((view_z - near) / max(far - near, 1e-4), 0.0, 1.0);
     let slice = min(u32(slice_f * f32(grid_z)), grid_z - 1u);
 
+    // FIX: используем переименованное поле `frag_coord` (было `clip`).
     let cluster_cx = min(u32(in.frag_coord.x / 16.0), grid_x - 1u);
     let cluster_cy = min(u32(in.frag_coord.y / 16.0), grid_y - 1u);
     let cluster_idx = cluster_cx + cluster_cy * grid_x + slice * grid_x * grid_y;

@@ -8,7 +8,7 @@ resolver = "2"
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-# NOTE: 1.99 — placeholder из вашего репозитория. Для публичного
+# NOTE: 1.99.1 — placeholder из вашего репозитория. Для публичного
 # релиза опустите до реального MSRV (edition 2024 требует ≥ 1.85).
 # Проверить: `cargo +X.Y check`. Не заявляйте MSRV, который не тестируете.
 rust-version = "1.99"

@@ -10,7 +10,7 @@
 //! [Sprint 6]   encode_contact_shadow_pass — читает gbuffer_depth
 //! [Decals]     encode_decal_pass
 //! [SSAO]       encode_ssao_pass, encode_ssao_blur_pass
-//! [Lighting]   encode_lighting_pass       — читает cluster_lighting_bg
+//! [Lighting]   encode_lighting_pass       — читает cluster_lighting_bg + probe_lighting_bg
 //! [Sprint 5]   encode_atmosphere_pass  ─┐
 //! [Skybox]     encode_skybox_pass       ┴ взаимоисключающие
 //! [Forward]    encode_forward_pass        — линии
@@ -25,17 +25,6 @@
 //!    или       encode_debug_pass
 //! [UI]         encode_ui_pass
 //! ```
-//!
-//! # Sprint 7 (variable-size cluster lists) не реализован
-//!
-//! Предполагалось, что `cluster_assign` делает только atomicAdd counts,
-//! затем prefix-sum строит offsets, а `cluster_fill` (второй проход)
-//! упаковывает. Промежуточные стадии `encode_cluster_prefix_sum` и
-//! `encode_cluster_fill` требовали `wgpu::ComputePipeline` с
-//! `immediate_size`-based serial scan и `cluster_cursors_buffer`,
-//! которых нет в `Renderer` / `SizeDependent`. **Функции удалены**,
-//! сейчас работает Sprint 4 (fixed-size per cluster):
-//! `cluster_assign` сам пишет в `cluster_lights[idx * 16 + local]`.
 
 use crate::render::csm::CASCADE_COUNT;
 use crate::render::debug::DebugView;
@@ -121,18 +110,6 @@ fn depth_load() -> wgpu::Operations<f32> {
 // Sprint 4: Clustered lighting — assign (single pass)
 // ============================================================
 
-/// Pass 1/1: assign.
-///
-/// Один поток на point light. Считает, сколько lights попадает в
-/// каждый кластер, через atomicAdd в `cluster_counts_buffer`,
-/// и параллельно пишет `light_idx` в
-/// `cluster_lights[cluster_idx * 16 + local]` для `local < 16`.
-/// Lights сверх 16 на кластер отбрасываются (см. ограничение
-/// `MAX_LIGHTS_PER_CLUSTER` в `cluster_assign.wgsl`).
-///
-/// `cluster_counts_buffer` должен быть очищен (`clear_buffer`) до вызова.
-///
-/// Dispatch: `(light_count + 63) / 64` workgroups × 64 threads.
 pub(super) fn encode_cluster_assign(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -153,13 +130,6 @@ pub(super) fn encode_cluster_assign(
 // Sprint 6: Contact shadows
 // ============================================================
 
-/// Screen-space contact shadows.
-///
-/// Пишет в `sd.contact_shadow_view` (R16Float): R = 1.0 (освещён)
-/// или 0.0 (в тени). Lighting умножает directional light #0 на этот
-/// канал (см. `deferred_lighting.wgsl`).
-///
-/// Читает `gbuffer_depth_view` — должен вызываться ПОСЛЕ `encode_gbuffer_pass`.
 pub(super) fn encode_contact_shadow_pass(
     r: &Renderer,
     encoder: &mut wgpu::CommandEncoder,
@@ -396,6 +366,11 @@ pub(super) fn encode_ssao_blur_pass(r: &Renderer, encoder: &mut wgpu::CommandEnc
 // ============================================================
 // Lighting
 // ============================================================
+//
+// FIX: добавлен `set_bind_group(4, ...)` для reflection probes.
+// Раньше deferred_lighting.wgsl объявлял @group(4) для probes, но
+// pipeline layout содержал только 4 группы (0..3) — либо падение
+// при создании pipeline, либо probes никогда не работали.
 
 pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -415,6 +390,9 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
     pass.set_bind_group(1, &r.lights_bind_group, &[]);
     pass.set_bind_group(2, &r.sd.shadow2_bind_group, &[]);
     pass.set_bind_group(3, &r.sd.cluster_lighting_bind_group, &[]);
+    // FIX: group 4 — reflection probes. Uniform обновляется каждый
+    // кадр через `probe::update_lighting_uniform` (см. Renderer::render).
+    pass.set_bind_group(4, &r.probe_lighting_bind_group, &[]);
     fullscreen_triangle(&mut pass);
 }
 

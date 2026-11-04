@@ -4,6 +4,7 @@
     kind: Misc,
     rarity: Common,
     description: "Universal currency",
+    gold_value: 1,
     max_stack: 9999,
     sell_price: 0,
 )

@@ -1,26 +1,21 @@
 (
     id: "elder",
-    speaker_name: "Elder",
+    speaker_name: "Старейшина",
     start: "root",
     nodes: {
-        // ============================================================
-        // ROOT — динамическая точка входа
-        // ============================================================
         "root": (
-            speaker: "Elder",
+            speaker: "Старейшина",
             text: "Приветствую тебя, путник. Я — старейшина этой деревни. Чем могу помочь?",
             options: [
-                // === Turn-in (сдача квестов) — только если готовы ===
-                (text: "Я убил стражников. Вот весть о победе.",
-                    next: Some("return_thanks_wolves"),
+                (text: "Я убил стражников. Двор чист.",
+                    next: Some("turn_in_wolves"),
                     condition: Some("quest_objectives_done:hunt_wolves"),
                     effect: [CompleteQuest("hunt_wolves")]),
                 (text: "Владыка мёртв. Его сердце — моё.",
-                    next: Some("return_thanks_lord"),
+                    next: Some("turn_in_lord"),
                     condition: Some("quest_objectives_done:slay_lord"),
                     effect: [CompleteQuest("slay_lord")]),
 
-                // === In-progress hints ===
                 (text: "Я ещё работаю над стражниками.",
                     next: Some("progress_wolves"),
                     condition: Some("quest_active:hunt_wolves"), effect: []),
@@ -28,7 +23,6 @@
                     next: Some("progress_lord"),
                     condition: Some("quest_active:slay_lord"), effect: []),
 
-                // === Standard ===
                 (text: "Расскажи о деревне.", next: Some("lore_village"), effect: []),
                 (text: "Есть работа?", next: Some("quest_hub"), effect: []),
                 (text: "Что ты знаешь о цитадели?", next: Some("lore_citadel"), effect: []),
@@ -36,86 +30,87 @@
             ],
         ),
 
-        // ============================================================
-        // PROGRESS
-        // ============================================================
         "progress_wolves": (
-            speaker: "Elder",
+            speaker: "Старейшина",
             text: "Стражники — во дворе, к востоку. Будь осторожен.",
             options: [(text: "Понял.", next: Some("root"), effect: [])],
         ),
         "progress_lord": (
-            speaker: "Elder",
+            speaker: "Старейшина",
             text: "Цитадель — на востоке. Ключ в сокровищнице, или портал у кузнеца.",
             options: [(text: "Понял.", next: Some("root"), effect: [])],
         ),
 
-        // ============================================================
-        // LORE: деревня
-        // ============================================================
+        "turn_in_wolves": (
+            speaker: "Старейшина",
+            text: "Ты сделал это! Двор очищен. Возьми награду — ты заслужил.",
+            options: [(text: "Рад помочь.", next: Some("root"), effect: [])],
+        ),
+        "turn_in_lord": (
+            speaker: "Старейшина",
+            text: "Владыка пал. Тьма отступила. Ты — герой. Прими мою благодарность.",
+            options: [(text: "Это было честью.", next: None, effect: [])],
+        ),
+
         "lore_village": (
-            speaker: "Elder",
-            text: "Когда-то это была цветущая деревня. Теперь — лишь тень былого. Волки, разбойники и нежить терзают наши земли.",
+            speaker: "Старейшина",
+            text: "Когда-то это была цветущая деревня. Теперь — лишь тень былого. Волки и нежить терзают наши земли.",
             options: [
-                (text: "Кто в этом виноват?", next: Some("lore_blame"), effect: []),
-                (text: "Что мне сделать, чтобы помочь?", next: Some("quest_hub"), effect: []),
+                (text: "Кто виноват?", next: Some("lore_blame"), effect: []),
+                (text: "Чем помочь?", next: Some("quest_hub"), effect: []),
                 (text: "Понятно.", next: Some("root"), effect: []),
             ],
         ),
         "lore_blame": (
-            speaker: "Elder",
-            text: "Владыка Цитадели. Он пробудился три луны назад, и с тех пор тьма расползлась по округе.",
+            speaker: "Старейшина",
+            text: "Владыка Цитадели. Он пробудился три луны назад.",
             options: [
                 (text: "Как его победить?", next: Some("lore_citadel"), effect: []),
                 (text: "Я помогу.", next: Some("quest_hub"), effect: []),
-                (text: "Мне жаль.", next: Some("root"), effect: []),
             ],
         ),
-
-        // ============================================================
-        // LORE: цитадель
-        // ============================================================
         "lore_citadel": (
-            speaker: "Elder",
-            text: "Цитадель стоит на востоке. В её подземельях — Владыка. Говорят, его сердце — кристалл чистой тьмы.",
+            speaker: "Старейшина",
+            text: "Цитадель на востоке. В её подземельях — Владыка. Его сердце — кристалл тьмы.",
             options: [
                 (text: "Как туда попасть?", next: Some("lore_path"), effect: []),
-                (text: "Что мне нужно взять с собой?", next: Some("lore_gear"), effect: []),
-                (text: "Я готов рискнуть.", next: Some("quest_hub"), effect: []),
+                (text: "Что взять с собой?", next: Some("lore_gear"), effect: []),
                 (text: "Вернусь позже.", next: Some("root"), effect: []),
             ],
         ),
         "lore_path": (
-            speaker: "Elder",
-            text: "Через лес — к воротам. Но они заперты. Ключ — у босса в подземелье. Или у кузнеца есть портал.",
+            speaker: "Старейшина",
+            text: "Через лес — к воротам. Ключ у босса или портал у кузнеца.",
             options: [
-                (text: "Понял. Спасибо.", next: Some("root"), effect: []),
-                (text: "А кто такой кузнец?", next: Some("lore_smith"), effect: []),
+                (text: "Понял.", next: Some("root"), effect: []),
+                (text: "Кто такой кузнец?", next: Some("lore_smith"), effect: []),
             ],
         ),
         "lore_smith": (
-            speaker: "Elder",
-            text: "Кузнец — старый друг. Он выковал оружие для многих героев. Поговори с ним перед походом.",
+            speaker: "Старейшина",
+            text: "Кузнец — старый друг. Он выковал оружие для многих героев.",
             options: [
-                (text: "Хорошо, зайду к нему.", next: Some("root"), effect: []),
-                (text: "Спасибо за совет.", next: None, effect: []),
+                (text: "Загляну к нему.", next: Some("root"), effect: []),
             ],
         ),
         "lore_gear": (
-            speaker: "Elder",
-            text: "Возьми зелья, патроны, и не забудь про удачу — она спасает в тёмных коридорах. Держи немного золота на первое время.",
+            speaker: "Старейшина",
+            text: "Возьми зелья, патроны и удачу. Держи немного золота на первое время.",
             options: [
-                (text: "Благодарю за помощь!", next: Some("root"),
+                (text: "Благодарю!",
+                    next: Some("root"),
+                    condition: Some("gold <= 50"),
                     effect: [GiveGold(50), GiveItem(id: "health_potion", count: 2)]),
+                (text: "У меня уже есть всё.",
+                    next: Some("root"),
+                    condition: Some("gold >= 51"),
+                    effect: []),
             ],
         ),
 
-        // ============================================================
-        // QUEST HUB
-        // ============================================================
         "quest_hub": (
-            speaker: "Elder",
-            text: "Есть два дела. Первое — очистить двор от стражников. Второе — открыть путь к цитадели. Что выберешь?",
+            speaker: "Старейшина",
+            text: "Есть два дела: стражники во дворе и Владыка в цитадели.",
             options: [
                 (text: "Дай мне задание на стражников.",
                     next: Some("quest_wolves_confirm"),
@@ -129,8 +124,8 @@
             ],
         ),
         "quest_wolves_confirm": (
-            speaker: "Elder",
-            text: "Убей двух стражников во дворе. Принеси мне весть о победе. По рукам?",
+            speaker: "Старейшина",
+            text: "Убей двух стражников во дворе. Принеси мне весть о победе.",
             options: [
                 (text: "По рукам.", next: Some("quest_wolves_started"),
                     effect: [StartQuest("hunt_wolves")]),
@@ -138,15 +133,13 @@
             ],
         ),
         "quest_wolves_started": (
-            speaker: "Elder",
-            text: "Отлично. Стражники — во дворе, к востоку. Возвращайся с победой!",
-            options: [
-                (text: "Иду.", next: None, effect: []),
-            ],
+            speaker: "Старейшина",
+            text: "Отлично. Возвращайся с победой!",
+            options: [(text: "Иду.", next: None, effect: [])],
         ),
         "quest_citadel_confirm": (
-            speaker: "Elder",
-            text: "Найди ключ в сокровищнице — или пройди через портал кузнеца. Убей Владыку. Принесёшь его сердце — и я щедро награжу.",
+            speaker: "Старейшина",
+            text: "Найди ключ или пройди через портал. Убей Владыку.",
             options: [
                 (text: "Я справлюсь.", next: Some("quest_citadel_started"),
                     effect: [StartQuest("slay_lord")]),
@@ -154,36 +147,13 @@
             ],
         ),
         "quest_citadel_started": (
-            speaker: "Elder",
-            text: "Пусть удача сопутствует тебе. Возвращайся живым.",
-            options: [
-                (text: "Обещаю.", next: None, effect: []),
-            ],
+            speaker: "Старейшина",
+            text: "Пусть удача сопутствует тебе.",
+            options: [(text: "Обещаю.", next: None, effect: [])],
         ),
 
-        // ============================================================
-        // RETURN — после квестов
-        // ============================================================
-        "return_thanks_wolves": (
-            speaker: "Elder",
-            text: "Ты сделал это! Двор очищен. Возьми награду — ты заслужил.",
-            options: [
-                (text: "Рад помочь.", next: Some("root"), effect: []),
-            ],
-        ),
-        "return_thanks_lord": (
-            speaker: "Elder",
-            text: "Владыка пал. Тьма отступила. Ты — герой, и легенды будут петь о тебе веками.",
-            options: [
-                (text: "Это было честью.", next: None, effect: []),
-            ],
-        ),
-
-        // ============================================================
-        // JOKE / FLAVOR
-        // ============================================================
         "joke": (
-            speaker: "Elder",
+            speaker: "Старейшина",
             text: "Знаешь, почему волки не любят кузнеца? Потому что он слишком горячий собеседник!",
             options: [
                 (text: "Ха-ха, неплохо.", next: Some("root"), effect: []),

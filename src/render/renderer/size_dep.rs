@@ -101,6 +101,12 @@ pub struct SizeDependent {
     /// atomic-u32 на кластер. Каждый кадр очищается через `clear_buffer`.
     pub cluster_counts_buffer: wgpu::Buffer,
     /// `MAX_LIGHTS_PER_CLUSTER` слотов на кластер (u32 light_idx).
+    ///
+    /// Поле держит буфер живым для `cluster_compute_bind_group`
+    /// и `cluster_lighting_bind_group`. Из Rust-кода не читается
+    /// напрямую — только через bind groups, поэтому в release-профиле
+    /// даёт warning `dead_code` без этого allow.
+    #[allow(dead_code)]
     pub cluster_lights_buffer: wgpu::Buffer,
     /// World-space point lights (storage buffer). Заполняется из
     /// `point_lights` (Vec<GpuPointLight>) в `render()`.
@@ -128,6 +134,13 @@ pub struct SizeDependent {
     pub taa_read_bgs: [wgpu::BindGroup; 2],
     pub taa_uniform: wgpu::Buffer,
 
+    /// 3D-текстура volumetric fog (froxel grid).
+    ///
+    /// Поле держит текстуру живой для `volumetric_compute_bg`
+    /// (storage binding) и `volumetric_composite_bg` (sampled 3D).
+    /// Из Rust-кода не читается — только через bind groups. Без
+    /// этого allow в release будет warning `dead_code`.
+    #[allow(dead_code)]
     pub volumetric_fog_view: wgpu::TextureView,
     pub _volumetric_fog_tex: wgpu::Texture,
     pub volumetric_compute_bg: wgpu::BindGroup,

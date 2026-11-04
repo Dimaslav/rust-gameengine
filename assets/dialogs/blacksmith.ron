@@ -1,10 +1,10 @@
 (
     id: "blacksmith",
-    speaker_name: "Blacksmith",
+    speaker_name: "Кузнец",
     start: "intro",
     nodes: {
         "intro": (
-            speaker: "Blacksmith",
+            speaker: "Кузнец",
             text: "Ключ от подземелья спрятан у босса в самом низу.",
             options: [
                 (text: "Покажи свой товар.", next: None,
@@ -18,14 +18,14 @@
             ],
         ),
         "portal_info": (
-            speaker: "Blacksmith",
+            speaker: "Кузнец",
             text: "Порталом можно быстро туда добраться. Осторожнее — там темно и опасно.",
             options: [
                 (text: "Понял.", next: None, effect: []),
             ],
         ),
         "give_potion": (
-            speaker: "Blacksmith",
+            speaker: "Кузнец",
             text: "Держи, это тебе пригодится.",
             options: [
                 (text: "Благодарю!", next: None, effect: []),

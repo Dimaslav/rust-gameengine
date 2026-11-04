@@ -71,6 +71,10 @@ pub struct Renderer {
     cluster_params_buffer: wgpu::Buffer,
 
     // Sprint 5: atmosphere
+    // FIX: `atmosphere_layout` используется только в `reload_shaders`
+    // (debug-only). В release-сборке поле «записано, но не прочитано» —
+    // allow(dead_code) глушит warning.
+    #[allow(dead_code)]
     atmosphere_layout: wgpu::BindGroupLayout,
     atmosphere_pipeline: wgpu::RenderPipeline,
     atmosphere_uniform: wgpu::Buffer,
@@ -81,11 +85,21 @@ pub struct Renderer {
     pub probes: Vec<probe::ProbeCubemap>,
     probe_bake_pipeline: wgpu::RenderPipeline,
     probe_bake_uniform: wgpu::Buffer,
+    // FIX: все три используются только в `reload_shaders` / `bake_probe`
+    // (debug + runtime-bake path). В release `probe_bake_layout` и
+    // `probe_bake_bind_group` не читаются — allow(dead_code).
+    #[allow(dead_code)]
     probe_bake_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     probe_bake_bind_group: wgpu::BindGroup,
     probe_bake_depth_view: wgpu::TextureView,
     _probe_bake_depth_tex: wgpu::Texture,
+    // `probe_lighting_layout` используется только в `make_lighting_pipeline`
+    // (при создании и в reload_shaders — оба debug-пути).
+    #[allow(dead_code)]
     probe_lighting_layout: wgpu::BindGroupLayout,
+    // `probe_lighting_uniform` и `probe_lighting_bind_group` теперь читаются
+    // в `render()` и `encode_lighting_pass` соответственно — allow не нужен.
     probe_lighting_uniform: wgpu::Buffer,
     probe_lighting_bind_group: wgpu::BindGroup,
 
@@ -259,8 +273,35 @@ impl Renderer {
             apply_limit_buckets: false,
         }).await.unwrap();
 
+        let adapter_limits = adapter.limits();
+
         let mut device_limits = wgpu::Limits::default();
-        device_limits.max_vertex_attributes = 32;
+
+        device_limits.max_vertex_attributes =
+            adapter_limits.max_vertex_attributes.min(32);
+
+        const WANTED_BIND_GROUPS: u32 = 5;
+        device_limits.max_bind_groups =
+            adapter_limits.max_bind_groups.min(WANTED_BIND_GROUPS);
+
+        if device_limits.max_bind_groups < WANTED_BIND_GROUPS {
+            panic!(
+                "GPU supports only {} bind groups, but the engine needs {} \
+                 (deferred_lighting.wgsl uses @group(4) for reflection probes). \
+                 Update GPU driver, or run on a discrete GPU.",
+                adapter_limits.max_bind_groups,
+                WANTED_BIND_GROUPS,
+            );
+        }
+
+        log::info!(
+            "Renderer: adapter max_bind_groups={} max_vertex_attributes={}, \
+             requested bind_groups={} vertex_attributes={}",
+            adapter_limits.max_bind_groups,
+            adapter_limits.max_vertex_attributes,
+            device_limits.max_bind_groups,
+            device_limits.max_vertex_attributes,
+        );
 
         let desired_features = wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
@@ -358,6 +399,7 @@ impl Renderer {
                 bgl_tex_frag(4), bgl_sampler_frag(5),
                 bgl_cube_frag(6), bgl_cube_frag(7),
                 bgl_tex_frag(8), bgl_sampler_frag(9), bgl_cube_frag(10),
+                bgl_tex_frag(11),
             ],
         });
 
@@ -1029,10 +1071,14 @@ impl Renderer {
         let particles_pipeline = make_particles_pipeline(&device, &camera_layout).expect("particles pipeline");
         let transparent_pipeline = make_transparent_pipeline(&device, &camera_layout, &lights_layout, &shadow2_layout, &material_layout, Some(wgpu::Face::Back)).expect("transparent pipeline");
         let transparent_pipeline_double_sided = make_transparent_pipeline(&device, &camera_layout, &lights_layout, &shadow2_layout, &material_layout, None).expect("transparent pipeline (double-sided)");
+
+        // FIX: `make_lighting_pipeline` теперь принимает 6 аргументов
+        // (включая `probe_lighting_layout`) и создаёт 5 bind-group-layout'ов.
         let lighting_pipeline = make_lighting_pipeline(
             &device, &lighting_layout, &lights_layout, &shadow2_layout,
             &cluster_lighting_layout, &probe_lighting_layout,
         ).expect("lighting pipeline");
+
         let (ssao_pipeline, ssao_blur_pipeline) = make_ssao_pipelines(&device, &ssao_layout).expect("ssao pipelines");
         let (bloom_prefilter_pipeline, bloom_downsample_pipeline, bloom_upsample_pipeline) =
             make_bloom_chain_pipelines(&device, &bloom_layout).expect("bloom chain pipelines");
@@ -1418,7 +1464,16 @@ impl Renderer {
                 particles: make_particles_pipeline(&self.device, &self.camera_layout)?,
                 transparent: make_transparent_pipeline(&self.device, &self.camera_layout, &self.lights_layout, &self.shadow2_layout, &self.material_layout, Some(wgpu::Face::Back))?,
                 transparent_double_sided: make_transparent_pipeline(&self.device, &self.camera_layout, &self.lights_layout, &self.shadow2_layout, &self.material_layout, None)?,
-                lighting: make_lighting_pipeline(&self.device, &self.lighting_layout, &self.lights_layout, &self.shadow2_layout, &self.cluster_lighting_layout, &self.probe_lighting_layout)?,
+                // FIX: `make_lighting_pipeline` теперь принимает
+                // 6-й аргумент — `probe_lighting_layout` (группа 4).
+                lighting: make_lighting_pipeline(
+                    &self.device,
+                    &self.lighting_layout,
+                    &self.lights_layout,
+                    &self.shadow2_layout,
+                    &self.cluster_lighting_layout,
+                    &self.probe_lighting_layout,
+                )?,
                 ssao: make_ssao_pipelines(&self.device, &self.ssao_layout)?,
                 bloom_chain: make_bloom_chain_pipelines(&self.device, &self.bloom_layout)?,
                 tonemap: make_tonemap_pipeline(&self.device, &self.config, &self.tonemap_layout)?,
@@ -2001,6 +2056,15 @@ impl Renderer {
             view: view.to_cols_array_2d(),
         };
         self.queue.write_buffer(&self.cluster_params_buffer, 0, bytemuck::bytes_of(&cluster_params));
+
+        // FIX: обновить per-probe uniform (group 4). Иначе `counts.x = 0`
+        // и шейдер всегда фолбэкается на глобальный IBL, не показывая
+        // отражения в помещениях.
+        probe::update_lighting_uniform(
+            &self.queue,
+            &self.probe_lighting_uniform,
+            &self.probes,
+        );
 
         let splits = csm::split_distances(camera.near, camera.far.min(200.0), 0.5);
         let cascade_vp = csm::build_cascades(view, proj_unjittered, camera.near, camera.far, dir_light_dir, &splits);
@@ -2600,19 +2664,31 @@ fn make_transparent_pipeline(device: &wgpu::Device, camera_layout: &wgpu::BindGr
     }))
 }
 
+/// FIX: 5 bind-group-layout'ов вместо 4.
+///
+/// Ранее `probe_lighting_layout` приходил как `_probe_lighting_layout`
+/// и не включался в pipeline layout. `deferred_lighting.wgsl` объявляет
+/// @group(4) для reflection probes — это ломало либо создание pipeline
+/// (validation error), либо probes не работали (bind group missing).
 fn make_lighting_pipeline(
     device: &wgpu::Device,
     lighting_layout: &wgpu::BindGroupLayout,
     lights_layout: &wgpu::BindGroupLayout,
     shadow2_layout: &wgpu::BindGroupLayout,
     cluster_lighting_layout: &wgpu::BindGroupLayout,
-    _probe_lighting_layout: &wgpu::BindGroupLayout,
+    probe_lighting_layout: &wgpu::BindGroupLayout,
 ) -> Result<wgpu::RenderPipeline, String> {
     let src = crate::shader_source!("src/render/shaders/deferred_lighting.wgsl")?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("lighting_shader"), source: wgpu::ShaderSource::Wgsl(src.into()) });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("lighting_pipeline_layout"),
-        bind_group_layouts: &[Some(lighting_layout), Some(lights_layout), Some(shadow2_layout), Some(cluster_lighting_layout)],
+        bind_group_layouts: &[
+            Some(lighting_layout),
+            Some(lights_layout),
+            Some(shadow2_layout),
+            Some(cluster_lighting_layout),
+            Some(probe_lighting_layout),
+        ],
         immediate_size: 0,
     });
     Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

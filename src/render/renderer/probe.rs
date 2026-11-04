@@ -76,8 +76,6 @@ impl ProbeCubemap {
 
 /// 6 view-матриц для рендера cubemap из позиции probe'а.
 /// Стандартный порядок wgpu: +X, -X, +Y, -Y, +Z, -Z.
-///
-/// Для каждой грани возвращаем `proj * view`.
 pub fn cube_face_view_projs(pos: Vec3, near: f32, far: f32) -> [Mat4; 6] {
     let proj = crate::render::camera::perspective_rh(
         std::f32::consts::FRAC_PI_2,
@@ -121,10 +119,6 @@ pub struct ProbeBakeUniform {
 /// Использует существующие `draws` (обычно — из основного кадра).
 /// Пайплайн: forward PBR с ambient + directional lights (без shadows —
 /// это первая версия, shadow-pass в probe добавится позже).
-///
-/// `camera_buffer` обновляется на каждый face, чтобы fragment-шейдер
-/// мог читать `camera_pos`. В шейдере probe используется `camera_pos`
-/// = позиция probe для правильных отражений.
 #[allow(clippy::too_many_arguments)]
 pub fn bake_probe(
     r: &mut Renderer,
@@ -178,7 +172,6 @@ pub fn bake_probe(
             label: Some("probe_bake_encoder"),
         });
 
-        // Рендерим forward в face-view.
         {
             let probe = &r.probes[probe_idx];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -212,8 +205,6 @@ pub fn bake_probe(
             pass.set_bind_group(1, &r.lights_bind_group, &[]);
             pass.set_bind_group(2, &r.sd.shadow2_bind_group, &[]);
 
-            // Draw все opaque instances (blend skip — упрощение,
-            // прозрачные объекты в probe не попадают).
             let instance_stride = std::mem::size_of::<InstanceData>() as u64;
             let mut offset_bytes: u64 = 0;
             for d in draws {
@@ -254,4 +245,28 @@ pub fn bake_probe(
         probe_pos.y,
         probe_pos.z
     );
+}
+
+pub fn update_lighting_uniform(
+    queue: &wgpu::Queue,
+    uniform_buffer: &wgpu::Buffer,
+    probes: &[ProbeCubemap],
+) {
+    let mut data: ProbeLightingUniform = bytemuck::Zeroable::zeroed();
+    let mut active: u32 = 0;
+    for (i, p) in probes.iter().enumerate().take(MAX_REFLECTION_PROBES) {
+        if !p.baked {
+            continue;
+        }
+        let center = (p.box_min + p.box_max) * 0.5;
+        data.probes[i] = ProbeInfo {
+            center_enabled: [center.x, center.y, center.z, 1.0],
+            box_min: [p.box_min.x, p.box_min.y, p.box_min.z, 0.0],
+            box_max: [p.box_max.x, p.box_max.y, p.box_max.z, 0.0],
+            params: [1.0, 8.0, 1.0, 0.0],
+        };
+        active += 1;
+    }
+    data.counts = [active, 0, 0, 0];
+    queue.write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&data));
 }
