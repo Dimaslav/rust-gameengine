@@ -370,6 +370,7 @@ fn load_materials(
                         .unwrap_or(gltf::texture::MinFilter::Linear),
                 ),
                 mip_filter: SamplerFilter::Linear,
+                ..Default::default()
             };
         }
 

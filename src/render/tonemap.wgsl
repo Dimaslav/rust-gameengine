@@ -1,15 +1,12 @@
 // Tonemap + post-processing финал.
 //
-// ИЗМЕНЕНО (sRGB pipeline fix): LDR-таргет теперь non-sRGB
-// (`Rgba8Unorm`). Значит, GPU больше не кодирует linear → sRGB за нас.
-// Кодируем вручную в `srgb_encode` перед записью. Это убирает двойное
-// sRGB-кодирование UI/egui (egui_wgpu ругался на sRGB surface).
+// ИЗМЕНЕНО (Sprint 1: debanding): перед sRGB-encode добавлен
+// interleaved-gradient-noise (IGN) дизеринг на 1 LSB. Убирает
+// полосы (banding) на плавных градиентах неба и тумана.
 //
-// ИЗМЕНЕНО (Спринт 1.1 + 1.2):
-//   * выбор тонального маппера (AgX / ACES / Reinhard / Uncharted2 / None);
-//   * color grading: temperature, tint, contrast, saturation,
-//     ASC CDL (slope/gain + offset/lift + power/gamma);
-//   * exposure_bias (множитель к exposure).
+// ИЗМЕНЕНО (sRGB pipeline fix): LDR-таргет — non-sRGB
+// (`Rgba8Unorm`), кодируем вручную в `srgb_encode` перед записью.
+// Это убирает двойное sRGB-кодирование UI/egui.
 
 const PI: f32 = 3.14159265359;
 
@@ -36,7 +33,7 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 struct VertexOutput {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant frag_coord: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
@@ -53,7 +50,8 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
         vec2<f32>(0.0, -1.0),
     );
     var out: VertexOutput;
-    out.clip = vec4<f32>(positions[idx], 0.0, 1.0);
+    let p = positions[idx];
+    out.frag_coord = vec4<f32>(p, 0.0, 1.0);
     out.uv = uvs[idx];
     return out;
 }
@@ -61,9 +59,6 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 // ============================================================
 // sRGB encode (linear → sRGB)
 // ============================================================
-// LDR-таргет non-sRGB, поэтому кодируем вручную. Формула из
-// IEC 61966-2-1: piecewise, линейный сегмент около нуля,
-// gamma 2.4 выше cutoff.
 fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
     let cutoff = 0.0031308;
     let below = c * 12.92;
@@ -136,17 +131,9 @@ fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// ============================================================
-// Reinhard: x / (1 + x)
-// ============================================================
-
 fn tonemap_reinhard(x: vec3<f32>) -> vec3<f32> {
     return x / (1.0 + x);
 }
-
-// ============================================================
-// Uncharted 2 (Hable 2010)
-// ============================================================
 
 fn uncharted2_partial(x: vec3<f32>) -> vec3<f32> {
     let A = 0.15;
@@ -164,10 +151,6 @@ fn tonemap_uncharted2(x: vec3<f32>) -> vec3<f32> {
     let white_scale = 1.0 / uncharted2_partial(vec3<f32>(W));
     return clamp(curr * white_scale, vec3<f32>(0.0), vec3<f32>(1.0));
 }
-
-// ============================================================
-// Dispatcher
-// ============================================================
 
 fn tonemapper_apply(id: u32, x: vec3<f32>) -> vec3<f32> {
     switch (id) {
@@ -191,28 +174,22 @@ fn apply_color_grading(c_in: vec3<f32>, p: Params) -> vec3<f32> {
 
     var c = c_in;
 
-    // Temperature: +t → теплее (R+, B-), -t → холоднее.
     let t = clamp(temperature, -1.0, 1.0);
     c.r = c.r * (1.0 + t * 0.20);
     c.b = c.b * (1.0 - t * 0.20);
 
-    // Tint: +t → пурпурный (R+, B+, G-), -t → зелёный.
     let g = clamp(tint, -1.0, 1.0);
     c.g = c.g * (1.0 - g * 0.15);
     c.r = c.r * (1.0 + g * 0.05);
     c.b = c.b * (1.0 + g * 0.05);
 
-    // ASC CDL: out = (in * slope + offset) ^ power
-    // slope = gain, offset = lift, power = 1 / gamma
     let slope  = p.gain.rgb;
     let offset = p.lift.rgb;
     let power  = vec3<f32>(1.0) / max(p.gamma.rgb, vec3<f32>(0.01));
     c = pow(max(c * slope + offset, vec3<f32>(0.0)), power);
 
-    // Contrast (pivot 0.5).
     c = (c - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
 
-    // Saturation (Rec.709 luma).
     let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     c = mix(vec3<f32>(luma), c, saturation);
 
@@ -220,7 +197,7 @@ fn apply_color_grading(c_in: vec3<f32>, p: Params) -> vec3<f32> {
 }
 
 // ============================================================
-// Hash / noise
+// Hash / noise / dithering
 // ============================================================
 
 fn hash13(p3_in: vec3<f32>) -> f32 {
@@ -232,6 +209,18 @@ fn hash13(p3_in: vec3<f32>) -> f32 {
 fn film_grain(uv: vec2<f32>, t: f32) -> f32 {
     let p = vec3<f32>(uv * 1024.0, t);
     return hash13(p) * 2.0 - 1.0;
+}
+
+/// Interleaved Gradient Noise (Jimenez 2014) — стабильный
+/// screen-space noise для debanding и dithering.
+///
+/// Возвращает значение в [0, 1). Соседние пиксели получают
+/// разные значения, поэтому усреднение при 8-битной квантованности
+/// даёт «размазывание» градиента вместо ступенек.
+///
+/// Формула от Jorge Jimenez (Call of Duty: Advanced Warfare).
+fn ign(px: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
 }
 
 // ============================================================
@@ -285,7 +274,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_rgb = out_rgb * mix(1.0, v, vignette);
     }
 
-    // --- Film grain ---
+    // --- Film grain (эстетика, опционально) ---
     let grain = params.effects.y;
     if (grain > 0.0001) {
         let t = floor(params.values.z * 24.0);
@@ -295,7 +284,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_rgb = clamp(out_rgb + g * grain * 0.08 * grain_mod, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
-    // --- sRGB encode (LDR-таргет non-sRGB) ---
+    // --- sRGB encode + DEBAND DITHER ---
+    //
+    // Порядок важен:
+    //   1. clamp в [0,1] — иначе pow/encode даст мусор.
+    //   2. srgb_encode в float — до квантования.
+    //   3. + dither в [0..1) диапазоне (в sRGB-пространстве, где
+    //      квантование 8-bit и происходит).
+    //   4. hardware clamp в [0,1] перед записью в Rgba8Unorm.
+    //
+    // Dither амплитуда = 1 LSB (1/255). Для 10-bit HDR-таргета
+    // (если когда-нибудь перейдём) — 1/1023, но у нас Rgba8Unorm.
     let c = clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(srgb_encode(c), 1.0);
+    let srgb = srgb_encode(c);
+
+    // IGN работает в screen-space пикселях — используем frag_coord.xy.
+    // `- 0.5` центрирует шум вокруг нуля: без этого гистограмма
+    // сдвигается вверх на 0.5 LSB, и тёмные области светлеют.
+    let n = ign(in.frag_coord.xy) - 0.5;
+    let dithered = srgb + vec3<f32>(n / 255.0);
+
+    return vec4<f32>(clamp(dithered, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

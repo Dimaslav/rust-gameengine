@@ -1,4 +1,41 @@
 //! Функции кодирования рендер-проходов.
+//!
+//! # Порядок вызовов в `Renderer::render()`
+//!
+//! ```text
+//! [Sprint 4]   encode_cluster_assign    — atomicAdd counts + fill fixed-size cluster_lights
+//! [CSM]        encode_csm_all
+//! [Cube]       encode_cube_shadow_all
+//! [GBuffer]    encode_gbuffer_pass
+//! [Sprint 6]   encode_contact_shadow_pass — читает gbuffer_depth
+//! [Decals]     encode_decal_pass
+//! [SSAO]       encode_ssao_pass, encode_ssao_blur_pass
+//! [Lighting]   encode_lighting_pass       — читает cluster_lighting_bg
+//! [Sprint 5]   encode_atmosphere_pass  ─┐
+//! [Skybox]     encode_skybox_pass       ┴ взаимоисключающие
+//! [Forward]    encode_forward_pass        — линии
+//! [Particles]  encode_particles_pass
+//! [Transp]     encode_transparent_pass
+//! [Vol]        encode_volumetric_compute, encode_volumetric_composite
+//! [LensFlare]  encode_lens_flare_pass    — опционально
+//! [DOF]        encode_dof_pass
+//! [Motion]     encode_motion_blur_pass
+//! [TAA]        encode_taa_pass           — если taa_strength > 0.01
+//! [Post]       encode_post_processing    — bloom + tonemap + fxaa
+//!    или       encode_debug_pass
+//! [UI]         encode_ui_pass
+//! ```
+//!
+//! # Sprint 7 (variable-size cluster lists) не реализован
+//!
+//! Предполагалось, что `cluster_assign` делает только atomicAdd counts,
+//! затем prefix-sum строит offsets, а `cluster_fill` (второй проход)
+//! упаковывает. Промежуточные стадии `encode_cluster_prefix_sum` и
+//! `encode_cluster_fill` требовали `wgpu::ComputePipeline` с
+//! `immediate_size`-based serial scan и `cluster_cursors_buffer`,
+//! которых нет в `Renderer` / `SizeDependent`. **Функции удалены**,
+//! сейчас работает Sprint 4 (fixed-size per cluster):
+//! `cluster_assign` сам пишет в `cluster_lights[idx * 16 + local]`.
 
 use crate::render::csm::CASCADE_COUNT;
 use crate::render::debug::DebugView;
@@ -29,25 +66,17 @@ fn draw_all_instances<'a>(
     let mut offset_bytes: u64 = 0;
 
     for d in draws {
-        if d.instances.is_empty() {
-            continue;
-        }
-
+        if d.instances.is_empty() { continue; }
         if d.blend != include_blend {
             offset_bytes += d.instances.len() as u64 * instance_stride;
             continue;
         }
-
         let Some(mesh) = r.meshes.get(&d.mesh) else {
             offset_bytes += d.instances.len() as u64 * instance_stride;
             continue;
         };
 
-        let pipeline = if d.double_sided {
-            pipeline_double
-        } else {
-            pipeline_single
-        };
+        let pipeline = if d.double_sided { pipeline_double } else { pipeline_single };
         pass.set_pipeline(pipeline);
 
         if let Some(slot) = bind_material_at {
@@ -70,34 +99,87 @@ fn draw_all_instances<'a>(
 
 #[inline]
 fn clear(color: wgpu::Color) -> wgpu::Operations<wgpu::Color> {
-    wgpu::Operations {
-        load: wgpu::LoadOp::Clear(color),
-        store: wgpu::StoreOp::Store,
-    }
+    wgpu::Operations { load: wgpu::LoadOp::Clear(color), store: wgpu::StoreOp::Store }
 }
 
 #[inline]
 fn load() -> wgpu::Operations<wgpu::Color> {
-    wgpu::Operations {
-        load: wgpu::LoadOp::Load,
-        store: wgpu::StoreOp::Store,
-    }
+    wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }
 }
 
 #[inline]
 fn depth_clear(value: f32) -> wgpu::Operations<f32> {
-    wgpu::Operations {
-        load: wgpu::LoadOp::Clear(value),
-        store: wgpu::StoreOp::Store,
-    }
+    wgpu::Operations { load: wgpu::LoadOp::Clear(value), store: wgpu::StoreOp::Store }
 }
 
 #[inline]
 fn depth_load() -> wgpu::Operations<f32> {
-    wgpu::Operations {
-        load: wgpu::LoadOp::Load,
-        store: wgpu::StoreOp::Store,
-    }
+    wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }
+}
+
+// ============================================================
+// Sprint 4: Clustered lighting — assign (single pass)
+// ============================================================
+
+/// Pass 1/1: assign.
+///
+/// Один поток на point light. Считает, сколько lights попадает в
+/// каждый кластер, через atomicAdd в `cluster_counts_buffer`,
+/// и параллельно пишет `light_idx` в
+/// `cluster_lights[cluster_idx * 16 + local]` для `local < 16`.
+/// Lights сверх 16 на кластер отбрасываются (см. ограничение
+/// `MAX_LIGHTS_PER_CLUSTER` в `cluster_assign.wgsl`).
+///
+/// `cluster_counts_buffer` должен быть очищен (`clear_buffer`) до вызова.
+///
+/// Dispatch: `(light_count + 63) / 64` workgroups × 64 threads.
+pub(super) fn encode_cluster_assign(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    light_count: u32,
+) {
+    if light_count == 0 { return; }
+    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("cluster_assign_pass"),
+        timestamp_writes: None,
+    });
+    cpass.set_pipeline(&r.cluster_pipeline);
+    cpass.set_bind_group(0, &r.sd.cluster_compute_bind_group, &[]);
+    let groups = light_count.div_ceil(64);
+    cpass.dispatch_workgroups(groups, 1, 1);
+}
+
+// ============================================================
+// Sprint 6: Contact shadows
+// ============================================================
+
+/// Screen-space contact shadows.
+///
+/// Пишет в `sd.contact_shadow_view` (R16Float): R = 1.0 (освещён)
+/// или 0.0 (в тени). Lighting умножает directional light #0 на этот
+/// канал (см. `deferred_lighting.wgsl`).
+///
+/// Читает `gbuffer_depth_view` — должен вызываться ПОСЛЕ `encode_gbuffer_pass`.
+pub(super) fn encode_contact_shadow_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("contact_shadow_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.contact_shadow_view,
+            resolve_target: None,
+            ops: clear(wgpu::Color::WHITE),
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(&r.contact_shadow_pipeline);
+    pass.set_bind_group(0, &r.sd.contact_shadow_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
 }
 
 // ============================================================
@@ -126,13 +208,8 @@ pub(super) fn encode_shadow_pass(
 
     pass.set_bind_group(0, &r.shadow_pass_bind_group, &[slot_offset]);
     draw_all_instances(
-        &mut pass,
-        r,
-        draws,
-        Some(1),
-        false,
-        &r.shadow_pipeline,
-        &r.shadow_pipeline_double_sided,
+        &mut pass, r, draws, Some(1), false,
+        &r.shadow_pipeline, &r.shadow_pipeline_double_sided,
     );
 }
 
@@ -159,9 +236,7 @@ pub(super) fn encode_cube_shadow_all(
             let slot = 3 + (cube * 6 + face) as u64;
             let slot_offset = (slot * r.shadow_pass_stride) as u32;
             encode_shadow_pass(
-                r,
-                encoder,
-                draws,
+                r, encoder, draws,
                 &r.cube_shadow_face_views[cube][face],
                 slot_offset,
             );
@@ -182,28 +257,20 @@ pub(super) fn encode_gbuffer_pass(
         label: Some("gbuffer_pass"),
         color_attachments: &[
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_albedo_view,
-                resolve_target: None,
-                ops: clear(wgpu::Color::BLACK),
-                depth_slice: None,
+                view: &r.sd.gbuffer_albedo_view, resolve_target: None,
+                ops: clear(wgpu::Color::BLACK), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_normal_view,
-                resolve_target: None,
-                ops: clear(wgpu::Color::BLACK),
-                depth_slice: None,
+                view: &r.sd.gbuffer_normal_view, resolve_target: None,
+                ops: clear(wgpu::Color::BLACK), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_emissive_view,
-                resolve_target: None,
-                ops: clear(wgpu::Color::BLACK),
-                depth_slice: None,
+                view: &r.sd.gbuffer_emissive_view, resolve_target: None,
+                ops: clear(wgpu::Color::BLACK), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.motion_view,
-                resolve_target: None,
-                ops: clear(wgpu::Color::TRANSPARENT),
-                depth_slice: None,
+                view: &r.sd.motion_view, resolve_target: None,
+                ops: clear(wgpu::Color::TRANSPARENT), depth_slice: None,
             }),
         ],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -218,13 +285,8 @@ pub(super) fn encode_gbuffer_pass(
 
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
     draw_all_instances(
-        &mut pass,
-        r,
-        draws,
-        Some(1),
-        false,
-        &r.gbuffer_pipeline,
-        &r.gbuffer_pipeline_double_sided,
+        &mut pass, r, draws, Some(1), false,
+        &r.gbuffer_pipeline, &r.gbuffer_pipeline_double_sided,
     );
 }
 
@@ -237,39 +299,27 @@ pub(super) fn encode_decal_pass(
     encoder: &mut wgpu::CommandEncoder,
     decals: &[crate::render::decal::DecalDraw],
 ) {
-    if decals.is_empty() {
-        return;
-    }
-    if !decals.iter().any(|d| !d.instances.is_empty()) {
-        return;
-    }
+    if decals.is_empty() { return; }
+    if !decals.iter().any(|d| !d.instances.is_empty()) { return; }
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("decal_pass"),
         color_attachments: &[
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_albedo_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.gbuffer_albedo_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_normal_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.gbuffer_normal_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.gbuffer_emissive_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.gbuffer_emissive_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.motion_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.motion_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
         ],
         depth_stencil_attachment: None,
@@ -284,7 +334,6 @@ pub(super) fn encode_decal_pass(
     let Some(cube) = r.meshes.get("cube") else { return; };
     pass.set_vertex_buffer(0, cube.vertex_buffer.slice(..));
     pass.set_index_buffer(cube.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-
     pass.set_pipeline(&r.decal_pipeline);
 
     let stride = std::mem::size_of::<crate::render::decal::DecalInstance>() as u64;
@@ -314,10 +363,8 @@ pub(super) fn encode_ssao_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder)
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("ssao_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.ssao_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::WHITE),
-            depth_slice: None,
+            view: &r.sd.ssao_view, resolve_target: None,
+            ops: clear(wgpu::Color::WHITE), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -333,10 +380,8 @@ pub(super) fn encode_ssao_blur_pass(r: &Renderer, encoder: &mut wgpu::CommandEnc
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("ssao_blur_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.ssao_blur_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::WHITE),
-            depth_slice: None,
+            view: &r.sd.ssao_blur_view, resolve_target: None,
+            ops: clear(wgpu::Color::WHITE), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -356,10 +401,8 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("lighting_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &r.sd.hdr_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -371,6 +414,7 @@ pub(super) fn encode_lighting_pass(r: &Renderer, encoder: &mut wgpu::CommandEnco
     pass.set_bind_group(0, &r.sd.lighting_bind_group, &[]);
     pass.set_bind_group(1, &r.lights_bind_group, &[]);
     pass.set_bind_group(2, &r.sd.shadow2_bind_group, &[]);
+    pass.set_bind_group(3, &r.sd.cluster_lighting_bind_group, &[]);
     fullscreen_triangle(&mut pass);
 }
 
@@ -382,10 +426,8 @@ pub(super) fn encode_skybox_pass(r: &Renderer, encoder: &mut wgpu::CommandEncode
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("skybox_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_view,
-            resolve_target: None,
-            ops: load(),
-            depth_slice: None,
+            view: &r.sd.hdr_view, resolve_target: None,
+            ops: load(), depth_slice: None,
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &r.sd.gbuffer_depth_view,
@@ -403,6 +445,32 @@ pub(super) fn encode_skybox_pass(r: &Renderer, encoder: &mut wgpu::CommandEncode
 }
 
 // ============================================================
+// Sprint 5: Sky atmosphere
+// ============================================================
+
+pub(super) fn encode_atmosphere_pass(r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("atmosphere_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_view, resolve_target: None,
+            ops: load(), depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &r.sd.gbuffer_depth_view,
+            depth_ops: Some(depth_load()),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+
+    pass.set_pipeline(&r.atmosphere_pipeline);
+    pass.set_bind_group(0, &r.atmosphere_bind_group, &[]);
+    fullscreen_triangle(&mut pass);
+}
+
+// ============================================================
 // Forward (lines)
 // ============================================================
 
@@ -411,20 +479,14 @@ pub(super) fn encode_forward_pass(
     encoder: &mut wgpu::CommandEncoder,
     line_vertices: &[LineVertex],
 ) {
-    if line_vertices.is_empty() && r.line_buffer.vertex_count == 0 {
-        return;
-    }
-    if r.line_buffer.vertex_count == 0 {
-        return;
-    }
+    if line_vertices.is_empty() && r.line_buffer.vertex_count == 0 { return; }
+    if r.line_buffer.vertex_count == 0 { return; }
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("forward_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_view,
-            resolve_target: None,
-            ops: load(),
-            depth_slice: None,
+            view: &r.sd.hdr_view, resolve_target: None,
+            ops: load(), depth_slice: None,
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &r.sd.gbuffer_depth_view,
@@ -451,17 +513,13 @@ pub(super) fn encode_particles_pass(
     encoder: &mut wgpu::CommandEncoder,
     particle_count: u32,
 ) {
-    if particle_count == 0 {
-        return;
-    }
+    if particle_count == 0 { return; }
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("particles_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_view,
-            resolve_target: None,
-            ops: load(),
-            depth_slice: None,
+            view: &r.sd.hdr_view, resolve_target: None,
+            ops: load(), depth_slice: None,
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &r.sd.gbuffer_depth_view,
@@ -488,24 +546,18 @@ pub(super) fn encode_transparent_pass(
     encoder: &mut wgpu::CommandEncoder,
     draws: &[MeshDraw],
 ) {
-    if !draws.iter().any(|d| d.blend && !d.instances.is_empty()) {
-        return;
-    }
+    if !draws.iter().any(|d| d.blend && !d.instances.is_empty()) { return; }
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("transparent_pass"),
         color_attachments: &[
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.hdr_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.hdr_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
             Some(wgpu::RenderPassColorAttachment {
-                view: &r.sd.motion_view,
-                resolve_target: None,
-                ops: load(),
-                depth_slice: None,
+                view: &r.sd.motion_view, resolve_target: None,
+                ops: load(), depth_slice: None,
             }),
         ],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -522,13 +574,8 @@ pub(super) fn encode_transparent_pass(
     pass.set_bind_group(1, &r.lights_bind_group, &[]);
     pass.set_bind_group(2, &r.sd.shadow2_bind_group, &[]);
     draw_all_instances(
-        &mut pass,
-        r,
-        draws,
-        Some(3),
-        true,
-        &r.transparent_pipeline,
-        &r.transparent_pipeline_double_sided,
+        &mut pass, r, draws, Some(3), true,
+        &r.transparent_pipeline, &r.transparent_pipeline_double_sided,
     );
 }
 
@@ -559,10 +606,8 @@ pub(super) fn encode_volumetric_composite(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("volumetric_composite_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_fog_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &r.sd.hdr_fog_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -585,10 +630,8 @@ pub(super) fn encode_lens_flare_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("lens_flare_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_fog_view,
-            resolve_target: None,
-            ops: load(),
-            depth_slice: None,
+            view: &r.sd.hdr_fog_view, resolve_target: None,
+            ops: load(), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -611,10 +654,8 @@ pub(super) fn encode_dof_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("dof_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_dof_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &r.sd.hdr_dof_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -637,10 +678,8 @@ pub(super) fn encode_motion_blur_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("motion_blur_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.hdr_mb_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &r.sd.hdr_mb_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -651,6 +690,10 @@ pub(super) fn encode_motion_blur_pass(
     pass.set_bind_group(0, &r.motion_blur_bind_group, &[]);
     fullscreen_triangle(&mut pass);
 }
+
+// ============================================================
+// TAA
+// ============================================================
 
 pub(super) fn encode_taa_pass(
     r: &Renderer,
@@ -664,10 +707,8 @@ pub(super) fn encode_taa_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("taa_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: dst_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: dst_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -696,10 +737,8 @@ pub(super) fn encode_bloom_prefilter(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("bloom_prefilter"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &mip0.view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &mip0.view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -719,10 +758,8 @@ pub(super) fn encode_bloom_downsample(r: &Renderer, encoder: &mut wgpu::CommandE
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom_downsample"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &dst.view,
-                resolve_target: None,
-                ops: clear(wgpu::Color::BLACK),
-                depth_slice: None,
+                view: &dst.view, resolve_target: None,
+                ops: clear(wgpu::Color::BLACK), depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -744,8 +781,7 @@ pub(super) fn encode_bloom_upsample(r: &Renderer, encoder: &mut wgpu::CommandEnc
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom_upsample"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &dst.view,
-                resolve_target: None,
+                view: &dst.view, resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -790,10 +826,8 @@ pub(super) fn encode_composite_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("composite_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &r.sd.ldr_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: &r.sd.ldr_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -813,10 +847,8 @@ pub(super) fn encode_fxaa_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("fxaa_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: swap_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: swap_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -853,10 +885,8 @@ pub(super) fn encode_debug_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("debug_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: swap_view,
-            resolve_target: None,
-            ops: clear(wgpu::Color::BLACK),
-            depth_slice: None,
+            view: swap_view, resolve_target: None,
+            ops: clear(wgpu::Color::BLACK), depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -891,7 +921,7 @@ pub(super) fn encode_debug_pass(
 }
 
 // ============================================================
-// Runtime UI
+// UI
 // ============================================================
 
 pub(super) fn encode_ui_pass(
@@ -900,15 +930,12 @@ pub(super) fn encode_ui_pass(
     swap_view: &wgpu::TextureView,
     instance_count: u32,
 ) {
-    if instance_count == 0 {
-        return;
-    }
+    if instance_count == 0 { return; }
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("ui_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: swap_view,
-            resolve_target: None,
+            view: swap_view, resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,

@@ -3,11 +3,16 @@
 //! ## Изменения (v2)
 //!
 //! * `EntitySnapshot.entity_id` / `.parent` теперь `Option<Entity>`
-//!   (index + generation), а не `Option<u32>`. Старые сцены (v1)
-//!   не загрузятся — формат инкрементирован в `SaveHeader`.
+//!   (index + generation), а не `Option<u32>`.
 //! * `TriggerSnapshot` для `CallElevator` хранит `elevator: Option<Entity>`
-//!   и `floor_idx: Option<u32>` отдельно (раньше — в общем `param: [f32; 4]`).
+//!   и `floor_idx: Option<u32>` отдельно.
 //! * `b64_encode` / `b64_decode` — через crate `base64`.
+//!
+//! ## Изменения (v3)
+//!
+//! * Добавлены `dialog_npc: Option<String>` и `vendor_npc: Option<String>`
+//!   в `EntitySnapshot`. Раньше эти компоненты терялись при Save/Load
+//!   и при Editor Undo — все NPC переставали отвечать на `[E] Talk`.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -26,9 +31,11 @@ use crate::game::components::{
     Transform, Trigger, TriggerAction, Velocity, Visible,
 };
 use crate::game::decals::Decal;
+use crate::game::dialogs::DialogNpc;
 use crate::game::lights::{DirectionalLight, PointLight};
 use crate::game::rpg::{Chest, Door, GoldValue, KeyItem, Npc, QuestTarget};
 use crate::game::timers::{Timer, TimerMode};
+use crate::game::vendors::VendorNpc;
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
 
@@ -162,6 +169,14 @@ pub struct EntitySnapshot {
 
     #[serde(default)]
     pub script: Option<ScriptComponentSnapshot>,
+
+    /// Диалоговый NPC — `DialogNpc::dialog_id`. См. `src/game/dialogs.rs`.
+    #[serde(default)]
+    pub dialog_npc: Option<String>,
+
+    /// NPC-вендор — `VendorNpc::vendor_id`. См. `src/game/vendors.rs`.
+    #[serde(default)]
+    pub vendor_npc: Option<String>,
 }
 
 // ============================================================
@@ -206,16 +221,10 @@ pub struct ChaseSnapshot {
     pub stop_distance: f32,
 }
 
-/// **ИЗМЕНЕНО:** для `CallElevator` ссылка на elevator хранится
-/// в `elevator: Option<Entity>`, номер этажа — в `floor_idx: Option<u32>`.
-/// Раньше оба кодировались в `param: [f32; 4]`, что при generation > 0
-/// или floor_idx > 2^24 давало потерю точности.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerSnapshot {
     pub radius: f32,
     pub action: String,
-    /// Для teleport — [x, y, z, 0]; для tint — [r, g, b, a];
-    /// для play_sound/despawn/call_elevator — не используется.
     pub param: [f32; 4],
     pub once: bool,
     pub fired: bool,
@@ -892,6 +901,14 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         });
         any = true;
     }
+    if let Some(dn) = world.get::<DialogNpc>(e) {
+        s.dialog_npc = Some(dn.dialog_id.clone());
+        any = true;
+    }
+    if let Some(vn) = world.get::<VendorNpc>(e) {
+        s.vendor_npc = Some(vn.vendor_id.clone());
+        any = true;
+    }
 
     if any { Some(s) } else { None }
 }
@@ -1293,6 +1310,12 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
                 started: false,
             },
         );
+    }
+    if let Some(id) = snap.dialog_npc {
+        world.insert(e, DialogNpc { dialog_id: id });
+    }
+    if let Some(id) = snap.vendor_npc {
+        world.insert(e, VendorNpc { vendor_id: id });
     }
 
     e

@@ -1,17 +1,5 @@
-//! Источники света как ECS-компоненты.
-//!
-//! `DirectionalLight` и `PointLight` не связаны с рендером напрямую.
-//! Игра собирает их из World каждый кадр и передаёт в Renderer через
-//! `Game::dir_lights(world)` / `Game::point_lights(world)`.
-
 use glam::Vec3;
 
-/// Направленный свет (солнце, луна, прожектор без затухания).
-///
-/// `direction` — вектор ОТ сцены К источнику (то же соглашение, что
-/// в шейдере: radiance = normalize(direction) * intensity).
-/// `color` — RGB в линейном пространстве [0..1].
-/// `intensity` — множитель HDR-яркости. Для солнца ~1.0–1.5.
 #[derive(Debug, Clone, Copy)]
 pub struct DirectionalLight {
     pub direction: Vec3,
@@ -72,4 +60,15 @@ impl Default for PointLight {
             range: 15.0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReflectionProbe {
+    /// Slot в `Renderer::probes` (0..MAX_REFLECTION_PROBES).
+    pub probe_id: u32,
+    /// World-space AABB для выбора ближайшего probe.
+    pub box_min: Vec3,
+    pub box_max: Vec3,
+    /// Включает probe в lighting. `false` → IBL fallback.
+    pub enabled: bool,
 }

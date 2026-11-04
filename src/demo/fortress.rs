@@ -301,6 +301,9 @@ pub struct FortressDemo {
     weapon_recoil: f32,
     pending_hit_stop: Option<(f32, f32)>,
     auto_fire_accumulator: f32,
+
+    // Sprint 8: bake probe один раз за сессию.
+    probe_baked_this_session: bool,
 }
 
 impl FortressDemo {
@@ -401,6 +404,7 @@ impl FortressDemo {
             weapon_recoil: 0.0,
             pending_hit_stop: None,
             auto_fire_accumulator: 0.0,
+            probe_baked_this_session: false,
         }
     }
 
@@ -1757,6 +1761,8 @@ impl Game for FortressDemo {
         if let Ok(ev) = AnimationEvents::from_file("assets/animated.anim_events.ron") {
             self.animation_events = ev;
         }
+
+        log::info!("FortressDemo: {} reflection probe slots ready", renderer.probes.len());
     }
 
     fn configure_input(&mut self, map: &mut InputMap) {
@@ -1836,6 +1842,27 @@ impl Game for FortressDemo {
             self.camera.distance = 24.0;
             self.camera.yaw = -0.6;
             self.camera.pitch = 0.75;
+        }
+
+        // Sprint 8: bake probe при первом входе в play-режим.
+        // Один раз, в центре Act2. Используем уже собранные draws
+        // (в play-режиме они полные).
+        if input.play_mode && !self.probe_baked_this_session {
+            self.probe_baked_this_session = true;
+            if !renderer.probes.is_empty() {
+                let draws = self.collect_draws(world, renderer);
+                let center = crate::demo::fortress::ACT2_CENTER + Vec3::Y * 3.0;
+                let box_half = Vec3::splat(35.0);
+                crate::render::renderer::probe::bake_probe(
+                    renderer,
+                    0,
+                    &draws,
+                    center,
+                    center - box_half,
+                    center + box_half,
+                );
+                log::info!("FortressDemo: probe 0 baked at {:?}", center);
+            }
         }
 
         if input.play_mode && !self.was_in_play_mode {

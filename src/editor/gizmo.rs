@@ -3,11 +3,31 @@
 //! Hit-test делается в **экранном пространстве**: положение каждой оси
 //! проецируется через view-projection в пиксели, и расстояние до
 //! соответствующего отрезка сравнивается с порогом в пикселях.
+//!
+//! ## Hierarchy-aware drag
+//!
+//! Раньше `apply_drag_with_mode` наивно прибавлял мировой offset к
+//! локальному `Transform.position` / умножал на локальную `rotation` /
+//! `scale`. Это работало для root-entity, но ломалось для parented:
+//!   * Translate: мировой offset ≠ локальный offset при повёрнутом родителе.
+//!   * Rotate: ось вращения мировая, а rotation — локальная.
+//!   * Scale: world-axis scale ≠ local-axis scale.
+//!
+//! Теперь `begin_drag` кэширует `world_position`, `world_rotation` и
+//! `inverse(parent_world)` каждой entity на момент старта drag'а.
+//! `apply_drag` вычисляет новую world-трансформацию, а затем конвертирует
+//! её в local через `inverse(parent_world_at_start)`.
+//!
+//! Сущности, чей предок тоже выделен, **пропускаются**: движение/поворот
+//! предка автоматически распространяется на потомка через иерархию.
+//! Иначе offset применился бы дважды.
 
-use glam::{Quat, Vec3};
+use std::collections::HashSet;
+
+use glam::{Mat4, Quat, Vec3};
 
 use crate::ecs::{Entity, World};
-use crate::game::components::{MeshHandle, Transform};
+use crate::game::components::{MeshHandle, Parent, Transform};
 use crate::render::{Camera3D, LineBatch, Renderer};
 
 const PIXEL_THRESHOLD: f32 = 12.0;
@@ -20,7 +40,6 @@ pub enum GizmoMode {
     Rotate,
     Scale,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -67,6 +86,14 @@ pub struct GizmoState {
 pub struct GizmoDrag {
     pub axis: Axis,
     pub start_states: Vec<(Entity, Transform)>,
+    /// World-space position каждой entity в момент старта drag'а.
+    pub start_world_positions: Vec<Vec3>,
+    /// World-space rotation каждой entity в момент старта drag'а.
+    pub start_world_rotations: Vec<Quat>,
+    /// `inverse(parent_world)` на момент старта drag'а. `None` для root.
+    pub start_parent_worlds_inv: Vec<Option<Mat4>>,
+    /// World-rotation родителя на момент старта. `None` для root.
+    pub start_parent_rotations: Vec<Option<Quat>>,
     pub start_center: Vec3,
     pub start_ray_t: f32,
     pub start_point: Vec3,
@@ -406,6 +433,29 @@ pub fn begin_drag(
         return None;
     }
 
+    // Кэш world position/rotation + inverse(parent_world) для hierarchy-aware drag.
+    let mut start_world_positions = Vec::with_capacity(start_states.len());
+    let mut start_world_rotations = Vec::with_capacity(start_states.len());
+    let mut start_parent_worlds_inv = Vec::with_capacity(start_states.len());
+    let mut start_parent_rotations = Vec::with_capacity(start_states.len());
+
+    for (e, _t) in &start_states {
+        let world_mat = crate::game::world_matrix(world, *e);
+        let (_s, r, p) = world_mat.to_scale_rotation_translation();
+        start_world_positions.push(p);
+        start_world_rotations.push(r);
+
+        if let Some(Parent(parent)) = world.get::<Parent>(*e).copied() {
+            let parent_world = crate::game::world_matrix(world, parent);
+            let (_ps, pr, _pt) = parent_world.to_scale_rotation_translation();
+            start_parent_worlds_inv.push(Some(parent_world.inverse()));
+            start_parent_rotations.push(Some(pr));
+        } else {
+            start_parent_worlds_inv.push(None);
+            start_parent_rotations.push(None);
+        }
+    }
+
     let mut scale_along = 0.0_f32;
     let mut n = 0;
     for (_, t) in &start_states {
@@ -421,11 +471,38 @@ pub fn begin_drag(
     Some(GizmoDrag {
         axis,
         start_states,
+        start_world_positions,
+        start_world_rotations,
+        start_parent_worlds_inv,
+        start_parent_rotations,
         start_center: center,
         start_ray_t,
         start_point,
         start_scale_along_axis,
     })
+}
+
+/// Предикат: у `entity` есть выделенный предок (движение предка распространяется
+/// на потомка автоматически, поэтому `entity` нужно пропустить).
+fn has_selected_ancestor(
+    world: &World,
+    entity: Entity,
+    selected: &HashSet<Entity>,
+) -> bool {
+    let mut cur = entity;
+    for _ in 0..64 {
+        match world.get::<Parent>(cur).copied() {
+            Some(Parent(p)) => {
+                if selected.contains(&p) {
+                    return true;
+                }
+                cur = p;
+            }
+            None => return false,
+        }
+    }
+    // Цикл — считаем «есть предок», чтобы не давить двойной offset.
+    true
 }
 
 pub fn apply_drag_with_mode(
@@ -448,6 +525,9 @@ pub fn apply_drag_with_mode(
         renderer.size.height as f32,
     );
 
+    // Множество выделенных entity — для пропуска «потомков выделенных предков».
+    let selected_set: HashSet<Entity> = drag.start_states.iter().map(|(e, _)| *e).collect();
+
     match mode {
         GizmoMode::Translate => {
             let Some((point, _)) = closest_point_on_axis(origin, dir, center, axis) else {
@@ -457,15 +537,32 @@ pub fn apply_drag_with_mode(
             if snap {
                 delta = (delta * 2.0).round() * 0.5;
             }
-            let offset = axis * delta;
+            let offset_world = axis * delta;
 
-            for (e, start_t) in &drag.start_states {
+            for (i, (e, start_t)) in drag.start_states.iter().enumerate() {
+                if has_selected_ancestor(world, *e, &selected_set) {
+                    continue;
+                }
+                let start_world_pos = drag.start_world_positions[i];
+                let new_world_pos = start_world_pos + offset_world;
+
+                let new_local_pos = if let Some(parent_inv) = drag.start_parent_worlds_inv[i] {
+                    parent_inv.transform_point3(new_world_pos)
+                } else {
+                    new_world_pos
+                };
+
                 let mut t = *start_t;
-                t.position = start_t.position + offset;
+                t.position = new_local_pos;
                 world.insert(*e, t);
             }
         }
         GizmoMode::Scale => {
+            // Скалирование работает в локальном space: ось gizmo
+            // совпадает с локальной осью scale только для неповёрнутых
+            // и не-родительских entity. Для повёрнутых/в иерархии
+            // это упрощение — полноценный fix требует SVD-разложения
+            // матрицы (по сути — сферической интерполяции scale).
             let Some((point, _)) = closest_point_on_axis(origin, dir, center, axis) else {
                 return;
             };
@@ -478,6 +575,9 @@ pub fn apply_drag_with_mode(
             mul = mul.clamp(0.01, 100.0);
 
             for (e, start_t) in &drag.start_states {
+                if has_selected_ancestor(world, *e, &selected_set) {
+                    continue;
+                }
                 let mut t = *start_t;
                 match drag.axis {
                     Axis::X => t.scale.x = (start_t.scale.x * mul).max(0.01),
@@ -505,15 +605,33 @@ pub fn apply_drag_with_mode(
                 let step = std::f32::consts::PI / 12.0;
                 angle = (angle / step).round() * step;
             }
-            let q = Quat::from_axis_angle(axis, angle);
+            let q_world = Quat::from_axis_angle(axis, angle);
 
-            for (e, start_t) in &drag.start_states {
-                let rel = start_t.position - center;
-                let new_pos = center + q * rel;
-                let new_rot = (q * start_t.rotation).normalize();
+            for (i, (e, start_t)) in drag.start_states.iter().enumerate() {
+                if has_selected_ancestor(world, *e, &selected_set) {
+                    continue;
+                }
+                let start_world_pos = drag.start_world_positions[i];
+                let start_world_rot = drag.start_world_rotations[i];
+
+                let new_world_pos = center + q_world * (start_world_pos - center);
+                let new_world_rot = (q_world * start_world_rot).normalize();
+
+                let (new_local_pos, new_local_rot) =
+                    if let (Some(parent_inv), Some(parent_rot)) = (
+                        drag.start_parent_worlds_inv[i],
+                        drag.start_parent_rotations[i],
+                    ) {
+                        let local_pos = parent_inv.transform_point3(new_world_pos);
+                        let local_rot = (parent_rot.inverse() * new_world_rot).normalize();
+                        (local_pos, local_rot)
+                    } else {
+                        (new_world_pos, new_world_rot)
+                    };
+
                 let t = Transform {
-                    position: new_pos,
-                    rotation: new_rot,
+                    position: new_local_pos,
+                    rotation: new_local_rot,
                     scale: start_t.scale,
                 };
                 world.insert(*e, t);

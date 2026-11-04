@@ -92,6 +92,25 @@ pub struct SizeDependent {
     pub hdr_view: wgpu::TextureView,
     pub motion_view: wgpu::TextureView,
 
+    /// Contact shadow visibility (R16Float, R-канал).
+    pub contact_shadow_view: wgpu::TextureView,
+    pub _contact_shadow_tex: wgpu::Texture,
+    pub contact_shadow_bind_group: wgpu::BindGroup,
+
+    // === Sprint 4: Clustered lighting ===
+    /// atomic-u32 на кластер. Каждый кадр очищается через `clear_buffer`.
+    pub cluster_counts_buffer: wgpu::Buffer,
+    /// `MAX_LIGHTS_PER_CLUSTER` слотов на кластер (u32 light_idx).
+    pub cluster_lights_buffer: wgpu::Buffer,
+    /// World-space point lights (storage buffer). Заполняется из
+    /// `point_lights` (Vec<GpuPointLight>) в `render()`.
+    pub point_lights_storage_buffer: wgpu::Buffer,
+    /// Compute bind group: camera + cluster params + point lights storage + cluster buffers.
+    pub cluster_compute_bind_group: wgpu::BindGroup,
+    /// Fragment bind group: point lights storage + cluster buffers + cluster params
+    /// (для group 3 в deferred_lighting).
+    pub cluster_lighting_bind_group: wgpu::BindGroup,
+
     /// HDR после volumetric fog. Вход для DOF.
     pub hdr_fog_view: wgpu::TextureView,
     pub _hdr_fog_tex: wgpu::Texture,
@@ -109,6 +128,7 @@ pub struct SizeDependent {
     pub taa_read_bgs: [wgpu::BindGroup; 2],
     pub taa_uniform: wgpu::Buffer,
 
+    pub volumetric_fog_view: wgpu::TextureView,
     pub _volumetric_fog_tex: wgpu::Texture,
     pub volumetric_compute_bg: wgpu::BindGroup,
     pub volumetric_composite_bg: wgpu::BindGroup,
@@ -155,8 +175,10 @@ pub fn build_size_dependent(
     taa_layout: &wgpu::BindGroupLayout,
     volumetric_compute_layout: &wgpu::BindGroupLayout,
     volumetric_composite_layout: &wgpu::BindGroupLayout,
+    contact_shadow_layout: &wgpu::BindGroupLayout,
     ssao_uniform: &wgpu::Buffer,
     volumetric_uniform: &wgpu::Buffer,
+    contact_shadow_uniform: &wgpu::Buffer,
     noise_view: &wgpu::TextureView,
     csm_array_view: &wgpu::TextureView,
     csm_sampler: &wgpu::Sampler,
@@ -168,6 +190,9 @@ pub fn build_size_dependent(
     bloom_knee: f32,
     bloom_radius: f32,
     tonemap_uniform: &wgpu::Buffer,
+    cluster_compute_layout: &wgpu::BindGroupLayout,
+    cluster_lighting_layout: &wgpu::BindGroupLayout,
+    cluster_params_buffer: &wgpu::Buffer,
 ) -> SizeDependent {
     let w = config.width.max(1);
     let h = config.height.max(1);
@@ -176,6 +201,21 @@ pub fn build_size_dependent(
     let motion_view = create_color_target(device, "motion", w, h, MOTION_FORMAT, 1, true);
     let ldr_view = create_color_target(device, "ldr", w, h, LDR_FORMAT, 1, true);
     let linear_sampler = create_linear_sampler(device, "post_linear");
+
+    // Contact shadow target — R16Float, R-канал = visibility.
+    let contact_shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("contact_shadow_tex"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: CONTACT_SHADOW_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let contact_shadow_view = contact_shadow_tex
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
     // Volumetric fog (froxel)
     let volumetric_fog_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -297,7 +337,6 @@ pub fn build_size_dependent(
         mapped_at_creation: false,
     });
 
-    // TAA читает hdr_mb_view (после motion blur).
     let taa_read_bgs: [wgpu::BindGroup; 2] = std::array::from_fn(|i| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("taa_read_bg"),
@@ -335,6 +374,30 @@ pub fn build_size_dependent(
     let gbuffer_emissive_view =
         create_color_target(device, "gbuffer_emissive", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
+
+    // Contact shadow bind group (depth + sampler + camera + params)
+    let contact_shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("contact_shadow_bg"),
+        layout: contact_shadow_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&linear_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: contact_shadow_uniform.as_entire_binding(),
+            },
+        ],
+    });
 
     // Volumetric composite
     let volumetric_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -486,6 +549,10 @@ pub fn build_size_dependent(
                 binding: 10,
                 resource: wgpu::BindingResource::TextureView(&ibl.env_cube_view),
             },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&contact_shadow_view),
+            },
         ],
     });
 
@@ -520,7 +587,6 @@ pub fn build_size_dependent(
         ],
     });
 
-    // Bloom chain — index 2 (TAA off) читает hdr_mb_view.
     let bloom_chain = build_bloom_chain(
         device,
         bloom_layout,
@@ -621,9 +687,67 @@ pub fn build_size_dependent(
     let debug_bind_depth = make_debug_bg("debug_bg_depth", &gbuffer_normal_view);
     let debug_bind_hdr = make_debug_bg("debug_bg_hdr", &hdr_view);
 
+    // === Sprint 4: Clustered lighting buffers ===
+    //
+    // Размер grid'а зависит от размера render-таргетов (SSAA).
+    // При `set_render_scale` эти ресурсы пересоздаются.
+    let cluster_grid_x = (w + CLUSTER_TILE_SIZE - 1) / CLUSTER_TILE_SIZE;
+    let cluster_grid_y = (h + CLUSTER_TILE_SIZE - 1) / CLUSTER_TILE_SIZE;
+    let cluster_grid_z = CLUSTER_GRID_Z;
+    let cluster_count = (cluster_grid_x as u64) * (cluster_grid_y as u64) * (cluster_grid_z as u64);
+
+    let cluster_counts_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cluster_counts_buffer"),
+        size: cluster_count * 4, // atomic<u32> per cluster
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let cluster_lights_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cluster_lights_buffer"),
+        size: cluster_count * (MAX_LIGHTS_PER_CLUSTER as u64) * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let point_lights_storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("point_lights_storage_buffer"),
+        size: (MAX_POINT_LIGHTS_CLUSTERED as u64) * 32, // 2 × vec4<f32> = 32 B/light
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let cluster_compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cluster_compute_bg"),
+        layout: cluster_compute_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: cluster_params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: point_lights_storage_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: cluster_counts_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: cluster_lights_buffer.as_entire_binding() },
+        ],
+    });
+    let cluster_lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cluster_lighting_bg"),
+        layout: cluster_lighting_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: point_lights_storage_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: cluster_counts_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: cluster_lights_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: cluster_params_buffer.as_entire_binding() },
+        ],
+    });
+
     SizeDependent {
         hdr_view,
         motion_view,
+        contact_shadow_view,
+        _contact_shadow_tex: contact_shadow_tex,
+        contact_shadow_bind_group,
+        cluster_counts_buffer,
+        cluster_lights_buffer,
+        point_lights_storage_buffer,
+        cluster_compute_bind_group,
+        cluster_lighting_bind_group,
         hdr_fog_view,
         _hdr_fog_tex: hdr_fog_tex,
         hdr_dof_view,
@@ -634,6 +758,7 @@ pub fn build_size_dependent(
         _taa_resolved_tex: taa_resolved_tex,
         taa_read_bgs,
         taa_uniform,
+        volumetric_fog_view,
         _volumetric_fog_tex: volumetric_fog_tex,
         volumetric_compute_bg,
         volumetric_composite_bg,

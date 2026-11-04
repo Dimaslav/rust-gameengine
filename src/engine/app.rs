@@ -391,10 +391,6 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Применить GraphicsSettings к игре: FOV + PostFx.
-    /// `disable_motion_blur` из Accessibility форсит
-    /// `motion_blur_enabled = 0`. `shadow_quality` переприменяется
-    /// на случай ручного редактирования `settings.ron`.
     fn apply_settings_to_game(&mut self) {
         let g = &self.settings.graphics;
         let a = &self.settings.accessibility;
@@ -407,6 +403,12 @@ impl<G: Game> App<G> {
             postfx.motion_blur_enabled = 0.0;
         }
         g.shadow_quality.apply_to(&mut postfx);
+
+        // Sprint 3: SSAA
+        self.renderer.set_render_scale(g.render_scale);
+
+        // Sprint 5: Atmosphere
+        self.renderer.atmosphere_settings = g.atmosphere;
 
         self.game.apply_postfx(postfx);
     }

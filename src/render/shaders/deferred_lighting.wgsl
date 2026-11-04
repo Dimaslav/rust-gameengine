@@ -1,7 +1,28 @@
 // Deferred lighting pass.
 //
-// Читает G-buffer (albedo+metallic, normal+depth, emissive+roughness),
-// собирает освещение и пишет HDR в `hdr_view`.
+// # История
+//
+// * **Sprint 1**: debanding в tonemap (не тут).
+// * **Sprint 4**: clustered point lights через storage buffer,
+//   fixed-size per cluster (cluster_lights[idx * 16 + local]).
+// * **Sprint 6**: contact shadow visibility (t_contact_shadow, group 2 binding 11)
+//   умножается на directional light #0.
+// * **Sprint 8**: reflection probes (group 4) — металл в помещении
+//   перестаёт «отражать небо».
+//
+// Sprint 7 (variable-size cluster lists через prefix-sum) — **не реализован**.
+// Сейчас используется Sprint-4 схема: cluster_assign.wgsl пишет
+// light_idx в cluster_lights[cluster_idx * 16 + local] для local ∈ [0, 16),
+// cluster_counts[idx] — сколько lights реально попало (может быть > 16,
+// клампим при чтении).
+//
+// # Bind groups
+//
+// - group 0: G-buffer (albedo, normal+depth, emissive+roughness, depth) + camera
+// - group 1: directional lights + CSM splits + fog + shadow params (uniform)
+// - group 2: CSM depth, cube shadow array, SSAO, IBL (irr/pref/brdf/env), contact shadow
+// - group 3: clustered point lights (storage) + cluster counts/lights + params
+// - group 4: reflection probes (4 cube textures + sampler + uniform)
 
 const PI: f32 = 3.14159265359;
 
@@ -20,7 +41,6 @@ struct Lights {
     cascade_vp:      array<mat4x4<f32>, 3>,
     cascade_splits:  vec4<f32>,
     ambient_color:   vec4<f32>,
-    // x = dir_count, y = point_count, z = cube_shadow_count (0..4), w = unused
     counts:          vec4<u32>,
     light_view_proj: mat4x4<f32>,
     misc:            vec4<f32>,
@@ -43,7 +63,6 @@ struct Lights {
 
 @group(2) @binding(0) var t_csm: texture_depth_2d_array;
 @group(2) @binding(1) var s_csm: sampler_comparison;
-// ИЗМЕНЕНО (#7): cube → cube_array (до MAX_SHADOW_CUBES point-light теней).
 @group(2) @binding(2) var t_point_shadow: texture_depth_cube_array;
 @group(2) @binding(3) var s_point_shadow: sampler_comparison;
 @group(2) @binding(4) var t_ssao: texture_2d<f32>;
@@ -53,6 +72,52 @@ struct Lights {
 @group(2) @binding(8) var t_brdf_lut: texture_2d<f32>;
 @group(2) @binding(9) var s_env: sampler;
 @group(2) @binding(10) var t_env: texture_cube<f32>;
+@group(2) @binding(11) var t_contact_shadow: texture_2d<f32>;
+
+// === Sprint 4: Clustered lighting (fixed-size per cluster) ===
+struct ClusterParams {
+    grid:     vec4<f32>,
+    screen:   vec4<f32>,
+    near_far: vec4<f32>,
+    proj:     mat4x4<f32>,
+    view:     mat4x4<f32>,
+};
+
+struct PointLight {
+    position: vec4<f32>,
+    color:    vec4<f32>,
+};
+
+// Fixed-size per cluster: stride = MAX_LIGHTS_PER_CLUSTER = 16.
+// cluster_lights[cluster_idx * 16 + local] = light_idx (или 0, если
+// local >= counts[cluster_idx]). cluster_counts[c] может быть > 16,
+// но записано только 16 — клампим при чтении.
+const MAX_LIGHTS_PER_CLUSTER: u32 = 16u;
+
+@group(3) @binding(0) var<storage, read> point_lights_storage: array<PointLight>;
+@group(3) @binding(1) var<storage, read> cluster_counts: array<u32>;
+@group(3) @binding(2) var<storage, read> cluster_lights: array<u32>;
+@group(3) @binding(3) var<uniform> cluster_params: ClusterParams;
+
+// === Sprint 8: Reflection probes ===
+struct ProbeInfo {
+    center_enabled: vec4<f32>,
+    box_min: vec4<f32>,
+    box_max: vec4<f32>,
+    params: vec4<f32>,
+};
+
+struct ProbeLightingUniform {
+    probes: array<ProbeInfo, 4>,
+    counts: vec4<u32>,
+};
+
+@group(4) @binding(0) var t_probe0: texture_cube<f32>;
+@group(4) @binding(1) var t_probe1: texture_cube<f32>;
+@group(4) @binding(2) var t_probe2: texture_cube<f32>;
+@group(4) @binding(3) var t_probe3: texture_cube<f32>;
+@group(4) @binding(4) var s_probe: sampler;
+@group(4) @binding(5) var<uniform> probe_lighting: ProbeLightingUniform;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -91,10 +156,6 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-// ============================================================
-// Specular BRDF: single-scatter GGX
-// ============================================================
-
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
     let a2 = a * a;
@@ -125,12 +186,9 @@ fn pbr_light(
     let f = fresnel_schlick(h_dot_v, f0);
     let d = distribution_ggx(n_dot_h, roughness);
     let g = geometry_smith(n_dot_v, n_dot_l, roughness);
-
     let specular = (d * g) * f / (4.0 * n_dot_v * n_dot_l + 1e-4);
-
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
-
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
@@ -151,7 +209,61 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
 }
 
 // ============================================================
-// CSM shadows с PCSS (Percentage-Closer Soft Shadows)
+// Sprint 8: Probe selection
+// ============================================================
+
+fn sample_probe_cubemap(idx: u32, dir: vec3<f32>) -> vec3<f32> {
+    switch (idx) {
+        case 0u: { return textureSampleLevel(t_probe0, s_probe, dir, 0.0).rgb; }
+        case 1u: { return textureSampleLevel(t_probe1, s_probe, dir, 0.0).rgb; }
+        case 2u: { return textureSampleLevel(t_probe2, s_probe, dir, 0.0).rgb; }
+        case 3u: { return textureSampleLevel(t_probe3, s_probe, dir, 0.0).rgb; }
+        default: { return vec3<f32>(0.0); }
+    }
+}
+
+fn probe_weight(world_pos: vec3<f32>, probe: ProbeInfo) -> f32 {
+    if (probe.params.x < 0.5) { return 0.0; }
+    let bmin = probe.box_min.xyz;
+    let bmax = probe.box_max.xyz;
+    let clamped = clamp(world_pos, bmin, bmax);
+    let dist_outside = length(world_pos - clamped);
+    let falloff = max(probe.params.y, 0.001);
+    if (dist_outside >= falloff) { return 0.0; }
+    return 1.0 - smoothstep(0.0, falloff, dist_outside);
+}
+
+fn compute_reflection(
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    ibl_refl: vec3<f32>,
+) -> vec3<f32> {
+    let count = probe_lighting.counts.x;
+    if (count == 0u) { return ibl_refl; }
+
+    let r = reflect(-v, n);
+
+    var best_weight = 0.0;
+    var best_idx = 0u;
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        if (i >= count) { break; }
+        let w = probe_weight(world_pos, probe_lighting.probes[i]);
+        if (w > best_weight) {
+            best_weight = w;
+            best_idx = i;
+        }
+    }
+
+    if (best_weight < 0.01) { return ibl_refl; }
+
+    let probe_color = sample_probe_cubemap(best_idx, r);
+    let strength = probe_lighting.probes[best_idx].params.z;
+    return mix(ibl_refl, probe_color * strength + ibl_refl * (1.0 - strength), best_weight);
+}
+
+// ============================================================
+// Shadows
 // ============================================================
 
 const POISSON_16 = array<vec2<f32>, 16>(
@@ -176,14 +288,9 @@ const POISSON_16 = array<vec2<f32>, 16>(
 const CSM_SIZE: i32 = 2048;
 const CSM_SIZE_F: f32 = 2048.0;
 
-fn csm_uv_and_depth(
-    world_pos: vec3<f32>,
-    cascade: i32,
-) -> vec3<f32> {
+fn csm_uv_and_depth(world_pos: vec3<f32>, cascade: i32) -> vec3<f32> {
     let light_clip = lights.cascade_vp[cascade] * vec4<f32>(world_pos, 1.0);
-    if (light_clip.w < 1e-6) {
-        return vec3<f32>(0.0, 0.0, -1.0);
-    }
+    if (light_clip.w < 1e-6) { return vec3<f32>(0.0, 0.0, -1.0); }
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
@@ -195,106 +302,45 @@ fn csm_uv_and_depth(
     return vec3<f32>(uv.x, uv.y, ndc.z);
 }
 
-fn pcss_blocker_search(
-    uv: vec2<f32>,
-    frag_depth: f32,
-    cascade: i32,
-    texel: f32,
-    search_radius: f32,
-) -> vec2<f32> {
+fn pcss_blocker_search(uv: vec2<f32>, frag_depth: f32, cascade: i32, texel: f32, search_radius: f32) -> vec2<f32> {
     var sum: f32 = 0.0;
     var count: f32 = 0.0;
-
     let step = texel * search_radius;
-
     for (var i: u32 = 0u; i < 16u; i = i + 1u) {
-        let offset = POISSON_16[i] * step;
-        let sample_uv = uv + offset;
-
+        let sample_uv = uv + POISSON_16[i] * step;
         let pixel = vec2<i32>(sample_uv * CSM_SIZE_F);
-
-        if (pixel.x < 0 || pixel.y < 0 || pixel.x >= CSM_SIZE || pixel.y >= CSM_SIZE) {
-            continue;
-        }
-
+        if (pixel.x < 0 || pixel.y < 0 || pixel.x >= CSM_SIZE || pixel.y >= CSM_SIZE) { continue; }
         let sample_depth = textureLoad(t_csm, pixel, cascade, 0);
-
-        if (sample_depth < frag_depth) {
-            sum += sample_depth;
-            count += 1.0;
-        }
+        if (sample_depth < frag_depth) { sum += sample_depth; count += 1.0; }
     }
-
-    if (count < 0.5) {
-        return vec2<f32>(0.0, -1.0);
-    }
+    if (count < 0.5) { return vec2<f32>(0.0, -1.0); }
     return vec2<f32>(sum / count, count);
 }
 
-fn pcss_filter(
-    uv: vec2<f32>,
-    frag_depth: f32,
-    cascade: i32,
-    texel: f32,
-    filter_radius: f32,
-    bias: f32,
-) -> f32 {
+fn pcss_filter(uv: vec2<f32>, frag_depth: f32, cascade: i32, texel: f32, filter_radius: f32, bias: f32) -> f32 {
     var shadow: f32 = 0.0;
     let step = texel * filter_radius;
-
     for (var i: u32 = 0u; i < 16u; i = i + 1u) {
-        let offset = POISSON_16[i] * step;
-        shadow += textureSampleCompareLevel(
-            t_csm, s_csm,
-            uv + offset,
-            cascade,
-            frag_depth - bias,
-        );
+        shadow += textureSampleCompareLevel(t_csm, s_csm, uv + POISSON_16[i] * step, cascade, frag_depth - bias);
     }
     return shadow / 16.0;
 }
 
-fn sample_csm_pcss(
-    world_pos: vec3<f32>,
-    cascade: i32,
-    bias: f32,
-) -> f32 {
+fn sample_csm_pcss(world_pos: vec3<f32>, cascade: i32, bias: f32) -> f32 {
     let uvz = csm_uv_and_depth(world_pos, cascade);
     if (uvz.z < 0.0) { return 1.0; }
-
-    let uv = uvz.xy;
-    let frag_depth = uvz.z;
-
     let texel: f32 = 1.0 / CSM_SIZE_F;
-
-    let search_radius: f32 = 6.0;
-    let filter_min: f32 = 1.0;
-    let filter_max: f32 = 12.0;
-
-    let blocker = pcss_blocker_search(uv, frag_depth, cascade, texel, search_radius);
-    if (blocker.y < 0.0) {
-        return 1.0;
-    }
-    let avg_blocker_depth = blocker.x;
-
-    let penumbra = max(frag_depth - avg_blocker_depth, 0.0) / max(avg_blocker_depth, 1e-4);
-    let filter_radius = clamp(
-        filter_min + (filter_max - filter_min) * penumbra,
-        filter_min,
-        filter_max,
-    );
-
-    return pcss_filter(uv, frag_depth, cascade, texel, filter_radius, bias);
+    let blocker = pcss_blocker_search(uvz.xy, uvz.z, cascade, texel, 6.0);
+    if (blocker.y < 0.0) { return 1.0; }
+    let penumbra = max(uvz.z - blocker.x, 0.0) / max(blocker.x, 1e-4);
+    let radius = clamp(1.0 + 11.0 * penumbra, 1.0, 12.0);
+    return pcss_filter(uvz.xy, uvz.z, cascade, texel, radius, bias);
 }
 
 fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let s = lights.shadow_params;
-    let base_bias = s.x;
-    let normal_bias = s.y;
-
     let ndl = clamp(dot(n, l), 0.0, 1.0);
-    let slope = 1.0 - ndl;
-    let bias = base_bias * (1.0 + normal_bias * slope);
+    let bias = s.x * (1.0 + s.y * (1.0 - ndl));
 
     var cascade = 0;
     if (view_depth > lights.cascade_splits.x) { cascade = 1; }
@@ -305,14 +351,10 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
     if (cascade < 2) {
         var split_end = lights.cascade_splits.y;
         var split_prev = lights.cascade_splits.x;
-        if (cascade == 0) {
-            split_end = lights.cascade_splits.x;
-            split_prev = 0.0;
-        }
+        if (cascade == 0) { split_end = lights.cascade_splits.x; split_prev = 0.0; }
         let range = split_end - split_prev;
         let blend_zone = range * 0.15;
         let dist_to_edge = split_end - view_depth;
-
         if (dist_to_edge < blend_zone && dist_to_edge > 0.0) {
             let t = dist_to_edge / blend_zone;
             let shadow_next = sample_csm_pcss(world_pos, cascade + 1, bias);
@@ -320,39 +362,26 @@ fn compute_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, l: ve
         }
     }
 
-    let fade_start = s.z;
-    let fade_end = s.w;
-    if (view_depth > fade_start) {
-        let fade = clamp((view_depth - fade_start) / max(fade_end - fade_start, 1e-4), 0.0, 1.0);
+    if (view_depth > s.z) {
+        let fade = clamp((view_depth - s.z) / max(s.w - s.z, 1e-4), 0.0, 1.0);
         shadow = mix(shadow, 1.0, fade);
     }
-
     return shadow;
 }
 
-/// ИЗМЕНЕНО (#7): принимает `cube_idx` — индекс point-light в массиве
-/// теней. Раньше всегда читалось из нулевого куба, из-за чего теней
-/// от point light'ов, кроме первого, не было.
-///
-/// `array_index` в `textureSampleCompare` для `texture_depth_cube_array`
-/// — это индекс куба, не грань. Внутри — та же PCF 8 направлений.
 fn compute_point_shadow(world_pos: vec3<f32>, cube_idx: u32) -> f32 {
     let pos = lights.cube_shadow_pos[cube_idx].xyz;
     let far = lights.cube_shadow_pos[cube_idx].w;
     let to_frag = world_pos - pos;
     let dist = length(to_frag);
     if (dist > far) { return 1.0; }
-
     let dir = to_frag / max(dist, 0.0001);
     let bias = lights.shadow_params.x * 3.0;
     let depth = dist / far - bias;
-
-    // PCF по 8 направлениям вокруг dir.
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.99);
     let t1 = normalize(cross(up, dir));
     let t2 = cross(dir, t1);
     let s = far * 2.0 / 1024.0 * 1.5;
-
     var shadow = 0.0;
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 *  0.707 + t2 *  0.707) * s), cube_idx, depth);
     shadow += textureSampleCompare(t_point_shadow, s_point_shadow, normalize(dir + (t1 * -0.707 + t2 *  0.707) * s), cube_idx, depth);
@@ -365,14 +394,9 @@ fn compute_point_shadow(world_pos: vec3<f32>, cube_idx: u32) -> f32 {
     return shadow / 8.0;
 }
 
-// ============================================================
-// fs_main
-// ============================================================
-
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth = textureSample(t_depth, s_lin, in.uv);
-
     if (depth >= 0.9999) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
@@ -395,43 +419,65 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     let ibl_strength = lights.misc.x;
     let ibl_diff = ibl_diffuse(n, albedo, metallic) * ao * ibl_strength;
-    let ibl_spec = ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
+
+    let ibl_spec_global = ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
+    let ibl_spec = compute_reflection(world_pos, n, v, ibl_spec_global);
 
     var direct = vec3<f32>(0.0);
 
-    // Directional lights.
+    let contact_vis = textureSample(t_contact_shadow, s_lin, in.uv).r;
+
     let dir_count = lights.counts.x;
     for (var i: u32 = 0u; i < dir_count; i = i + 1u) {
         let dir_p = lights.dir_lights[i * 2u];
         let col_p = lights.dir_lights[i * 2u + 1u];
         let l = normalize(dir_p.xyz);
         let radiance = col_p.rgb * dir_p.w;
-        let shadow = compute_csm_shadow(world_pos, view_depth, n, l);
+        let cs = select(1.0, contact_vis, i == 0u);
+        let shadow = compute_csm_shadow(world_pos, view_depth, n, l) * cs;
         direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }
 
-    // Point lights.
-    let pt_count = lights.counts.y;
-    // ИЗМЕНЕНО (#7): `counts.z` = число cube shadow maps (0..MAX_SHADOW_CUBES).
+    // Sprint 4: clustered point lights (fixed-size per cluster).
     let cube_shadow_count = lights.counts.z;
 
-    for (var i: u32 = 0u; i < pt_count; i = i + 1u) {
-        let pos_p = lights.point_lights[i * 2u];
-        let col_p = lights.point_lights[i * 2u + 1u];
-        let to_l = pos_p.xyz - world_pos;
+    let grid_x = u32(cluster_params.grid.x);
+    let grid_y = u32(cluster_params.grid.y);
+    let grid_z = u32(cluster_params.grid.z);
+    let near = cluster_params.near_far.x;
+    let far = cluster_params.near_far.y;
+
+    let view_z = -(camera.view * vec4<f32>(world_pos, 1.0)).z;
+    let slice_f = clamp((view_z - near) / max(far - near, 1e-4), 0.0, 1.0);
+    let slice = min(u32(slice_f * f32(grid_z)), grid_z - 1u);
+
+    let cluster_cx = min(u32(in.frag_coord.x / 16.0), grid_x - 1u);
+    let cluster_cy = min(u32(in.frag_coord.y / 16.0), grid_y - 1u);
+    let cluster_idx = cluster_cx + cluster_cy * grid_x + slice * grid_x * grid_y;
+
+    // Fixed-size per cluster: чтение cluster_lights[cluster_idx * 16 + i].
+    // cluster_counts[c] может быть > 16 (atomicAdd не ограничен),
+    // поэтому клампим до MAX_LIGHTS_PER_CLUSTER, чтобы не читать
+    // следующий кластер.
+    let count = min(cluster_counts[cluster_idx], MAX_LIGHTS_PER_CLUSTER);
+    let base = cluster_idx * MAX_LIGHTS_PER_CLUSTER;
+
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let light_idx = cluster_lights[base + i];
+        let world_light = point_lights_storage[light_idx];
+        let light_pos = world_light.position.xyz;
+        let range = world_light.position.w;
+        let to_l = light_pos - world_pos;
         let dist = length(to_l);
-        let range = pos_p.w;
         if (dist > range) { continue; }
         let l = to_l / max(dist, 1e-4);
         let atten = clamp(1.0 - dist / range, 0.0, 1.0);
         let atten2 = atten * atten;
-        let radiance = col_p.rgb * col_p.a * atten2;
+        let radiance = world_light.color.rgb * world_light.color.a * atten2;
 
-        // Тень — только для тех point light'ов, для которых запечена
-        // cube shadow map (первые `cube_shadow_count` в массиве).
         var shadow = 1.0;
-        if (i < cube_shadow_count) {
-            shadow = compute_point_shadow(world_pos, i);
+        if (light_idx < cube_shadow_count) {
+            shadow = compute_point_shadow(world_pos, light_idx);
         }
         direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }

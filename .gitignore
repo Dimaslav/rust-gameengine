@@ -13,6 +13,10 @@ settings.ron
 editor.ron
 input.ron
 crash.log
+Cargo.lock
+build-release.log
+build.log
+scene.ron
 
 # Локальные отчёты линтера/тестов (не артефакты, а скретч)
 clippy_baseline.txt

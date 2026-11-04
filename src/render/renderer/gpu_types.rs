@@ -18,6 +18,7 @@ pub const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float
 pub const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub const CONTACT_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 pub const VOLUMETRIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const VOLUMETRIC_GRID_W: u32 = 160;
@@ -29,7 +30,26 @@ pub const MAX_POINT_LIGHTS: usize = 16;
 
 pub const MAX_SHADOW_CUBES: usize = 4;
 
+// ============================================================
+// Sprint 4 + 7: Clustered lighting
+// ============================================================
+
+pub const CLUSTER_TILE_SIZE: u32 = 16;
+pub const CLUSTER_GRID_Z: u32 = 24;
+
+/// Sprint 7: подняли с 16 до 64 — «лишние» lights теперь не отбрасываются
+/// при нормальной сцене, а плотно упаковываются через prefix-sum.
+/// Memory: grid × 64 × 4 байт. На 1080p ≈ 50 MB.
+pub const MAX_LIGHTS_PER_CLUSTER: u32 = 64;
+pub const MAX_POINT_LIGHTS_CLUSTERED: usize = 256;
+
 pub const SHADOW_SLOT_COUNT: u64 = (3 + 6 * MAX_SHADOW_CUBES) as u64;
+
+// ============================================================
+// Sprint 8: Reflection probes
+// ============================================================
+
+pub const MAX_REFLECTION_PROBES: usize = 4;
 
 // ============================================================
 // GPU-структуры
@@ -102,7 +122,95 @@ pub struct BloomParams {
 }
 
 // ============================================================
-// Tonemap (Спринт 1.1 + 1.2)
+// Sprint 4: Clustered lighting uniforms
+// ============================================================
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ClusterParams {
+    pub grid: [f32; 4],
+    pub screen: [f32; 4],
+    pub near_far: [f32; 4],
+    pub proj: [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+}
+
+// ============================================================
+// Sprint 5: Atmosphere
+// ============================================================
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct AtmosphereParams {
+    pub sun: [f32; 4],
+    pub params: [f32; 4],
+    pub misc: [f32; 4],
+}
+
+impl AtmosphereParams {
+    pub fn from_settings(
+        settings: &super::atmosphere::AtmosphereSettings,
+        camera_height_m: f32,
+    ) -> Self {
+        let sun = super::atmosphere::time_to_sun_dir(settings.time_of_day);
+        let intensity = super::atmosphere::sun_intensity_at(
+            settings.time_of_day,
+            settings.sun_intensity,
+        );
+        Self {
+            sun: [sun.x, sun.y, sun.z, intensity],
+            params: [
+                settings.turbidity,
+                settings.rayleigh_strength,
+                settings.mie_strength,
+                0.0,
+            ],
+            misc: [camera_height_m.max(1.0), settings.horizon_haze, 0.0, 0.0],
+        }
+    }
+}
+
+// ============================================================
+// Sprint 8: Reflection probes
+// ============================================================
+
+/// Per-probe данные, читаемые в `deferred_lighting.wgsl` для выбора
+/// ближайшего probe и blend.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable, Default)]
+pub struct ProbeInfo {
+    /// xyz = center of AABB, w = enabled (1.0 или 0.0).
+    pub center_enabled: [f32; 4],
+    /// xyz = box_min, w = unused.
+    pub box_min: [f32; 4],
+    /// xyz = box_max, w = unused.
+    pub box_max: [f32; 4],
+    /// x = baked (1.0 если готов), y = distance_falloff (м), z = strength,
+    /// w = unused.
+    pub params: [f32; 4],
+}
+
+/// Uniform для lighting: probe selection.
+///
+/// 4 probe × 64 байта = 256 байт + 16 (counts) = 272 байта.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ProbeLightingUniform {
+    pub probes: [ProbeInfo; MAX_REFLECTION_PROBES],
+    /// x = активное количество probe, yzw = unused.
+    pub counts: [u32; 4],
+}
+
+/// Uniform для contact shadows pipeline.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ContactShadowParams {
+    pub params: [f32; 4],
+    pub sun_view_dir: [f32; 4],
+}
+
+// ============================================================
+// Tonemap / LensFlare / DoF / MotionBlur / Skybox / Material / Skeleton
 // ============================================================
 
 #[repr(C)]
@@ -117,10 +225,6 @@ pub struct TonemapParams {
     pub gamma: [f32; 4],
 }
 
-// ============================================================
-// Lens Flare (Спринт 1.4)
-// ============================================================
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct LensFlareParams {
@@ -128,10 +232,6 @@ pub struct LensFlareParams {
     pub sun_color: [f32; 4],
     pub params: [f32; 4],
 }
-
-// ============================================================
-// Depth of Field (Спринт 2.1)
-// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -141,16 +241,6 @@ pub struct DofParams {
     pub depth: [f32; 4],
 }
 
-// ============================================================
-// Motion Blur (Спринт 2.2)
-// ============================================================
-
-/// Uniform для motion blur.
-///
-/// Layout (32 байта):
-///   params: x = intensity (множитель velocity), y = max_blur_px,
-///           z = samples (float), w = unused
-///   screen: xy = (w_px, h_px), zw = unused
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct MotionBlurParams {
@@ -262,24 +352,22 @@ pub struct MeshDraw {
 fn default_volumetric_density() -> f32 { 0.001 }
 fn default_volumetric_scattering() -> f32 { 0.4 }
 fn default_volumetric_phase_g() -> f32 { 0.6 }
-
 fn default_one() -> f32 { 1.0 }
 fn default_zero_rgb() -> [f32; 3] { [0.0, 0.0, 0.0] }
 fn default_one_rgb() -> [f32; 3] { [1.0, 1.0, 1.0] }
-
 fn default_lens_flare_threshold() -> f32 { 1.5 }
 fn default_lens_flare_ghosts() -> u32 { 6 }
 fn default_lens_flare_streak() -> f32 { 0.15 }
-
 fn default_dof_focus_distance() -> f32 { 10.0 }
 fn default_dof_focus_range() -> f32 { 3.0 }
 fn default_dof_max_blur() -> f32 { 8.0 }
 fn default_dof_blur_falloff() -> f32 { 4.0 }
-
-// Спринт 2.2: Motion blur defaults
 fn default_motion_blur_intensity() -> f32 { 0.5 }
 fn default_motion_blur_max() -> f32 { 32.0 }
 fn default_motion_blur_samples() -> u32 { 12 }
+fn default_contact_shadow_strength() -> f32 { 0.7 }
+fn default_contact_shadow_length() -> f32 { 0.5 }
+fn default_contact_shadow_thickness() -> f32 { 0.05 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[derive(Default)]
@@ -291,7 +379,6 @@ pub enum Tonemapper {
     Uncharted2 = 3,
     None = 4,
 }
-
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostFx {
@@ -328,7 +415,6 @@ pub struct PostFx {
     #[serde(default = "default_volumetric_phase_g")]
     pub volumetric_phase_g: f32,
 
-    // Спринт 1.1 + 1.2
     #[serde(default)]
     pub tonemapper: Tonemapper,
     #[serde(default = "default_one")]
@@ -348,7 +434,6 @@ pub struct PostFx {
     #[serde(default = "default_one_rgb")]
     pub color_gamma: [f32; 3],
 
-    // Спринт 1.4
     #[serde(default)]
     pub lens_flare_intensity: f32,
     #[serde(default = "default_lens_flare_threshold")]
@@ -358,7 +443,6 @@ pub struct PostFx {
     #[serde(default = "default_lens_flare_streak")]
     pub lens_flare_streak: f32,
 
-    // Спринт 2.1
     #[serde(default)]
     pub dof_enabled: f32,
     #[serde(default = "default_dof_focus_distance")]
@@ -370,7 +454,6 @@ pub struct PostFx {
     #[serde(default = "default_dof_blur_falloff")]
     pub dof_blur_falloff: f32,
 
-    // === Спринт 2.2: Motion Blur ===
     #[serde(default)]
     pub motion_blur_enabled: f32,
     #[serde(default = "default_motion_blur_intensity")]
@@ -379,6 +462,13 @@ pub struct PostFx {
     pub motion_blur_max_px: f32,
     #[serde(default = "default_motion_blur_samples")]
     pub motion_blur_samples: u32,
+
+    #[serde(default = "default_contact_shadow_strength")]
+    pub contact_shadow_strength: f32,
+    #[serde(default = "default_contact_shadow_length")]
+    pub contact_shadow_length: f32,
+    #[serde(default = "default_contact_shadow_thickness")]
+    pub contact_shadow_thickness: f32,
 }
 
 impl Default for PostFx {
@@ -412,7 +502,6 @@ impl Default for PostFx {
             volumetric_density: 0.001,
             volumetric_scattering: 0.4,
             volumetric_phase_g: 0.6,
-
             tonemapper: Tonemapper::AgX,
             exposure_bias: 1.0,
             color_temperature: 0.0,
@@ -422,22 +511,22 @@ impl Default for PostFx {
             color_lift: [0.0, 0.0, 0.0],
             color_gain: [1.0, 1.0, 1.0],
             color_gamma: [1.0, 1.0, 1.0],
-
             lens_flare_intensity: 0.0,
             lens_flare_threshold: 1.5,
             lens_flare_ghosts: 6,
             lens_flare_streak: 0.15,
-
             dof_enabled: 0.0,
             dof_focus_distance: 10.0,
             dof_focus_range: 3.0,
             dof_max_blur: 8.0,
             dof_blur_falloff: 4.0,
-
             motion_blur_enabled: 0.0,
             motion_blur_intensity: 0.5,
             motion_blur_max_px: 32.0,
             motion_blur_samples: 12,
+            contact_shadow_strength: default_contact_shadow_strength(),
+            contact_shadow_length: default_contact_shadow_length(),
+            contact_shadow_thickness: default_contact_shadow_thickness(),
         }
     }
 }

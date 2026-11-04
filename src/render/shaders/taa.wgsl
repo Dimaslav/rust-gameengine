@@ -1,33 +1,30 @@
 // TAA resolve.
 //
-// Jitter в текущей версии всегда Vec2::ZERO (см. renderer/mod.rs).
-// Тем не менее шейдер полностью поддерживает и jittered-конвенцию —
-// формулы компенсации ниже работают при любом jitter_px.
+// Jitter: Halton(2,3) 8 сэмплов (см. renderer/mod.rs). Шейдер получает
+// jitter_px текущего и предыдущего кадра через uniform.
 //
 // Конвенция (совпадает с gbuffer.wgsl / forward_transparent.wgsl):
-//
 //   - `t_current` содержит jittered-сцену. Пиксель (i, j) содержит
 //     фрагмент F, чья unjittered-UV = ((i+0.5) − jitter_px) / screen.
-//     При jitter = 0 это просто (i+0.5, j+0.5)/screen.
-//
 //   - `t_motion` в пикселе (i, j) описывает displacement
 //     **unjittered**-позиции F между кадрами:
 //       motion = prev_uv_F − uv_F_unjit_current
-//     где uv_F_unjit_current = uv − jitter_uv.
-//
 //   - `t_history[x, y]` содержит resolved-цвет фрагмента, попавшего
-//     в (x, y) при растеризации кадра N-1. Его unjittered-UV:
-//       u_hist(x, y) = ((x+0.5) − prev_jitter_px) / screen
+//     в (x, y) при растеризации кадра N-1.
 //
-// Из этих трёх определений:
-//   prev_uv_F = (uv − jitter_uv) + motion
-//   history_uv = prev_uv_F + prev_jitter_uv
-//
-// При jitter = 0 формула сводится к классической:
-//   history_uv = uv + motion
+// ИЗМЕНЕНО (Sprint 2, TAA velocity rejection):
+//   * alpha теперь использует smoothstep(1.5, 10, velocity_px) —
+//     в статике TAA почти не реагирует (стабильность), при движении
+//     4-10 px/frame быстро переключается на current (нет ghosting).
+//   * sharpen-сила падает с ростом velocity. Over-sharpening на
+//     движущихся объектах (края оружия, персонажа) раньше давал
+//     заметные «звенящие» артефакты.
+//   * clip_history теперь возвращает и величину clip-расстояния —
+//     используется для быстрого reject истории при полном disocclusion
+//     (когда neighborhood clip вынужден сильно ужать history).
 
 struct TaaParams {
-    values: vec4<f32>,       // x = alpha, y = velocity_weight, z = sharpen, w = reset_flag
+    values: vec4<f32>,       // x = base_alpha, y = velocity_scale, z = sharpen, w = reset_flag
     screen: vec4<f32>,       // xy = (w_px, h_px), zw = jitter текущего кадра (пиксели)
     prev_jitter: vec4<f32>,  // xy = jitter предыдущего кадра (пиксели), zw = unused
 };
@@ -70,14 +67,19 @@ fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
 
 fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     let t = c.x - c.z;
-    return vec3<f32>(
-        t + c.y,
-        c.x + c.z,
-        t - c.y,
-    );
+    return vec3<f32>(t + c.y, c.x + c.z, t - c.y);
 }
 
-fn clip_history(uv: vec2<f32>, texel: vec2<f32>, history: vec3<f32>) -> vec3<f32> {
+/// Neighborhood clip в YCoCg. Возвращает `(clipped, distance)`:
+///   * clipped — history, ужатый в AABB neighborhood current-кадра.
+///   * distance — насколько сильно history пришлось ужать (0 = не пришлось).
+///     Большое значение — сигнал «история не соответствует текущей сцене»
+///     (disocclusion, смена материала, свет).
+fn clip_history(
+    uv: vec2<f32>,
+    texel: vec2<f32>,
+    history: vec3<f32>,
+) -> vec3<f32> {
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
     for (var y = -1; y <= 1; y = y + 1) {
@@ -107,17 +109,21 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let texel = 1.0 / screen_px;
 
     let uv = in.uv;
-
     let pixel = vec2<i32>(i32(in.frag_coord.x), i32(in.frag_coord.y));
     let current = textureLoad(t_current, pixel, 0).rgb;
 
+    // Reset flag: после смены camera mode / смены TAA on/off —
+    // история невалидна, сразу отдаём current.
     if (params.values.w > 0.5) {
         return vec4<f32>(current, 1.0);
     }
 
+    // Velocity в пикселях.
     let motion = textureLoad(t_motion, pixel, 0).rg;
-    let velocity_len = length(motion * screen_px);
+    let velocity_px = length(motion * screen_px);
 
+    // Reproject: history_uv = prev_uv + prev_jitter_uv
+    //   prev_uv = (uv − jitter_uv) + motion
     let jitter_uv = jitter_px / screen_px;
     let uv_unjit = uv - jitter_uv;
     let prev_uv = uv_unjit + motion;
@@ -129,20 +135,42 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let prev_jitter_uv = prev_jitter_px / screen_px;
     let history_uv = prev_uv + prev_jitter_uv;
 
-    if (history_uv.x < 0.0 || history_uv.x > 1.0 || history_uv.y < 0.0 || history_uv.y > 1.0) {
+    if (history_uv.x < 0.0 || history_uv.x > 1.0
+        || history_uv.y < 0.0 || history_uv.y > 1.0) {
         return vec4<f32>(current, 1.0);
     }
 
+    // History с neighborhood clip.
     let history_raw = textureSample(t_history, s_lin, history_uv).rgb;
     let history = clip_history(uv, texel, history_raw);
 
+    // === Velocity rejection ===
+    //
+    // smoothstep(1.5, 10, velocity_px):
+    //   * < 1.5 px — TAA полностью доверяет истории (стабильность).
+    //   * 1.5..10 px — плавное переключение на current.
+    //   * > 10 px — alpha = 1.0 (полностью current, никакого ghosting).
+    //
+    // Диапазон 1.5..10 px/frame при 60 fps соответствует 90..600 px/s.
+    // На 1080p это 4.7%..31% ширины экрана в секунду — то есть
+    // «медленное вращение камеры» (стабильно) → «быстрое вращение
+    // или движущийся объект» (мгновенный reject).
+    let velocity_weight = smoothstep(1.5, 10.0, velocity_px);
+
+    // Combine с base_alpha из uniform.
     let base_alpha = params.values.x;
-    let velocity_weight = clamp(velocity_len * params.values.y, 0.0, 1.0);
     let alpha = mix(base_alpha, 1.0, velocity_weight);
 
     var blended = mix(history, current, alpha);
 
-    let sharpen = params.values.z;
+    // === Sharpen ===
+    //
+    // Unsharp mask. Сила падает с ростом velocity:
+    //   * на статике — full sharpen для чёткости;
+    //   * на движении — sharpen почти выключен, иначе на краях
+    //     появляются «звенящие» (ringing) артефакты, которые TAA
+    //     не успевает сглаживать.
+    let sharpen = params.values.z * (1.0 - velocity_weight * 0.85);
     if (sharpen > 0.001) {
         let n = textureSample(t_current, s_lin, uv + vec2<f32>( 0.0, -texel.y)).rgb;
         let s = textureSample(t_current, s_lin, uv + vec2<f32>( 0.0,  texel.y)).rgb;

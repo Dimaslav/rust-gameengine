@@ -25,7 +25,16 @@ pub struct SamplerDesc {
     pub mag_filter: SamplerFilter,
     pub min_filter: SamplerFilter,
     pub mip_filter: SamplerFilter,
+    /// ИЗМЕНЕНО (Sprint 1: anisotropy): максимальный уровень
+    /// анизотропной фильтрации (1 = выключено, 16 = типичный максимум).
+    /// Реально применяется в `Renderer::get_sampler`, который клампит
+    /// значение по `device.limits().max_sampler_anisotropy`. Значение 16
+    /// имеет смысл только для текстур с мипмапами (см. `texture.rs`).
+    #[serde(default = "default_anisotropy")]
+    pub max_anisotropy: u16,
 }
+
+fn default_anisotropy() -> u16 { 16 }
 
 impl Default for SamplerDesc {
     fn default() -> Self {
@@ -35,6 +44,7 @@ impl Default for SamplerDesc {
             mag_filter: SamplerFilter::Linear,
             min_filter: SamplerFilter::Linear,
             mip_filter: SamplerFilter::Linear,
+            max_anisotropy: default_anisotropy(),
         }
     }
 }
@@ -64,6 +74,9 @@ impl SamplerDesc {
             mag_filter: flt(self.mag_filter),
             min_filter: flt(self.min_filter),
             mipmap_filter: mip(self.mip_filter),
+            // Клампится на устройстве в `Renderer::get_sampler`.
+            // `anisotropy > 1` без мипмапов бесполезен, но не вреден.
+            anisotropy_clamp: self.max_anisotropy.max(1),
             ..Default::default()
         }
     }
