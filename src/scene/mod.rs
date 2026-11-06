@@ -20,6 +20,8 @@ pub use serialize::{
     load_scene_with_assets_from_file, load_scene_with_assets_from_str,
     load_scene_with_assets_from_str_full,
     load_scene_with_assets_from_str_full_with_ids,
+    // FIX #3: undo snapshot без terrain.
+    save_scene_for_undo_to_string,
     save_scene_to_file, save_scene_to_string,
     save_scene_with_assets_to_file, save_scene_with_assets_to_string,
     save_scene_with_game_state_to_file, save_scene_with_game_state_to_string,

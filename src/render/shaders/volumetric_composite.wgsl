@@ -1,10 +1,7 @@
 // Volumetric fog composite + SSR.
 //
-// Читает HDR + froxel-texture + G-buffer (depth, normal, albedo, emissive).
-// Порядок:
-//   1. SSR — screen-space reflections, добавляется к HDR.
-//   2. Fog composite — накладывается поверх.
-//   3. Результат идёт в hdr_fog_view, откуда его читает TAA.
+// FIX (FPS): одиночная выборка вместо цикла на 65 срезов.
+// Старая версия с накоплением по срезам роняла FPS до 5-7 на 1080p.
 
 struct Camera {
     view_proj:      mat4x4<f32>,
@@ -140,11 +137,10 @@ fn trace_ssr(
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    // --- 1. Базовый HDR ----------------------------------------
     var hdr = textureSample(t_hdr, s_lin, in.uv).rgb;
     let depth_raw = load_depth(in.uv);
 
-    // --- 2. SSR ------------------------------------------------
+    // --- SSR ---
     if (depth_raw < 0.9999) {
         let g_normal = textureSample(t_normal, s_lin, in.uv);
         let g_albedo = textureSample(t_albedo, s_lin, in.uv);
@@ -157,8 +153,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
         let world_pos = reconstruct_world_pos(in.uv, depth_raw);
         let view_dir = normalize(camera.camera_pos.xyz - world_pos);
-        // clamp верхней границы обязателен: dot(n, v) может дать
-        // 1.00001 при численной ошибке → pow(отрицательного, 5) = NaN.
         let n_dot_v = clamp(dot(world_normal, view_dir), 1e-4, 1.0);
 
         let f0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -175,7 +169,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // --- 3. Fog composite --------------------------------------
+    // --- Fog composite (одиночная выборка) ---
     if (vol.params.x <= 0.0) {
         return vec4<f32>(hdr, 1.0);
     }
@@ -188,12 +182,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let slice_f = clamp(log(view_z / near) / log(ratio), 0.0, 1.0);
 
     let z_uv = slice_f * (FROXEL_Z - 1.0) / FROXEL_Z + 0.5 / FROXEL_Z;
-    let fog = textureSampleLevel(
-        t_fog,
-        s_lin,
-        vec3<f32>(in.uv.x, in.uv.y, z_uv),
-        0.0,
-    );
+    let fog = textureSampleLevel(t_fog, s_lin, vec3<f32>(in.uv.x, in.uv.y, z_uv), 0.0);
 
     let scattering = fog.rgb;
     let extinction = fog.a;

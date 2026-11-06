@@ -10,6 +10,14 @@
 //!   O(n²) → O(n) на реальных сценах.
 //! * Terrain collision: dynamic-тела получают вертикальный контакт
 //!   с heightmap.
+//!
+//! ## FIX #1 (spatial hash: AABB insert)
+//!
+//! В `broad_phase` раньше вставлялся только **центр** AABB. Два
+//! больших тела (пол и стена) никогда не сталкивались, если их
+//! центры в разных клетках. Теперь используется
+//! `SpatialHash2D::insert_aabb` — payload попадает во все клетки,
+//! которые пересекает AABB.
 
 use std::collections::HashSet;
 
@@ -130,9 +138,6 @@ impl PhysicsWorld {
         }
 
         // === Terrain: вертикальная коллизия с heightmap ===
-        //
-        // Простейший heightfield-контакт: по нижней точке AABB тела
-        // берём высоту ground, выталкиваем по +Y, гасим vertical velocity.
         if let Some(hm) = terrain {
             for s in states.iter_mut() {
                 if s.body_type != BodyType::Dynamic { continue; }
@@ -347,16 +352,11 @@ fn write_back(world: &mut World, states: &[BodyState]) {
 
 /// Broad-phase через spatial hash (XZ-сетка).
 ///
-/// Раньше: O(n²) попарных проверок AABB. При 500 телах — 125 000
-/// проверок в кадр, из которых 99% отбрасывается.
-///
-/// Теперь:
-///   1. Строим spatial hash по центрам AABB (XZ).
-///   2. Для каждого тела — `query_aabb` в его XZ-границах.
-///   3. Фильтруем по реальному 3D-AABB и правилам (sleep, can_move).
-///
-/// `cell_size = 4.0` — эмпирика: тела типичного размера 0.5–2 м,
-/// 4 м даёт 2–8 тел на ячейку в плотных местах.
+/// FIX #1: использует `SpatialHash2D::insert_aabb` вместо точечной
+/// вставки центра. Раньше два больших тела (пол 20×20 м и стена)
+/// не попадали в одну клетку и никогда не сталкивались. Теперь
+/// payload вставляется во все клетки AABB, а объекты > 128×128 м
+/// уходят в `always_check` (см. `spatial_hash.rs`).
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
     let n = states.len();
     if n < 2 { return Vec::new(); }
@@ -365,8 +365,8 @@ fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
 
     let mut hash = SpatialHash2D::new(4.0);
     for (i, (mn, mx)) in aabbs.iter().enumerate() {
-        let center = (*mn + *mx) * 0.5;
-        hash.insert(i as u32, center);
+        // FIX #1: было `hash.insert(i as u32, (*mn + *mx) * 0.5);`
+        hash.insert_aabb(i as u32, *mn, *mx);
     }
 
     let mut pairs = Vec::new();
@@ -378,6 +378,7 @@ fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
 
         candidates.clear();
         hash.query_aabb(mn_i, mx_i, &mut candidates);
+        // candidates уникальны (dedup встроен в query_aabb).
 
         for &j_u32 in &candidates {
             let j = j_u32 as usize;

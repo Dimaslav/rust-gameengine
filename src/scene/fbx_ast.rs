@@ -8,6 +8,11 @@
 //!
 //! Newlines внутри Args разрешены, если следующая строка не начинается
 //! с `Ident ':'` (т.е. не новый statement) и не `}`.
+//!
+//! FIX (P1.2): в отличие от `fbx_binary.rs`, где есть защита
+//! `MAX_NODE_DEPTH`, здесь её не было. Malicious/corrupted FBX ASCII
+//! мог вызвать stack overflow рекурсией `parse_node` → `parse_body`.
+//! Теперь `depth` в `Parser` ограничен `MAX_DEPTH = 64`.
 
 use anyhow::{anyhow, bail, Result};
 
@@ -70,9 +75,6 @@ impl FbxNode {
     }
 
     /// Универсальный доступ к массиву f32.
-    ///
-    /// Binary: `args` содержит `FloatArray`/`IntArray`/`BoolArray`.
-    /// ASCII:  `args` содержит `Star(N)`, а данные лежат в child-узле `a`.
     pub fn get_array_f32(&self) -> Option<Vec<f32>> {
         for a in &self.args {
             match a {
@@ -88,7 +90,6 @@ impl FbxNode {
                 _ => {}
             }
         }
-        // ASCII-fallback.
         let a = self.child("a")?;
         Some(
             a.args
@@ -234,9 +235,12 @@ fn tokenize(src: &str) -> Result<Vec<Tok>> {
 // Parser
 // ============================================================
 
+const MAX_DEPTH: u32 = 64;
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    depth: u32,
 }
 
 impl Parser {
@@ -276,6 +280,13 @@ impl Parser {
     }
 
     fn parse_node(&mut self) -> Result<FbxNode> {
+        // FIX (P1.2): защита от stack overflow на malicious/corrupted FBX.
+        if self.depth > MAX_DEPTH {
+            bail!(
+                "FBX ASCII: exceeded max node depth {} at token {}",
+                MAX_DEPTH, self.pos
+            );
+        }
         let name = match self.next() {
             Some(Tok::Ident(s)) => s,
             Some(t) => bail!("expected ident at pos {}, got {:?}", self.pos, t),
@@ -286,7 +297,10 @@ impl Parser {
         }
         let args = self.parse_arg_list()?;
         let children = if self.eat_lbrace() {
-            let body = self.parse_body()?;
+            self.depth += 1;
+            let body = self.parse_body();
+            self.depth -= 1;
+            let body = body?;
             if !self.eat_rbrace() {
                 bail!("expected '}}' closing '{}'", name);
             }
@@ -333,6 +347,6 @@ impl Parser {
 
 pub fn parse_fbx_ascii(src: &str) -> Result<Vec<FbxNode>> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, depth: 0 };
     p.parse_body()
 }

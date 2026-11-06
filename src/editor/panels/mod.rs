@@ -19,13 +19,11 @@ pub mod top_bar;
 pub mod viewport_toolbar;
 pub mod workspace_tabs;
 
-use egui::Context;
-
 use crate::assets::AssetDatabase;
 use crate::ecs::World;
 use crate::editor::{EditorAction, EditorState};
 use crate::game::audio::AudioBus;
-use crate::render::{Material, PostFx};
+use crate::render::Material;
 use crate::scripting::ScriptSystem;
 
 pub struct Stats {
@@ -70,79 +68,71 @@ pub struct AudioSnapshot {
     pub selected_source_entity: Option<crate::ecs::Entity>,
 }
 
-pub struct PanelContext<'a> {
-    pub renderer: &'a crate::render::Renderer,
-    pub assets: &'a UiAssets<'a>,
-    pub audio: &'a AudioSnapshot,
-    pub scripts: &'a ScriptSystem,
-    pub asset_db: &'a mut AssetDatabase,
-    pub postfx: &'a mut PostFx,
-    pub stats: &'a Stats,
-}
+// FIX (P2.2): удалена неиспользуемая структура `PanelContext`.
+// Она была объявлена, но нигде не использовалась — попытка упаковать
+// аргументы `draw_all`, которая не удалась.
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw_all(
-    ctx: &Context,
+    ui: &mut egui::Ui,
     state: &mut EditorState,
     world: &mut World,
-    postfx: &mut PostFx,
+    postfx: &mut crate::render::PostFx,
     stats: &Stats,
     assets: &UiAssets<'_>,
     audio: &AudioSnapshot,
     asset_db: &mut AssetDatabase,
     scripts: &ScriptSystem,
-) -> Option<EditorAction> {
+) -> (Option<EditorAction>, egui::Rect) {
     let mut action: Option<EditorAction> = None;
 
-    overlays::draw_box_select_overlay(ctx, state);
-    overlays::draw_context_menu(ctx, state, world, &mut action);
+    overlays::draw_box_select_overlay(ui.ctx(), state);
+    overlays::draw_context_menu(ui.ctx(), state, world, &mut action);
 
     if state.command_palette_open {
-        command_palette::draw(ctx, state, &mut action);
+        command_palette::draw(ui.ctx(), state, &mut action);
     }
 
-    egui::Area::new(egui::Id::unique("editor_root_area"))
-        .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Background)
-        .show(ctx, |ui| {
-            ui.set_min_size(ui.ctx().content_rect().size());
-
-            top_bar::draw(ui, state, stats, &mut action);
-
-            if !state.play.active {
-                if state.layout.show_palette_bar {
-                    palette::draw(ui, state);
-                }
-                if state.layout.show_terrain_bar {
-                    terrain::draw(ui, state, &mut action);
-                }
-            }
-
-            if !state.play.active {
-                left_panel::draw(ui, state, world, assets, stats, &mut action);
-                right_panel::draw(ui, state, world, assets, postfx, &mut action);
-            }
-
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
-                .show(ui, |_ui| {});
-        });
+    // FIX #11: панели — напрямую на `ui`, без `egui::Area`.
+    // В egui 0.34+ `Panel::show` принимает `&mut Ui`, а не `&Context`.
+    top_bar::draw(ui, state, stats, &mut action);
 
     if !state.play.active {
-        viewport_toolbar::draw(ctx, state);
-        bookmarks::draw(ctx, state, &mut action);
-        audio::draw(ctx, state, audio, &mut action);
+        if state.layout.show_palette_bar {
+            palette::draw(ui, state);
+        }
+        if state.layout.show_terrain_bar {
+            terrain::draw(ui, state, &mut action);
+        }
     }
 
-    inspector_audio::draw_window(ctx, state, world, audio, &mut action);
+    if !state.play.active {
+        left_panel::draw(ui, state, world, assets, stats, &mut action);
+        right_panel::draw(ui, state, world, assets, postfx, &mut action);
+    }
+
+    let central = egui::containers::panel::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(ui, |_ui| {});
+    let viewport_rect = central.response.rect;
+
+    if !state.play.active {
+        // FIX (P3.1): передаём viewport_rect, чтобы тулбар был в углу
+        // viewport'а, а не всего экрана.
+        viewport_toolbar::draw(ui.ctx(), viewport_rect, state);
+        bookmarks::draw(ui.ctx(), state, &mut action);
+        audio::draw(ui.ctx(), state, audio, &mut action);
+    }
+
+    inspector_audio::draw_window(ui.ctx(), state, world, audio, &mut action);
 
     let show_content = &mut state.layout.show_content_browser;
     let thumbnails = &mut state.thumbnails;
-    content::draw_window(ctx, show_content, asset_db, thumbnails);
+    content::draw_window(ui.ctx(), show_content, asset_db, thumbnails);
 
     let mut show_scripts = state.layout.show_script_panel;
     scripts::draw_window(
-        ctx,
+        ui.ctx(),
         &mut show_scripts,
         state,
         &*world,
@@ -151,11 +141,11 @@ pub fn draw_all(
     );
     state.layout.show_script_panel = show_scripts;
 
-    settings_panel::draw_window(ctx, state, stats);
-    scene_validation::draw_window(ctx, state, world, &mut action);
+    settings_panel::draw_window(ui.ctx(), state, stats);
+    scene_validation::draw_window(ui.ctx(), state, world, &mut action);
 
     if state.play.active && state.play.paused {
-        overlays::draw_pause_overlay(ctx, state, &mut action);
+        overlays::draw_pause_overlay(ui.ctx(), state, &mut action);
     }
 
     if let Some((text, ttl)) = &state.hint {
@@ -163,7 +153,7 @@ pub fn draw_all(
         egui::Area::new(egui::Id::unique("editor_hint"))
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
             .interactable(false)
-            .show(ctx, |ui| {
+            .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(egui::Color32::from_rgba_unmultiplied(
                         20, 20, 30, (220.0 * alpha) as u8,
@@ -179,5 +169,5 @@ pub fn draw_all(
             });
     }
 
-    action
+    (action, viewport_rect)
 }

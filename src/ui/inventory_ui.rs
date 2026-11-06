@@ -1,27 +1,7 @@
-//! UI инвентаря: drag-and-drop, tooltips, split по Ctrl, сортировка.
-//!
-//! # Управление
-//!
-//! - **ЛКМ (drag)** — нажать на слот и тащить. Отпустить на другом
-//!   слоте — swap (или merge, если стакается).
-//! - **Ctrl+ЛКМ** — разделить стак пополам.
-//! - **Shift+ЛКМ** — выбросить (обрабатывается в демо через Shift).
-//! - **ПКМ** на consumable — использовать.
-//! - **ПКМ** на equippable — экипировать (или снять, если надето).
-//! - **Кнопки `Rarity / Kind / Name`** сверху — сортировка.
-//!
-//! ИЗМЕНЕНО: Ctrl+click теперь работает внутри UI через `UiInput::modifiers`
-//! (см. `src/ui/layer.rs`). Раньше split приходилось делать костылём
-//! в `FortressDemo::collect_ui` по внешнему `self.ctrl_held`.
-
 use crate::game::items::{
-    EquipSlot, Equipment, Inventory, ItemKind, ItemRegistry, SortKey,
+    EquipSlot, Equipment, Inventory, ItemRegistry, SortKey,
 };
 use crate::ui::UiLayer;
-
-// ============================================================
-// Типы
-// ============================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InvLocation {
@@ -56,10 +36,6 @@ pub enum InventoryAction {
     SortBy(SortKey),
 }
 
-// ============================================================
-// Layout-константы
-// ============================================================
-
 const PANEL_W: f32 = 720.0;
 const PANEL_H: f32 = 520.0;
 const PAD: f32 = 20.0;
@@ -68,10 +44,6 @@ const GAP: f32 = 6.0;
 const COLS: usize = 6;
 const EQ_SLOT_W: f32 = 220.0;
 const EQ_SLOT_H: f32 = 44.0;
-
-// ============================================================
-// Публичный вход
-// ============================================================
 
 pub fn draw(
     ui: &mut UiLayer,
@@ -280,10 +252,6 @@ pub fn draw(
     action
 }
 
-// ============================================================
-// Отрисовка слотов
-// ============================================================
-
 fn draw_inv_cell(
     ui: &mut UiLayer,
     rect: (f32, f32, f32, f32),
@@ -396,6 +364,3 @@ fn draw_tooltip(
 fn point_in_rect(mx: f32, my: f32, r: (f32, f32, f32, f32)) -> bool {
     mx >= r.0 && mx < r.0 + r.2 && my >= r.1 && my < r.1 + r.3
 }
-
-#[allow(dead_code)]
-fn _silence_unused(_: ItemKind) {}

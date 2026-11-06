@@ -11,8 +11,11 @@ use crate::render::renderer::atmosphere::AtmosphereSettings;
 
 #[derive(Debug, Clone, Default)]
 pub enum AppMode {
-    MainMenu,
+    /// FIX #8: было `#[default] InGame`. При первом запуске
+    /// приложение стартовало в игре, минуя главное меню. Теперь
+    /// дефолт — `MainMenu`, как и положено.
     #[default]
+    MainMenu,
     InGame,
     Settings { return_to: Box<AppMode> },
 }
@@ -43,7 +46,13 @@ pub struct AppSettings {
     pub language: String,
 }
 
-fn default_language() -> String { "ru".to_string() }
+/// FIX #12: было `"ru"`. HUD/диалоги в демо на русском, но
+/// `FONT_GLYPHS` содержит только ASCII 32-127 → кириллица
+/// рендерится пустотой. Переключили дефолт на английский +
+/// перевод строк в `fortress.rs`. Русский остаётся доступен
+/// через Settings → Language → Русский (но HUD всё равно
+/// потребует расширения атласа шрифта).
+fn default_language() -> String { "en".to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -100,10 +109,6 @@ impl AppSettings {
                 AntiAliasingMode::detect_from(&self.graphics.postfx);
             self.format = 4;
         }
-        // v5 (Sprint 5): добавлено `GraphicsSettings::atmosphere`.
-        // Значение по умолчанию `AtmosphereSettings::default()` —
-        // включённая атмосфера с временем 12:00. Для тех, кто хочет
-        // старое поведение (IBL skybox), достаточно выключить в UI.
         if self.format < 5 {
             self.format = 5;
         }
@@ -113,7 +118,8 @@ impl AppSettings {
     pub fn validate(&mut self) {
         let g = &mut self.graphics;
         g.fov = g.fov.clamp(30.0, 130.0);
-        g.render_scale = g.render_scale.clamp(1.0, 2.0);
+        // FIX: было 1.0..2.0. Теперь можно опустить до 0.5 для повышения FPS (SSAA вниз).
+        g.render_scale = g.render_scale.clamp(0.5, 2.0);
         g.atmosphere.validate();
 
         let c = &mut self.controls;
@@ -272,7 +278,8 @@ impl TextureQuality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FpsLimit {
-    #[default] Unlimited, Fps30, Fps60, Fps90, Fps120, Fps144, Fps240,
+    #[default]
+    Unlimited, Fps30, Fps60, Fps90, Fps120, Fps144, Fps240,
 }
 
 impl FpsLimit {
@@ -326,7 +333,8 @@ impl QualityPreset {
         match self {
             Self::Low => {
                 p.bloom_strength = 0.0; p.ssao_strength = 0.0; p.ibl_strength = 0.15;
-                p.taa_strength = 0.0; p.taa_sharpening = 0.0; p.fxaa_strength = 1.0;
+                p.taa_strength = 0.0; p.taa_sharpening = 0.0;
+                p.fxaa_strength = 0.0;
                 p.fog_density = 0.0; p.volumetric_density = 0.0; p.dof_enabled = 0.0;
                 p.motion_blur_enabled = 0.0; p.lens_flare_intensity = 0.0;
                 p.contact_shadow_strength = 0.0; p.vignette_strength = 0.0;
@@ -335,9 +343,10 @@ impl QualityPreset {
             Self::Medium => {
                 p.bloom_threshold = 1.0; p.bloom_strength = 0.40; p.bloom_knee = 0.5; p.bloom_radius = 1.0;
                 p.exposure = 0.6; p.ssao_strength = 0.50; p.ssao_radius = 0.6; p.ibl_strength = 0.20;
-                p.taa_strength = 1.0; p.taa_sharpening = 0.05; p.fxaa_strength = 0.7;
+                p.taa_strength = 1.0; p.taa_sharpening = 0.05;
+                p.fxaa_strength = 0.0;
                 p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.008;
-                p.volumetric_density = 0.006; p.volumetric_scattering = 0.35; p.volumetric_phase_g = 0.5;
+                p.volumetric_density = 0.0003; p.volumetric_scattering = 0.35; p.volumetric_phase_g = 0.5;
                 p.dof_enabled = 0.0; p.motion_blur_enabled = 0.0; p.lens_flare_intensity = 0.0;
                 p.contact_shadow_strength = 0.5; p.vignette_strength = 0.05;
                 p.film_grain = 0.0; p.chromatic_aberration = 0.0;
@@ -345,9 +354,10 @@ impl QualityPreset {
             Self::High => {
                 p.bloom_threshold = 0.9; p.bloom_strength = 0.55; p.bloom_knee = 0.5; p.bloom_radius = 1.1;
                 p.exposure = 0.6; p.ssao_strength = 0.9; p.ssao_radius = 0.65; p.ibl_strength = 0.20;
-                p.taa_strength = 1.0; p.taa_sharpening = 0.10; p.fxaa_strength = 1.0;
+                p.taa_strength = 1.0; p.taa_sharpening = 0.10;
+                p.fxaa_strength = 0.5;
                 p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.008; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
-                p.volumetric_density = 0.006; p.volumetric_scattering = 0.45; p.volumetric_phase_g = 0.6;
+                p.volumetric_density = 0.0006; p.volumetric_scattering = 0.45; p.volumetric_phase_g = 0.6;
                 p.vignette_strength = 0.15; p.film_grain = 0.03; p.chromatic_aberration = 0.0;
                 p.dof_enabled = 0.0; p.motion_blur_enabled = 0.0; p.lens_flare_intensity = 0.0;
                 p.contact_shadow_strength = 0.7; p.contact_shadow_length = 0.5; p.contact_shadow_thickness = 0.05;
@@ -357,7 +367,7 @@ impl QualityPreset {
                 p.exposure = 0.6; p.ssao_strength = 1.0; p.ssao_radius = 0.8; p.ibl_strength = 0.25;
                 p.taa_strength = 1.0; p.taa_sharpening = 0.15; p.fxaa_strength = 0.5;
                 p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.010; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
-                p.volumetric_density = 0.010; p.volumetric_scattering = 0.50; p.volumetric_phase_g = 0.7;
+                p.volumetric_density = 0.0008; p.volumetric_scattering = 0.50; p.volumetric_phase_g = 0.7;
                 p.dof_enabled = 1.0; p.dof_focus_distance = 12.0; p.dof_focus_range = 4.0;
                 p.dof_max_blur = 6.0; p.dof_blur_falloff = 5.0;
                 p.motion_blur_enabled = 1.0; p.motion_blur_intensity = 0.5;
@@ -411,7 +421,6 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub upscale_mode: UpscaleMode,
 
-    // Sprint 5: atmosphere
     #[serde(default)]
     pub atmosphere: AtmosphereSettings,
 }
@@ -447,10 +456,10 @@ impl GraphicsSettings {
     pub fn resolved_postfx(&self) -> PostFx { self.postfx.clone() }
 
     pub fn render_scale_percent(&self) -> u32 {
-        (self.render_scale.clamp(1.0, 2.0) * 100.0).round() as u32
+        (self.render_scale.clamp(0.5, 2.0) * 100.0).round() as u32
     }
     pub fn apply_render_scale_preset(&mut self, scale: f32) {
-        self.render_scale = scale.clamp(1.0, 2.0);
+        self.render_scale = scale.clamp(0.5, 2.0);
     }
 }
 

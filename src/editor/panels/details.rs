@@ -325,7 +325,7 @@ fn draw_single(
 
     if let Some((name, original)) = &assets.selected_material
         && matches("material") {
-            inspector_material(ui, world, e, editor, action, assets, name, original);
+            inspector_material(ui, e, editor, action, assets, name, original);
         }
 
     ui.separator();
@@ -1086,15 +1086,24 @@ fn inspector_sliding_door(
                     if r.changed() { editor.undo_requested = true; }
                 }
             });
-            sd.slide_axis = Vec3::from_array(ax).normalize_or_zero();
+            // FIX (P1.5): нулевая ось раньше давала молчаливую поломку
+            // (дверь не двигается, без объяснения). Теперь — предупреждение.
+            let new_axis = Vec3::from_array(ax);
+            if new_axis.length_squared() > 1e-6 {
+                sd.slide_axis = new_axis.normalize();
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(240, 130, 130),
+                    "⚠ Axis is zero — door won't move",
+                );
+            }
         });
 }
 
 #[allow(clippy::too_many_arguments)]
 fn inspector_material(
     ui: &mut egui::Ui,
-    _world: &mut World,
-    _e: Entity,
+    e: Entity,
     editor: &mut EditorState,
     action: &mut Option<EditorAction>,
     assets: &UiAssets<'_>,
@@ -1138,7 +1147,7 @@ fn inspector_material(
                 changed = true; editor.undo_requested = true;
             }
             if changed {
-                editor.dirty_materials.push((_e, name.to_string(), m));
+                editor.dirty_materials.push((e, name.to_string(), m));
             }
         });
 }

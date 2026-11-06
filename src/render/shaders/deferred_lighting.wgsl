@@ -1,36 +1,4 @@
 // Deferred lighting pass.
-//
-// # История
-//
-// * **Sprint 1**: debanding в tonemap (не тут).
-// * **Sprint 4**: clustered point lights через storage buffer,
-//   fixed-size per cluster (cluster_lights[idx * 16 + local]).
-// * **Sprint 6**: contact shadow visibility (t_contact_shadow, group 2 binding 11)
-//   умножается на directional light #0.
-// * **Sprint 8**: reflection probes (group 4) — металл в помещении
-//   перестаёт «отражать небо».
-//
-// Sprint 7 (variable-size cluster lists через prefix-sum) — **не реализован**.
-// Сейчас используется Sprint-4 схема: cluster_assign.wgsl пишет
-// light_idx в cluster_lights[cluster_idx * 16 + local] для local ∈ [0, 16),
-// cluster_counts[idx] — сколько lights реально попало (может быть > 16,
-// клампим при чтении).
-//
-// # Bind groups
-//
-// - group 0: G-buffer (albedo, normal+depth, emissive+roughness, depth) + camera
-// - group 1: directional lights + CSM splits + fog + shadow params (uniform)
-// - group 2: CSM depth, cube shadow array, SSAO, IBL (irr/pref/brdf/env), contact shadow
-// - group 3: clustered point lights (storage) + cluster counts/lights + params
-// - group 4: reflection probes (4 cube textures + sampler + uniform)
-//
-// # FIX (WGSL parse)
-//
-// Поле `@builtin(position)` в `VOut` раньше называлось `clip`, а в
-// `fs_main` код обращался к `in.frag_coord.x`. WGSL смотрит на имя поля,
-// а не на атрибут — парсер Naga падал с «invalid field accessor `frag_coord`».
-// Поле переименовано в `frag_coord` (как в gbuffer.wgsl / tonemap.wgsl),
-// и `out.clip = ...` в vertex-шейдере заменён на `out.frag_coord = ...`.
 
 const PI: f32 = 3.14159265359;
 
@@ -96,10 +64,6 @@ struct PointLight {
     color:    vec4<f32>,
 };
 
-// Fixed-size per cluster: stride = MAX_LIGHTS_PER_CLUSTER = 16.
-// cluster_lights[cluster_idx * 16 + local] = light_idx (или 0, если
-// local >= counts[cluster_idx]). cluster_counts[c] может быть > 16,
-// но записано только 16 — клампим при чтении.
 const MAX_LIGHTS_PER_CLUSTER: u32 = 16u;
 
 @group(3) @binding(0) var<storage, read> point_lights_storage: array<PointLight>;
@@ -127,15 +91,6 @@ struct ProbeLightingUniform {
 @group(4) @binding(4) var s_probe: sampler;
 @group(4) @binding(5) var<uniform> probe_lighting: ProbeLightingUniform;
 
-// FIX: поле @builtin(position) переименовано из `clip` в `frag_coord`.
-// В WGSL имя поля = имя accessor'а в `in.<имя>`, атрибут @builtin(position)
-// на имя не влияет. В fs_main код использует `in.frag_coord.x/y` для
-// определения кластера — теперь имена совпадают.
-//
-// @invariant — для консистентности с gbuffer.wgsl. TAA вычисляет motion
-// vectors по позициям фрагментов; если бы wgpu переупорядочил вершинные
-// выходы между проходами, значения @builtin(position) могли бы отличаться
-// на ±1 ULP. @invariant это запрещает.
 struct VOut {
     @builtin(position) @invariant frag_coord: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -154,7 +109,6 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
         vec2<f32>(0.0, -1.0),
     );
     var out: VOut;
-    // FIX: было `out.clip` — переименовано в `out.frag_coord`.
     out.frag_coord = vec4<f32>(positions[idx], 0.0, 1.0);
     out.uv = uvs[idx];
     return out;
@@ -230,18 +184,22 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
 // Sprint 8: Probe selection
 // ============================================================
 
-fn sample_probe_cubemap(idx: u32, dir: vec3<f32>) -> vec3<f32> {
+// FIX: добавлен параметр roughness для выбора mip-уровня
+fn sample_probe_cubemap(idx: u32, dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let mip = roughness * 4.0;
     switch (idx) {
-        case 0u: { return textureSampleLevel(t_probe0, s_probe, dir, 0.0).rgb; }
-        case 1u: { return textureSampleLevel(t_probe1, s_probe, dir, 0.0).rgb; }
-        case 2u: { return textureSampleLevel(t_probe2, s_probe, dir, 0.0).rgb; }
-        case 3u: { return textureSampleLevel(t_probe3, s_probe, dir, 0.0).rgb; }
+        case 0u: { return textureSampleLevel(t_probe0, s_probe, dir, mip).rgb; }
+        case 1u: { return textureSampleLevel(t_probe1, s_probe, dir, mip).rgb; }
+        case 2u: { return textureSampleLevel(t_probe2, s_probe, dir, mip).rgb; }
+        case 3u: { return textureSampleLevel(t_probe3, s_probe, dir, mip).rgb; }
         default: { return vec3<f32>(0.0); }
     }
 }
 
 fn probe_weight(world_pos: vec3<f32>, probe: ProbeInfo) -> f32 {
-    if (probe.params.x < 0.5) { return 0.0; }
+    // FIX: добавлена проверка флага enabled
+    if (probe.center_enabled.w < 0.5) { return 0.0; }
+    
     let bmin = probe.box_min.xyz;
     let bmax = probe.box_max.xyz;
     let clamped = clamp(world_pos, bmin, bmax);
@@ -256,6 +214,7 @@ fn compute_reflection(
     n: vec3<f32>,
     v: vec3<f32>,
     ibl_refl: vec3<f32>,
+    roughness: f32, // FIX: добавлен параметр
 ) -> vec3<f32> {
     let count = probe_lighting.counts.x;
     if (count == 0u) { return ibl_refl; }
@@ -275,7 +234,7 @@ fn compute_reflection(
 
     if (best_weight < 0.01) { return ibl_refl; }
 
-    let probe_color = sample_probe_cubemap(best_idx, r);
+    let probe_color = sample_probe_cubemap(best_idx, r, roughness); // FIX: передаем roughness
     let strength = probe_lighting.probes[best_idx].params.z;
     return mix(ibl_refl, probe_color * strength + ibl_refl * (1.0 - strength), best_weight);
 }
@@ -439,7 +398,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let ibl_diff = ibl_diffuse(n, albedo, metallic) * ao * ibl_strength;
 
     let ibl_spec_global = ibl_specular(n, v, albedo, metallic, roughness) * ao * ibl_strength;
-    let ibl_spec = compute_reflection(world_pos, n, v, ibl_spec_global);
+    // FIX: передаем roughness в compute_reflection
+    let ibl_spec = compute_reflection(world_pos, n, v, ibl_spec_global, roughness);
 
     var direct = vec3<f32>(0.0);
 
@@ -456,7 +416,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         direct = direct + pbr_light(n, v, l, albedo, metallic, roughness, radiance * shadow);
     }
 
-    // Sprint 4: clustered point lights (fixed-size per cluster).
     let cube_shadow_count = lights.counts.z;
 
     let grid_x = u32(cluster_params.grid.x);
@@ -469,15 +428,10 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let slice_f = clamp((view_z - near) / max(far - near, 1e-4), 0.0, 1.0);
     let slice = min(u32(slice_f * f32(grid_z)), grid_z - 1u);
 
-    // FIX: используем переименованное поле `frag_coord` (было `clip`).
     let cluster_cx = min(u32(in.frag_coord.x / 16.0), grid_x - 1u);
     let cluster_cy = min(u32(in.frag_coord.y / 16.0), grid_y - 1u);
     let cluster_idx = cluster_cx + cluster_cy * grid_x + slice * grid_x * grid_y;
 
-    // Fixed-size per cluster: чтение cluster_lights[cluster_idx * 16 + i].
-    // cluster_counts[c] может быть > 16 (atomicAdd не ограничен),
-    // поэтому клампим до MAX_LIGHTS_PER_CLUSTER, чтобы не читать
-    // следующий кластер.
     let count = min(cluster_counts[cluster_idx], MAX_LIGHTS_PER_CLUSTER);
     let base = cluster_idx * MAX_LIGHTS_PER_CLUSTER;
 
@@ -503,7 +457,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     var color = ibl_diff + ibl_spec + direct + emissive;
 
-    // Height fog.
     let fog_density = lights.fog_params.x;
     if (fog_density > 0.0) {
         let dist = length(world_pos - camera.camera_pos.xyz);

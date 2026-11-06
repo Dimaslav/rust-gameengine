@@ -236,6 +236,7 @@ impl Mesh {
             r = r.max((p - self.bounds_center).length());
         }
         self.bounds_radius = r;
+        self.invalidate_bvh();
     }
 
     pub fn world_bounds(&self, model: &Mat4) -> (Vec3, f32) {

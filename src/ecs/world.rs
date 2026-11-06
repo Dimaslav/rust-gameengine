@@ -131,16 +131,19 @@ impl World {
         }
     }
 
-    // ============================================================
-    // Компоненты
-    // ============================================================
-
     pub fn insert<T: Send + Sync + 'static>(&mut self, entity: Entity, component: T) {
         debug_assert!(
             self.is_alive(entity),
             "World::insert on dead entity {:?}",
             entity,
         );
+        if !self.is_alive(entity) {
+            log::error!(
+                "World::insert on dead entity {} (release, ignored)",
+                entity
+            );
+            return;
+        }
         let storage = self
             .storages
             .entry(TypeId::of::<T>())

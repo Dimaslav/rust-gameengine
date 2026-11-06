@@ -94,6 +94,14 @@ pub struct Renderer {
     probe_bake_bind_group: wgpu::BindGroup,
     probe_bake_depth_view: wgpu::TextureView,
     _probe_bake_depth_tex: wgpu::Texture,
+    // FIX: `probe_bake_pipeline` собирается из `forward_transparent.wgsl::fs_main`,
+    // у которого два выхода (@location(0) color, @location(1) motion). Pipeline
+    // обязан объявить два target'а, а render pass — два attachment'а. Motion
+    // для probe не нужен (write_mask: empty в pipeline), но валидатор wgpu
+    // требует соответствия один-в-один. Держим общую dummy-текстуру MOTION_FORMAT
+    // 256×256, используется для всех 6 граней всех probe'ов.
+    probe_bake_motion_view: wgpu::TextureView,
+    _probe_bake_motion_tex: wgpu::Texture,
     // `probe_lighting_layout` используется только в `make_lighting_pipeline`
     // (при создании и в reload_shaders — оба debug-пути).
     #[allow(dead_code)]
@@ -768,6 +776,23 @@ impl Renderer {
         let probe_bake_depth_view = probe_bake_depth_tex
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let probe_bake_motion_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("probe_bake_motion"),
+            size: wgpu::Extent3d {
+                width: probe::PROBE_FACE_SIZE,
+                height: probe::PROBE_FACE_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: MOTION_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let probe_bake_motion_view = probe_bake_motion_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         let probe_bake_pipeline = {
             let src = crate::shader_source!("src/render/shaders/forward_transparent.wgsl")
                 .expect("forward_transparent.wgsl not found");
@@ -1382,6 +1407,8 @@ impl Renderer {
             probe_bake_bind_group,
             probe_bake_depth_view,
             _probe_bake_depth_tex: probe_bake_depth_tex,
+            probe_bake_motion_view,
+            _probe_bake_motion_tex: probe_bake_motion_tex,
             probe_lighting_layout,
             probe_lighting_uniform,
             probe_lighting_bind_group,
@@ -1670,6 +1697,28 @@ impl Renderer {
 
     pub fn ensure_decal_bg(&mut self, name: &str) {
         if self.decal_texture_bind_groups.contains_key(name) { return; }
+
+        // FIX (P0.5): "white" — это fallback_texture, не запись в `textures`.
+        // Без фолбэка Decal::default() (texture = "white") не рендерился.
+        if name == "white" {
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("decal_white_bg"),
+                layout: &self.decal_texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.fallback_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.fallback_texture.sampler),
+                    },
+                ],
+            });
+            self.decal_texture_bind_groups.insert("white".to_string(), bg);
+            return;
+        }
+
         let Some(tex) = self.textures.remove(name) else { return; };
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("decal_texture_bg"),
@@ -1812,7 +1861,7 @@ impl Renderer {
     }
 
     fn internal_size(&self) -> (u32, u32) {
-        let scale = self.render_scale.clamp(1.0, 2.0);
+        let scale = self.render_scale.clamp(0.5, 2.0);
         (
             ((self.config.width as f32) * scale).round().max(1.0) as u32,
             ((self.config.height as f32) * scale).round().max(1.0) as u32,
@@ -1869,7 +1918,7 @@ impl Renderer {
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {
-        let s = scale.clamp(1.0, 2.0);
+        let s = scale.clamp(0.5, 2.0);
         if (s - self.render_scale).abs() < 0.001 { return; }
         self.render_scale = s;
         log::info!("Renderer: render_scale = {:.2} ({:.0}% internal)", s, s * 100.0);

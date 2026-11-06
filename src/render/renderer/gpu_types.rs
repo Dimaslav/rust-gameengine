@@ -30,30 +30,19 @@ pub const MAX_POINT_LIGHTS: usize = 16;
 
 pub const MAX_SHADOW_CUBES: usize = 4;
 
-// ============================================================
-// Sprint 4 + 7: Clustered lighting
-// ============================================================
-
 pub const CLUSTER_TILE_SIZE: u32 = 16;
 pub const CLUSTER_GRID_Z: u32 = 24;
 
-/// Sprint 7: подняли с 16 до 64 — «лишние» lights теперь не отбрасываются
-/// при нормальной сцене, а плотно упаковываются через prefix-sum.
-/// Memory: grid × 64 × 4 байт. На 1080p ≈ 50 MB.
-pub const MAX_LIGHTS_PER_CLUSTER: u32 = 64;
+// FIX: было 64. Шейдеры (cluster_assign.wgsl и deferred_lighting.wgsl)
+// используют stride 16.
+pub const MAX_LIGHTS_PER_CLUSTER: u32 = 16;
 pub const MAX_POINT_LIGHTS_CLUSTERED: usize = 256;
 
+// FIX: было потеряно. Используется в Renderer::new для shadow_pass_buffer
+// и в render() для раскладки cascade + cube shadow matrices.
 pub const SHADOW_SLOT_COUNT: u64 = (3 + 6 * MAX_SHADOW_CUBES) as u64;
 
-// ============================================================
-// Sprint 8: Reflection probes
-// ============================================================
-
 pub const MAX_REFLECTION_PROBES: usize = 4;
-
-// ============================================================
-// GPU-структуры
-// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -121,10 +110,6 @@ pub struct BloomParams {
     pub params: [f32; 4],
 }
 
-// ============================================================
-// Sprint 4: Clustered lighting uniforms
-// ============================================================
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ClusterParams {
@@ -134,10 +119,6 @@ pub struct ClusterParams {
     pub proj: [[f32; 4]; 4],
     pub view: [[f32; 4]; 4],
 }
-
-// ============================================================
-// Sprint 5: Atmosphere
-// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -170,48 +151,28 @@ impl AtmosphereParams {
     }
 }
 
-// ============================================================
-// Sprint 8: Reflection probes
-// ============================================================
-
-/// Per-probe данные, читаемые в `deferred_lighting.wgsl` для выбора
-/// ближайшего probe и blend.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Default)]
 pub struct ProbeInfo {
-    /// xyz = center of AABB, w = enabled (1.0 или 0.0).
     pub center_enabled: [f32; 4],
-    /// xyz = box_min, w = unused.
     pub box_min: [f32; 4],
-    /// xyz = box_max, w = unused.
     pub box_max: [f32; 4],
-    /// x = baked (1.0 если готов), y = distance_falloff (м), z = strength,
-    /// w = unused.
     pub params: [f32; 4],
 }
 
-/// Uniform для lighting: probe selection.
-///
-/// 4 probe × 64 байта = 256 байт + 16 (counts) = 272 байта.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ProbeLightingUniform {
     pub probes: [ProbeInfo; MAX_REFLECTION_PROBES],
-    /// x = активное количество probe, yzw = unused.
     pub counts: [u32; 4],
 }
 
-/// Uniform для contact shadows pipeline.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ContactShadowParams {
     pub params: [f32; 4],
     pub sun_view_dir: [f32; 4],
 }
-
-// ============================================================
-// Tonemap / LensFlare / DoF / MotionBlur / Skybox / Material / Skeleton
-// ============================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -349,7 +310,7 @@ pub struct MeshDraw {
 // Дефолты для PostFx
 // ============================================================
 
-fn default_volumetric_density() -> f32 { 0.001 }
+fn default_volumetric_density() -> f32 { 0.0006 }
 fn default_volumetric_scattering() -> f32 { 0.4 }
 fn default_volumetric_phase_g() -> f32 { 0.6 }
 fn default_one() -> f32 { 1.0 }
@@ -499,7 +460,7 @@ impl Default for PostFx {
             lod_distances: [30.0, 80.0, 200.0, 500.0],
             taa_strength: 1.0,
             taa_sharpening: 0.1,
-            volumetric_density: 0.001,
+            volumetric_density: 0.0006,
             volumetric_scattering: 0.4,
             volumetric_phase_g: 0.6,
             tonemapper: Tonemapper::AgX,
@@ -530,10 +491,6 @@ impl Default for PostFx {
         }
     }
 }
-
-// ============================================================
-// Helper-функции
-// ============================================================
 
 pub struct MaterialGpu {
     pub bind_group: wgpu::BindGroup,

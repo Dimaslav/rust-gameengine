@@ -1,14 +1,11 @@
 //! Левая панель: Stats + Outliner + Prefabs + Assets.
 
-use egui::containers::panel::Panel;
-use egui::Ui;
-
 use crate::ecs::World;
 use crate::editor::panels::{content, outliner, stats, Stats, UiAssets};
 use crate::editor::{EditorAction, EditorState};
 
 pub fn draw(
-    ui: &mut Ui,
+    ui: &mut egui::Ui,
     state: &mut EditorState,
     world: &mut World,
     assets: &UiAssets<'_>,
@@ -18,8 +15,8 @@ pub fn draw(
     if !(state.layout.show_stats_panel || state.layout.show_hierarchy_panel) {
         return;
     }
-    
-    let panel_response = Panel::left("left_panel")
+
+    let panel_response = egui::containers::panel::Panel::left("left_panel")
         .default_size(state.layout.left_panel_width)
         .resizable(true)
         .show(ui, |ui| {

@@ -48,6 +48,17 @@ use super::particles::{self, Particle, MAX_PARTICLES};
 use super::time::Time;
 
 // ============================================================
+// Fallback constants
+// ============================================================
+
+/// Fallback-позиция камеры (eye) при входе в Play, если
+/// `saved_position` невалидна (NaN, за пределами сцены, под полом).
+///
+/// НЕ привязана к демо-сцене намеренно: движок не должен знать
+/// про `demo::fortress`.
+const DEFAULT_PLAY_SPAWN: Vec3 = Vec3::new(0.0, 1.7, 0.0);
+
+// ============================================================
 // Game trait
 // ============================================================
 
@@ -354,13 +365,11 @@ impl<G: Game> App<G> {
         }
         app.apply_settings_to_window(window.clone());
         app.apply_settings_to_audio();
-        app.apply_settings_to_game();
+        // FIX #9: postfx не перезаписываем из `settings.ron` при старте.
+        app.apply_settings_to_game(false);
         app
     }
 
-    /// Применить WindowSettings: разрешение, fullscreen, V-Sync (present
-    /// mode). `&mut self` — потому что V-Sync требует
-    /// `Renderer::set_present_mode`, а он пересоздаёт surface config.
     fn apply_settings_to_window(&mut self, window: Arc<Window>) {
         let s = &self.settings.window;
         if let Some((w, h, _)) = RESOLUTIONS.get(s.resolution_index) {
@@ -379,7 +388,6 @@ impl<G: Game> App<G> {
         self.renderer.set_present_mode(pm);
     }
 
-    /// Применить AudioSettings: master/sfx/music/voice/ui.
     fn apply_settings_to_audio(&mut self) {
         if let Some(audio) = self.audio.as_mut() {
             let a = &self.settings.audio;
@@ -391,26 +399,25 @@ impl<G: Game> App<G> {
         }
     }
 
-    fn apply_settings_to_game(&mut self) {
+    /// FIX #9: `apply_postfx` — применить ли `settings.graphics.postfx`.
+    fn apply_settings_to_game(&mut self, apply_postfx: bool) {
         let g = &self.settings.graphics;
         let a = &self.settings.accessibility;
 
         let fov_deg = g.fov.clamp(30.0, 130.0);
         self.game.camera_mut().fov_y = fov_deg.to_radians();
 
-        let mut postfx = g.postfx.clone();
-        if a.disable_motion_blur {
-            postfx.motion_blur_enabled = 0.0;
-        }
-        g.shadow_quality.apply_to(&mut postfx);
-
-        // Sprint 3: SSAA
         self.renderer.set_render_scale(g.render_scale);
-
-        // Sprint 5: Atmosphere
         self.renderer.atmosphere_settings = g.atmosphere;
 
-        self.game.apply_postfx(postfx);
+        if apply_postfx {
+            let mut postfx = g.postfx.clone();
+            if a.disable_motion_blur {
+                postfx.motion_blur_enabled = 0.0;
+            }
+            g.shadow_quality.apply_to(&mut postfx);
+            self.game.apply_postfx(postfx);
+        }
     }
 
     fn ensure_pickable<'a>(
@@ -547,6 +554,74 @@ impl<G: Game> App<G> {
         self.elevator_prev_state.retain(|k, _| live.contains(k));
     }
 
+    /// FIX #6: двигает все `Elevator` по их state machine.
+    fn update_elevators(&mut self, dt: f32) {
+        let entities: Vec<Entity> = self.world.query::<Elevator>().map(|(e, _)| e).collect();
+        for e in entities {
+            let Some(mut el) = self.world.get::<Elevator>(e).cloned() else {
+                continue;
+            };
+            let current_y = self
+                .world
+                .get::<Transform>(e)
+                .map(|t| t.position.y)
+                .unwrap_or(0.0);
+            let prev_y = current_y;
+            let mut new_y = current_y;
+
+            match el.state {
+                ElevatorState::Idle => {}
+                ElevatorState::Moving => {
+                    if el.update_moving(current_y, dt) {
+                        el.stop_velocity();
+                        el.state = ElevatorState::DoorsOpening;
+                        el.dwell_timer = 0.0;
+                        new_y = el.floor_y(el.current_floor);
+                    } else {
+                        new_y = current_y + el.current_velocity * dt;
+                    }
+                }
+                ElevatorState::DoorsOpening => {
+                    el.doors_open =
+                        (el.doors_open + el.door_speed * dt).min(1.0);
+                    if el.doors_open >= 1.0 {
+                        el.state = ElevatorState::DoorsOpen;
+                        el.dwell_timer = el.dwell;
+                    }
+                }
+                ElevatorState::DoorsOpen => {
+                    el.dwell_timer = (el.dwell_timer - dt).max(0.0);
+                    if el.dwell_timer <= 0.0 {
+                        el.state = ElevatorState::DoorsClosing;
+                    }
+                }
+                ElevatorState::DoorsClosing => {
+                    el.doors_open =
+                        (el.doors_open - el.door_speed * dt).max(0.0);
+                    if el.doors_open <= 0.0 {
+                        if el.current_floor != el.target_floor {
+                            el.state = ElevatorState::Moving;
+                        } else {
+                            el.state = ElevatorState::Idle;
+                        }
+                    }
+                }
+            }
+
+            let dy = new_y - prev_y;
+            if dy.abs() > 1e-6 {
+                if let Some(t) = self.world.get_mut::<Transform>(e) {
+                    t.position.y = new_y;
+                }
+                if let Some(rb) = self.world.get_mut::<crate::physics::RigidBody>(e) {
+                    rb.velocity.y = dy / dt.max(1e-4);
+                }
+            }
+
+            self.world.insert(e, el);
+        }
+    }
+
     fn bake_navmesh(&mut self) {
         let opts = BakeOpts::default();
         let nm = Navmesh::bake(&self.world, &opts);
@@ -611,14 +686,12 @@ impl<G: Game> App<G> {
     }
 
     fn update_player(&mut self, dt: f32) {
-        // === Controls: mouse sensitivity + invert Y ===
         let ctrl = self.settings.controls.clone();
         let sens = self.editor.state.play.look_sensitivity * ctrl.mouse_sensitivity;
         let (mdx, mdy_raw) = self.input.mouse_motion;
         let mdy = if ctrl.invert_y { -mdy_raw } else { mdy_raw };
         self.game.camera_mut().fps_look(mdx * sens, mdy * sens);
 
-        // === Crouch: hold или toggle ===
         if ctrl.crouch_toggle {
             if self.input.key_pressed(KeyCode::ControlLeft)
                 || self.input.key_pressed(KeyCode::ControlRight)
@@ -631,7 +704,6 @@ impl<G: Game> App<G> {
         }
         let crouching = self.editor.state.play.crouching;
 
-        // === Sprint: hold или toggle ===
         let running = if ctrl.sprint_toggle {
             if self.input.key_pressed(KeyCode::ShiftLeft) {
                 self.editor.state.play.sprint_toggled =
@@ -869,6 +941,7 @@ impl<G: Game> App<G> {
                 None
             }
         });
+
         let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
         for e in triggers {
@@ -881,48 +954,54 @@ impl<G: Game> App<G> {
                 continue;
             }
             let dist = (player_feet_now - pos).length();
+
+            // FIX #4: `t.fired` сохраняется в World для ВСЕХ триггеров.
             if dist <= t.radius {
-                match &t.action {
-                    TriggerAction::Teleport(target) => {
-                        let new_feet = Vec3::from_array(*target);
-                        let eye_h = self.editor.state.play.current_eye_height;
-                        self.game.camera_mut().first_person_pos = new_feet + Vec3::Y * eye_h;
-                        self.editor.state.play.vertical_velocity = 0.0;
-                        self.editor.state.play.on_ground = true;
-                    }
-                    TriggerAction::Tint(c) => {
-                        self.world.insert(e, Tint(*c));
-                    }
-                    TriggerAction::Despawn => {
-                        self.world.despawn(e);
-                        continue;
-                    }
-                    TriggerAction::CallElevator { elevator, floor_idx } => {
-                        if self.world.is_alive(*elevator)
-                            && let Some(el) = self.world.get_mut::<Elevator>(*elevator)
-                        {
-                            el.call(*floor_idx as usize);
+                if !t.fired {
+                    match &t.action {
+                        TriggerAction::Teleport(target) => {
+                            let new_feet = Vec3::from_array(*target);
+                            let eye_h = self.editor.state.play.current_eye_height;
+                            self.game.camera_mut().first_person_pos = new_feet + Vec3::Y * eye_h;
+                            self.editor.state.play.vertical_velocity = 0.0;
+                            self.editor.state.play.on_ground = true;
+                        }
+                        TriggerAction::Tint(c) => {
+                            self.world.insert(e, Tint(*c));
+                        }
+                        TriggerAction::Despawn => {
+                            self.world.despawn(e);
+                            continue;
+                        }
+                        TriggerAction::CallElevator { elevator, floor_idx } => {
+                            if self.world.is_alive(*elevator)
+                                && let Some(el) = self.world.get_mut::<Elevator>(*elevator)
+                            {
+                                el.call(*floor_idx as usize);
+                            }
+                        }
+                        TriggerAction::PlaySound(name) => {
+                            if let Some(audio) = &mut self.audio {
+                                let n: &'static str = match name.as_str() {
+                                    "shot" => "shot",
+                                    "explosion" => "explosion",
+                                    "pickup" => "pickup",
+                                    "ding" => "ding",
+                                    _ => "pickup",
+                                };
+                                audio.play(n);
+                            }
                         }
                     }
-                    TriggerAction::PlaySound(name) => {
-                        if let Some(audio) = &mut self.audio {
-                            let n: &'static str = match name.as_str() {
-                                "shot" => "shot",
-                                "explosion" => "explosion",
-                                "pickup" => "pickup",
-                                "ding" => "ding",
-                                _ => "pickup",
-                            };
-                            audio.play(n);
-                        }
-                    }
+                    t.fired = true;
                 }
-                t.fired = true;
-                if t.once {
-                    self.world.insert(e, t);
-                }
+                self.world.insert(e, t);
+            } else if t.fired && !t.once {
+                t.fired = false;
+                self.world.insert(e, t);
             }
         }
+
         let player_pos = self.game.camera().position();
         let chasers: Vec<Entity> = self.world.query::<Chase>().map(|(e, _)| e).collect();
         for e in chasers {
@@ -1228,7 +1307,14 @@ impl<G: Game> App<G> {
     fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) {
         for cmd in commands {
             match cmd {
-                ScriptCommand::PlaySound { sound, position: _ } => {
+                // FIX #7: `position` больше не игнорируется.
+                ScriptCommand::PlaySound { sound, position: Some(pos) } => {
+                    if let Some(audio) = self.audio.as_mut() {
+                        let listener = self.game.camera().position();
+                        audio.play_at(&sound, pos, listener);
+                    }
+                }
+                ScriptCommand::PlaySound { sound, position: None } => {
                     if let Some(audio) = self.audio.as_mut() {
                         audio.play(&sound);
                     }
@@ -1566,15 +1652,13 @@ impl<G: Game> App<G> {
             }
             self.update_elevator_ding();
 
-            if self.editor.state.play.active {
-                let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
-                cache.build(&self.world);
-            }
-
             let t_physics = Instant::now();
             self.physics
                 .step(&mut self.world, self.renderer.terrain.as_ref(), dt);
             physics_ms = t_physics.elapsed().as_secs_f32() * 1000.0;
+
+            // FIX #6: двигаем лифты после физики.
+            self.update_elevators(dt);
 
             let t_ai = Instant::now();
             self.ai_system
@@ -1588,7 +1672,12 @@ impl<G: Game> App<G> {
             self.apply_script_commands(script_commands);
             scripts_ms = t_scripts.elapsed().as_secs_f32() * 1000.0;
 
+            // FIX (P0.2): ColliderCache строится ПОСЛЕ physics/elevators/AI/scripts,
+            // чтобы update_player видел актуальные позиции движущихся тел.
+            // Раньше кэш строился до physics — игрок «проваливался» в конце кадра.
             if self.editor.state.play.active {
+                let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
+                cache.build(&self.world);
                 self.input.editor_captured = false;
                 self.update_player(dt);
             } else if self.editor.state.flying {
@@ -1693,8 +1782,19 @@ impl<G: Game> App<G> {
                 ..AudioSnapshot::default()
             }
         };
-        let pre_ui_undo_snapshot: Option<String> = if self.editor.state.undo.can_push_now() {
-            crate::scene::save_scene_with_assets_to_string(&self.world, &self.renderer, None).ok()
+
+        // FIX #14: lazy undo capture. Снимаем только когда пользователь
+        // взаимодействует (тянет gizmo, двигает слайдер, ставит палитру,
+        // тащит terrain-кисть). Раньше `collect=42 ms` в Editor idle.
+        let user_interacting = self.input.mouse_down(MouseButton::Left)
+            || self.editor.state.gizmo.drag.is_some()
+            || self.editor.state.terrain.dragging;
+        let should_capture_undo = !self.mode.is_menu()
+            && !self.editor.state.play.active
+            && self.editor.state.undo.can_push_now()
+            && user_interacting;
+        let pre_ui_undo_snapshot: Option<String> = if should_capture_undo {
+            crate::scene::save_scene_for_undo_to_string(&self.world, &self.renderer).ok()
         } else {
             None
         };
@@ -1756,13 +1856,14 @@ impl<G: Game> App<G> {
         let mode_ref = &mut self.mode;
         let settings_ref = &mut self.settings;
         let mut menu_actions = game_menu::MenuActions::default();
+        let mut viewport_rect_from_ui: egui::Rect = egui::Rect::NOTHING;
 
-        let full_output = egui_ctx.run_ui(raw_input, |ctx| {
+        let mut full_output = egui_ctx.run_ui(raw_input, |ui| {
             if in_menu_for_ui {
-                menu_actions = game_menu::draw(ctx, mode_ref, settings_ref, has_save);
+                menu_actions = game_menu::draw(ui.ctx(), mode_ref, settings_ref, has_save);
             } else {
-                let action = panels::draw_all(
-                    ctx,
+                let (action, vp) = panels::draw_all(
+                    ui,
                     editor_state,
                     world,
                     &mut postfx,
@@ -1772,6 +1873,7 @@ impl<G: Game> App<G> {
                     asset_db,
                     scripts_ref,
                 );
+                viewport_rect_from_ui = vp;
                 if let Some(a) = action {
                     editor_state.pending_action = Some(a);
                 }
@@ -1809,7 +1911,8 @@ impl<G: Game> App<G> {
                 }
                 self.apply_settings_to_window(self.window.clone());
                 self.apply_settings_to_audio();
-                self.apply_settings_to_game();
+                // FIX #9: явный Apply — postfx из settings.ron приоритетен.
+                self.apply_settings_to_game(true);
             }
             if menu_actions.quit {
                 elwt.exit();
@@ -1822,13 +1925,29 @@ impl<G: Game> App<G> {
             log::info!("Returning to main menu");
         }
 
+        // FIX #11: правильный viewport_rect. Раньше `content_rect()` =
+        // весь экран, потому что `CentralPanel` был внутри `Area`.
+        // Теперь `draw_all` возвращает `CentralPanel::show().response.rect`.
         {
-            let avail = egui_ctx.input(|i| i.content_rect());
             let ppp = egui_ctx.pixels_per_point();
-            self.viewport_rect = Some(egui::Rect::from_min_max(
-                egui::pos2(avail.min.x * ppp, avail.min.y * ppp),
-                egui::pos2(avail.max.x * ppp, avail.max.y * ppp),
-            ));
+            if !in_menu_for_ui && !viewport_rect_from_ui.is_negative() {
+                self.viewport_rect = Some(egui::Rect::from_min_max(
+                    egui::pos2(
+                        viewport_rect_from_ui.min.x * ppp,
+                        viewport_rect_from_ui.min.y * ppp,
+                    ),
+                    egui::pos2(
+                        viewport_rect_from_ui.max.x * ppp,
+                        viewport_rect_from_ui.max.y * ppp,
+                    ),
+                ));
+            } else {
+                let avail = egui_ctx.input(|i| i.content_rect());
+                self.viewport_rect = Some(egui::Rect::from_min_max(
+                    egui::pos2(avail.min.x * ppp, avail.min.y * ppp),
+                    egui::pos2(avail.max.x * ppp, avail.max.y * ppp),
+                ));
+            }
         }
 
         self.game.apply_postfx(postfx);
@@ -2125,6 +2244,11 @@ impl<G: Game> App<G> {
             self.editor.egui_renderer.free_texture(id);
         }
 
+        // FIX #0.2 (epaint 0.37): `TexturesDelta::drop` паникует,
+        // если остались неприменённые set/free. Мы всё применили —
+        // очищаем, чтобы Drop был no-op.
+        full_output.textures_delta.clear();
+
         if let Err(e) = res {
             log::warn!("Render error: {:?}", e);
             self.renderer.resize(self.renderer.size);
@@ -2176,9 +2300,6 @@ impl<G: Game> App<G> {
         }
         self.input.end_frame();
 
-        // === FPS limit ===
-        // Спим остаток кадра, если target_hz задан. `last_total_cpu_ms`
-        // уже посчитан — sleep не влияет на CPU-бюджет.
         if let Some(target_hz) = self.settings.graphics.fps_limit.target_hz() {
             let target_frame_time = 1.0 / target_hz;
             let elapsed = self.last_total_cpu_ms * 0.001;
@@ -2487,6 +2608,15 @@ impl<G: Game> App<G> {
                     self.editor.state.hud_hint("Quick Saved!");
                 }
             }
+            EditorAction::PausePlay => {
+                if self.editor.state.play.active && !self.editor.state.play.paused {
+                    self.editor.state.play.paused = true;
+                    self.time.paused = true;
+                    log::info!("Paused play (from UI)");
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                    self.window.set_cursor_visible(true);
+                }
+            }
             EditorAction::TogglePlay => {
                 let was_active = self.editor.state.play.active;
                 if !was_active {
@@ -2512,7 +2642,22 @@ impl<G: Game> App<G> {
                     play.coyote_timer = play.coyote_time;
                     play.jump_buffer_timer = 0.0;
                     play.ground_normal = Vec3::Y;
+                    // FIX (build): ACT1_CENTER — приватная константа
+                    // из demo::fortress. Используем локальный fallback.
+                    let safe_pos = DEFAULT_PLAY_SPAWN;
                     let mut spawn = play.saved_position;
+                    if !spawn.is_finite()
+                        || spawn.y < -30.0
+                        || spawn.length() > 500.0
+                    {
+                        log::warn!(
+                            "Play spawn reset: saved={:?} → safe={:?}",
+                            play.saved_position,
+                            safe_pos
+                        );
+                        spawn = safe_pos;
+                        play.saved_position = spawn;
+                    }
                     if spawn.y < play.floor_y + play.eye_height {
                         spawn.y = play.floor_y + play.eye_height;
                     }

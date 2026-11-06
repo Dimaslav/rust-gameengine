@@ -5,9 +5,12 @@
 //! `Game::collect_ui` — каждая функция добавляет квады и (для
 //! интерактивных элементов) возвращает interaction-статус.
 //!
-//! ИЗМЕНЕНО: `UiInput` теперь несёт модификаторы (`ctrl`/`shift`/`alt`).
-//! Раньше `inventory_ui` не мог отличить Ctrl+click от обычного —
-//! приходилось тащить состояние через `FortressDemo::update`.
+//! ## FIX #10: multiline
+//!
+//! `text` и `text_width` поддерживают `\n` (перенос строки).
+//! Раньше `\n` (char code 10) попадал в `glyph_uv` → saturating_sub
+//! → пустой глиф → длинные реплики в `dialog.rs` рисовались в одну
+//! строку и уезжали за правый край панели.
 
 use super::font;
 use super::quad::UiQuad;
@@ -81,18 +84,30 @@ impl UiLayer {
         self.rect(x + w - t, y + t, t, h - 2.0 * t, color);
     }
 
+    /// FIX #10: поддержка `\n` — многострочный текст.
+    ///
+    /// Раньше `\n` (char code 10) попадал в `glyph_uv` → saturating_sub
+    /// → пустой глиф → длинные реплики в `dialog.rs` рисовались в одну
+    /// строку и уезжали за правый край панели.
     pub fn text(&mut self, x: f32, y: f32, text: &str, size_px: f32, color: [f32; 4]) {
         if size_px <= 0.0 || color[3] <= 0.0 { return; }
         let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
+        let line_h = size_px * 1.15;
         let mut cx = x;
+        let mut cy = y;
         for c in text.chars() {
+            if c == '\n' {
+                cx = x;
+                cy += line_h;
+                continue;
+            }
             if c == ' ' {
                 cx += glyph_w;
                 continue;
             }
             let uv = font::glyph_uv(c);
             self.quads.push(UiQuad {
-                rect: [cx, y, glyph_w, size_px],
+                rect: [cx, cy, glyph_w, size_px],
                 color,
                 uv,
             });
@@ -110,9 +125,15 @@ impl UiLayer {
         self.text(x, y, text, size_px, color);
     }
 
+    /// FIX #10: для многострочного текста возвращает ширину
+    /// **самой длинной** строки, а не всего текста в одну строку.
     pub fn text_width(&self, text: &str, size_px: f32) -> f32 {
         let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
-        text.chars().count() as f32 * glyph_w
+        text.lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as f32
+            * glyph_w
     }
 
     // ============================================================

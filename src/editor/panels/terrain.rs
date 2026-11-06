@@ -1,14 +1,15 @@
 //! Панель Terrain (верхняя полоса).
 
-use egui::containers::panel::Panel;
-use egui::Ui;
-
 use crate::editor::terrain_tool::TerrainBrush;
 use crate::editor::{EditorAction, EditorState};
 use crate::render::terrain::Falloff;
 
-pub fn draw(ui: &mut Ui, state: &mut EditorState, action: &mut Option<EditorAction>) {
-    Panel::top("terrain_bar").show(ui, |ui| {
+pub fn draw(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    action: &mut Option<EditorAction>,
+) {
+    egui::containers::panel::Panel::top("terrain_bar").show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("🏔 Terrain").strong());
 

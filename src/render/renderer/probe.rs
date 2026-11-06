@@ -119,6 +119,16 @@ pub struct ProbeBakeUniform {
 /// Использует существующие `draws` (обычно — из основного кадра).
 /// Пайплайн: forward PBR с ambient + directional lights (без shadows —
 /// это первая версия, shadow-pass в probe добавится позже).
+///
+/// # FIX (probe_bake_pipeline: 2 target'а, 2 attachment'а)
+///
+/// `probe_bake_pipeline` собран из `forward_transparent.wgsl::fs_main`,
+/// у которого два выхода: `@location(0) color: vec4<f32>` и
+/// `@location(1) motion: vec2<f32>`. Pipeline обязан объявить два
+/// target'а (HDR_FORMAT + MOTION_FORMAT), а render pass — два
+/// color attachment'а. Motion для probe не нужен (write_mask: empty
+/// в pipeline, StoreOp::Discard в pass), но валидатор wgpu требует
+/// соответствия один-в-один.
 #[allow(clippy::too_many_arguments)]
 pub fn bake_probe(
     r: &mut Renderer,
@@ -176,17 +186,31 @@ pub fn bake_probe(
             let probe = &r.probes[probe_idx];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("probe_face_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &probe.face_views[face],
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05, g: 0.05, b: 0.08, a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
+                // FIX: два color attachment'а — HDR (cubemap face) и
+                // dummy MOTION (в pipeline write_mask: empty, реально
+                // не пишется, StoreOp::Discard — не сохраняется в память).
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &probe.face_views[face],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.05, g: 0.05, b: 0.08, a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &r.probe_bake_motion_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                        depth_slice: None,
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &r.probe_bake_depth_view,
                     depth_ops: Some(wgpu::Operations {

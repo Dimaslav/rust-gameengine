@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
@@ -127,12 +127,12 @@ enum Stage {
 impl Stage {
     fn title(self) -> &'static str {
         match self {
-            Stage::Act1 => "ACT I — Пробуждение",
-            Stage::Act2 => "ACT II — Двор",
-            Stage::Act3 => "ACT III — Лобби",
-            Stage::Act4 => "ACT IV — Подземелье",
-            Stage::Act5 => "ACT V — Побег",
-            Stage::Victory => "ПОБЕДА",
+            Stage::Act1 => "ACT I — Awakening",
+            Stage::Act2 => "ACT II — Courtyard",
+            Stage::Act3 => "ACT III — Lobby",
+            Stage::Act4 => "ACT IV — Dungeon",
+            Stage::Act5 => "ACT V — Escape",
+            Stage::Victory => "VICTORY",
         }
     }
 }
@@ -163,11 +163,11 @@ impl CampaignState {
             kills_required: 2,
             has_key_red: false,
             gold: 0,
-            objective: "Убей 2 стражников".into(),
+            objective: "Kill 2 guards".into(),
             processed: HashSet::new(),
             dialog_shown: HashSet::new(),
             checkpoints: HashSet::new(),
-            dialog: Some(("Добро пожаловать в Павшую Цитадель.".into(), 4.0)),
+            dialog: Some(("Welcome to the Fallen Citadel.".into(), 4.0)),
             victory_time: None,
             playtime: 0.0,
         }
@@ -265,15 +265,12 @@ pub struct FortressDemo {
     // === Vendor ===
     vendor_registry: VendorRegistry,
     vendor_session: Option<VendorSession>,
-    /// `Esc` закрывает вендора.
     vendor_esc_pressed: bool,
 
     // === Crafting ===
     crafting_registry: CraftingRegistry,
     crafting_session: Option<CraftingSession>,
     crafting_esc_pressed: bool,
-    /// ПКМ нажата в этом кадре. `UiInput` не несёт правую кнопку,
-    /// поэтому сохраняем здесь из `update()`.
     rmb_pressed_this_frame: bool,
 
     last_play_mode: bool,
@@ -302,7 +299,6 @@ pub struct FortressDemo {
     pending_hit_stop: Option<(f32, f32)>,
     auto_fire_accumulator: f32,
 
-    // Sprint 8: bake probe один раз за сессию.
     probe_baked_this_session: bool,
 }
 
@@ -312,7 +308,6 @@ impl FortressDemo {
         if let Ok(qm) = QuestManager::load_from_dir("assets/quests") {
             quest_manager = qm;
         }
-        quest_manager.start_quest("act1_guards");
 
         let initial_lang = crate::game::locale::current_id().unwrap_or_else(|| "ru".to_string());
         let dialogs = DialogGraph::load_from_dir("assets/dialogs", &initial_lang).unwrap_or_default();
@@ -558,6 +553,16 @@ impl FortressDemo {
     }
 
     fn try_pickup(&mut self, item_id: &str, count: u32) {
+        if let Some(item) = self.item_registry.get_by_id(item_id).cloned()
+            && item.kind == ItemKind::Misc
+            && item.gold_value > 0
+        {
+            let total = item.gold_value.saturating_mul(count);
+            self.campaign.gold = self.campaign.gold.saturating_add(total);
+            self.hud.push(format!("+{} gold", total));
+            return;
+        }
+
         let stack = ItemStack::new(item_id, count);
         let leftover = self.inventory.add(&self.item_registry, stack);
         let picked = count.saturating_sub(leftover);
@@ -617,17 +622,11 @@ impl FortressDemo {
         let _ = self.inventory.take_one(idx);
     }
 
-    // ============================================================
-    // Inventory drag/drop helper
-    // ============================================================
-
-    /// Hit-test: какой слот инвентаря / экипировки под курсором.
     fn hit_test_inventory(&self, sw: f32, sh: f32, mx: f32, my: f32) -> Option<InvLocation> {
         let px = (sw - INV_PANEL_W) * 0.5;
         let py = (sh - INV_PANEL_H) * 0.5;
         let content_y = py + 100.0;
 
-        // Экипировка.
         let eq_x = px + INV_PAD;
         let eq_y = content_y + 8.0 + 18.0;
         let slots = [
@@ -643,7 +642,6 @@ impl FortressDemo {
             }
         }
 
-        // Сетка инвентаря.
         let grid_x = eq_x + INV_EQ_SLOT_W + INV_PAD;
         let grid_y = content_y + 8.0 + 18.0;
         for i in 0..self.inventory.capacity {
@@ -660,17 +658,14 @@ impl FortressDemo {
     }
 
     fn handle_craft(&mut self, recipe: &RecipeDef) {
-        // Level check.
         if self.player_stats.experience.level < recipe.required_level {
             self.hud.push(format!("Requires level {}", recipe.required_level));
             return;
         }
-        // Gold check.
         if self.campaign.gold < recipe.gold_cost {
             self.hud.push("Not enough gold");
             return;
         }
-        // Input check.
         for input in &recipe.inputs {
             if self.inventory.count_of(&input.item_id) < input.count {
                 let name = self.item_registry
@@ -682,7 +677,6 @@ impl FortressDemo {
             }
         }
 
-        // Dry-run: проверим, что все outputs поместятся.
         let mut inv_check = self.inventory.clone();
         for input in &recipe.inputs {
             inv_check.remove_by_id(&input.item_id, input.count);
@@ -698,7 +692,6 @@ impl FortressDemo {
             }
         }
 
-        // Применяем.
         for input in &recipe.inputs {
             self.inventory.remove_by_id(&input.item_id, input.count);
         }
@@ -754,14 +747,12 @@ impl FortressDemo {
         self.hud.push(format!("Sold {} for {}g", item.name, item.sell_price));
     }
 
-    /// Обработка swap между любыми двумя локациями.
     fn handle_inv_swap(&mut self, a: InvLocation, b: InvLocation) {
         match (a, b) {
             (InvLocation::Inventory(i), InvLocation::Inventory(j)) => {
                 self.inventory.swap(i, j, &self.item_registry);
             }
             (InvLocation::Inventory(i), InvLocation::Equipment(slot)) => {
-                // Из инвентаря в экипировку.
                 let Some(stack) = self.inventory.slots.get(i).and_then(|s| s.clone()) else {
                     return;
                 };
@@ -792,7 +783,6 @@ impl FortressDemo {
                 self.hud.push(format!("Equipped: {}", item.name));
             }
             (InvLocation::Equipment(slot), InvLocation::Inventory(_)) => {
-                // Снять экипировку в первый свободный слот инвентаря.
                 let Some(old_id) = self.equipment.take_slot(slot) else {
                     return;
                 };
@@ -806,9 +796,7 @@ impl FortressDemo {
                     self.hud.push("Unequipped");
                 }
             }
-            (InvLocation::Equipment(_), InvLocation::Equipment(_)) => {
-                // Swap между слотами экипировки не поддерживаем.
-            }
+            (InvLocation::Equipment(_), InvLocation::Equipment(_)) => {}
         }
     }
 
@@ -1377,18 +1365,33 @@ impl FortressDemo {
         }
     }
 
+    // ============================================================
+    // FIX #4: process_triggers — once через processed, repeatable без
+    // ============================================================
+
     fn process_triggers(&mut self, world: &mut World) {
-        let fired: Vec<(Entity, String)> = world
+        // FIX #4: once — через `processed`, repeatable — без `processed`.
+        let fired: Vec<(Entity, String, bool)> = world
             .query::<Trigger>()
-            .filter(|(e, t)| t.fired && !self.campaign.processed.contains(e))
-            .filter_map(|(e, _)| {
+            .filter(|(e, t)| {
+                if !t.fired {
+                    return false;
+                }
+                if t.once && self.campaign.processed.contains(e) {
+                    return false;
+                }
+                true
+            })
+            .filter_map(|(e, t)| {
                 let name = world.get::<Name>(e)?.0.clone();
-                Some((e, name))
+                Some((e, name, t.once))
             })
             .collect();
 
-        for (e, name) in fired {
-            self.campaign.processed.insert(e);
+        for (e, name, once) in fired {
+            if once {
+                self.campaign.processed.insert(e);
+            }
             self.on_trigger(world, e, &name);
         }
     }
@@ -1404,8 +1407,8 @@ impl FortressDemo {
 
         if name == "key_red" {
             self.campaign.has_key_red = true;
-            self.hud.push("🔑 Красный ключ получен");
-            self.campaign.show_dialog("Ключ от подземелья — в руках!", 3.5);
+            self.hud.push("🔑 Red key acquired");
+            self.campaign.show_dialog("The dungeon key is in your hands!", 3.5);
             if let Some(t) = world.get_mut::<Transform>(e) {
                 t.position.y = -500.0;
             }
@@ -1450,10 +1453,10 @@ impl FortressDemo {
         if name.starts_with("dialog_") {
             if self.campaign.dialog_shown.insert(name.to_string()) {
                 let line = match name {
-                    "dialog_intro" => "Ты пробудился в руинах. Пробейся через стражу!",
-                    "dialog_act2"  => "Двор полон врагов. Найди ключ в сокровищнице.",
-                    "dialog_act3"  => "Впереди — портал. Возьми аптечку и патроны.",
-                    "dialog_act4"  => "Это подземелье Владыки. Готовься к бою.",
+                    "dialog_intro" => "You awaken in ruins. Fight through the guards!",
+                    "dialog_act2"  => "The courtyard swarms with enemies. Find the key in the treasure room.",
+                    "dialog_act3"  => "A portal lies ahead. Grab health and ammo.",
+                    "dialog_act4"  => "This is the Lord's dungeon. Prepare for battle.",
                     _ => "…",
                 };
                 self.campaign.show_dialog(line, 4.0);
@@ -1479,7 +1482,7 @@ impl FortressDemo {
     fn trigger_victory(&mut self) {
         self.campaign.stage = Stage::Victory;
         self.campaign.victory_time = Some(self.campaign.playtime);
-        self.campaign.objective = "Победа!".into();
+        self.campaign.objective = "Victory!".into();
         self.hud.push("🏆 VICTORY!");
     }
 
@@ -1494,8 +1497,8 @@ impl FortressDemo {
                     self.campaign.stage = Stage::Act2;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
-                    self.campaign.objective = "Найди красный ключ в сокровищнице".into();
-                    self.campaign.show_dialog("Ворота открыты. Впереди — двор.", 4.0);
+                    self.campaign.objective = "Find the red key in the treasure room".into();
+                    self.campaign.show_dialog("The gates are open. The courtyard lies ahead.", 4.0);
                 }
             }
             Stage::Act2 => {
@@ -1504,14 +1507,14 @@ impl FortressDemo {
                     self.campaign.stage = Stage::Act3;
                     self.campaign.kills_in_stage = 0;
                     self.campaign.kills_required = 0;
-                    self.campaign.objective = "Войди в портал лобби".into();
-                    self.campaign.show_dialog("Ключ открыл путь в лобби.", 4.0);
+                    self.campaign.objective = "Enter the lobby portal".into();
+                    self.campaign.show_dialog("The key opened the path to the lobby.", 4.0);
                 }
             }
             Stage::Act3 => {
                 if self.camera.position().y < -5.0 {
                     self.campaign.stage = Stage::Act4;
-                    self.campaign.objective = "Убей Владыку Цитадели".into();
+                    self.campaign.objective = "Kill the Lord of the Citadel".into();
                     self.hide_objective(world, "objective_portal");
                 }
             }
@@ -1525,8 +1528,8 @@ impl FortressDemo {
                 if boss_dead {
                     self.open_gate_by_name(world, self.gate_4, "gate_north_4");
                     self.campaign.stage = Stage::Act5;
-                    self.campaign.objective = "Покинь цитадель".into();
-                    self.campaign.show_dialog("Владыка пал. Свобода ждёт!", 5.0);
+                    self.campaign.objective = "Leave the Citadel".into();
+                    self.campaign.show_dialog("The Lord has fallen. Freedom awaits!", 5.0);
                 }
             }
             Stage::Act5 | Stage::Victory => {}
@@ -1573,6 +1576,9 @@ impl FortressDemo {
 // ============================================================
 // Default PostFx
 // ============================================================
+//
+// FIX: туман 0.006 → 0.0006 (сцена не вымывается), shadow_bias
+// увеличен вдвое (убирает черные зубцы на стенах Act1_*).
 
 fn default_postfx() -> PostFx {
     PostFx {
@@ -1587,23 +1593,28 @@ fn default_postfx() -> PostFx {
         debug_view: DebugView::Final,
         fxaa_strength: 1.0,
         fog_color: [0.35, 0.40, 0.55],
-        fog_density: 0.008,
+        // FIX: было 0.008 — 55% тумана на 100м, 80% на 200м →
+        // сцена сливалась с небом. 0.0008 = 8% / 15%.
+        fog_density: 0.0008,
         fog_height_base: 0.0,
         fog_height_falloff: 0.06,
         vignette_strength: 0.15,
         film_grain: 0.03,
         chromatic_aberration: 0.0,
-        shadow_bias: 0.0015,
-        shadow_normal_bias: 3.0,
-        shadow_fade_start: 150.0,
-        shadow_fade_end: 200.0,
+        // FIX: было 0.0015 / 3.0 / 150 / 200 — CSM acne (чёрные полосы
+        // на горизонте). Увеличен bias, fade сдвинут ближе.
+        shadow_bias: 0.0050,
+        shadow_normal_bias: 5.0,
+        shadow_fade_start: 80.0,
+        shadow_fade_end: 120.0,
         lod_bias: 1.0,
         lod_distances: [30.0, 80.0, 200.0, 500.0],
         taa_strength: 1.0,
         taa_sharpening: 0.1,
-        volumetric_density: 0.006,
-        volumetric_scattering: 0.45,
-        volumetric_phase_g: 0.6,
+        // FIX: было 0.006. Volumetric fog — отдельная система.
+        volumetric_density: 0.0006,
+        volumetric_scattering: 0.35,
+        volumetric_phase_g: 0.5,
         ..Default::default()
     }
 }
@@ -1655,8 +1666,6 @@ impl Game for FortressDemo {
         renderer.add_mesh("weapon_rack",     props::weapon_rack(&renderer.device));
         renderer.add_mesh("skull",           props::skull(&renderer.device));
 
-        // === Viewmodel оружия (#8) ===
-        // Соответствие assets/weapons/*.ron: mesh: Some("weapon_*")
         renderer.add_mesh("weapon_pistol",  props::weapon_pistol(&renderer.device));
         renderer.add_mesh("weapon_smg",     props::weapon_smg(&renderer.device));
         renderer.add_mesh("weapon_shotgun", props::weapon_shotgun(&renderer.device));
@@ -1785,7 +1794,6 @@ impl Game for FortressDemo {
         renderer: &mut Renderer,
         dt: f32,
     ) -> bool {
-        // === Language change detection ===
         if let Some(lang) = crate::game::locale::current_id() {
             if lang != self.current_dialog_lang {
                 log::info!("Language changed to '{}', reloading dialogs...", lang);
@@ -1798,7 +1806,6 @@ impl Game for FortressDemo {
         let in_play = input.play_mode;
         self.last_play_mode = in_play;
 
-        // `UiInput` не несёт ПКМ — запоминаем здесь.
         self.rmb_pressed_this_frame = input.mouse_pressed(MouseButton::Right);
         self.vendor_esc_pressed = input.key_pressed(KeyCode::Escape)
             && self.vendor_session.is_some();
@@ -1844,14 +1851,11 @@ impl Game for FortressDemo {
             self.camera.pitch = 0.75;
         }
 
-        // Sprint 8: bake probe при первом входе в play-режим.
-        // Один раз, в центре Act2. Используем уже собранные draws
-        // (в play-режиме они полные).
         if input.play_mode && !self.probe_baked_this_session {
             self.probe_baked_this_session = true;
             if !renderer.probes.is_empty() {
                 let draws = self.collect_draws(world, renderer);
-                let center = crate::demo::fortress::ACT2_CENTER + Vec3::Y * 3.0;
+                let center = ACT2_CENTER + Vec3::Y * 3.0;
                 let box_half = Vec3::splat(35.0);
                 crate::render::renderer::probe::bake_probe(
                     renderer,
@@ -2103,7 +2107,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // === Dialog: interact with E ===
         if in_play && !self.demo_paused && self.dialog_session.is_none() {
             if input.key_pressed(KeyCode::KeyE) {
                 let cam_pos = self.camera.position();
@@ -2416,9 +2419,6 @@ impl Game for FortressDemo {
 
             let dist = (world_center - cam_pos).length();
             let dist_eff = (dist - world_radius).max(0.0) / lod_bias;
-            // Шкала LOD: 0..3, ограниченная фактическим числом уровней
-            // в меше (mesh.lods.len() = 0..=3). Раньше здесь были две
-            // недостижимые ветки.
             let lod_level = if mesh.lods.is_empty() || dist_eff < lod_dists[0] {
                 0
             } else if dist_eff < lod_dists[1] {
@@ -2467,15 +2467,97 @@ impl Game for FortressDemo {
 
         self.prev_world_matrices = new_prev;
 
-        buckets.into_iter()
-            .map(|((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {
-                mesh,
-                instances,
-                texture: Some(material_name),
-                blend,
-                double_sided,
-            })
-            .collect()
+        let mut result: Vec<MeshDraw> = buckets
+            .into_iter()
+            .map(
+                |((mesh, material_name, _, blend, double_sided, _), instances)| MeshDraw {
+                    mesh,
+                    instances,
+                    texture: Some(material_name),
+                    blend,
+                    double_sided,
+                },
+            )
+            .collect();
+
+        // FIX: ViewModel — оружие в руках, привязано к камере.
+        if self.last_play_mode
+            && !self.demo_paused
+            && !self.show_inventory
+            && !self.show_character_sheet
+            && self.dialog_session.is_none()
+            && self.campaign.stage != Stage::Victory
+        {
+            if let Some(w) = self.current_weapon() {
+                let mesh_name = w
+                    .mesh
+                    .clone()
+                    .unwrap_or_else(|| "weapon_default".to_string());
+                let mat_name = w
+                    .material
+                    .clone()
+                    .unwrap_or_else(|| "weapon_gunmetal".to_string());
+
+                let mut pos = Vec3::from_array(w.hip_pos);
+                let mut rot = Quat::from_euler(
+                    glam::EulerRot::XYZ,
+                    w.hip_rot[0],
+                    w.hip_rot[1],
+                    w.hip_rot[2],
+                );
+
+                if self.ads_blend > 0.0 {
+                    let ads_p = Vec3::from_array(w.ads_pos);
+                    let ads_r = Quat::from_euler(
+                        glam::EulerRot::XYZ,
+                        w.ads_rot[0],
+                        w.ads_rot[1],
+                        w.ads_rot[2],
+                    );
+                    pos = pos.lerp(ads_p, self.ads_blend);
+                    rot = rot.slerp(ads_r, self.ads_blend);
+                }
+
+                pos.z += self.weapon_recoil * w.kick_back;
+                pos.y += self.weapon_recoil * w.kick_back * 0.5;
+
+                if self.demo_reloading {
+                    let p = self
+                        .current_runtime()
+                        .map(|r| r.reload_progress(w))
+                        .unwrap_or(0.0);
+                    let dip = (p * std::f32::consts::PI).sin();
+                    pos.y -= dip * 0.15;
+                    pos.x -= dip * 0.05;
+                }
+
+                if self.weapon_raise_timer > 0.0 {
+                    let t = (self.weapon_raise_timer / 0.30).clamp(0.0, 1.0);
+                    pos.y -= t * 0.3;
+                    pos.z += t * 0.2;
+                }
+
+                let local_mat =
+                    Mat4::from_scale_rotation_translation(Vec3::splat(w.scale), rot, pos);
+                let inv_view = self.camera.view_matrix().inverse();
+                let final_mat = inv_view * local_mat;
+
+                result.push(MeshDraw {
+                    mesh: mesh_name,
+                    instances: vec![InstanceData::new_full(
+                        final_mat,
+                        final_mat,
+                        [1.0, 1.0, 1.0, 1.0],
+                        [1.0, 1.0, 1.0],
+                    )],
+                    texture: Some(mat_name),
+                    blend: false,
+                    double_sided: false,
+                });
+            }
+        }
+
+        result
     }
 
     fn collect_lines(
@@ -2578,7 +2660,8 @@ impl Game for FortressDemo {
         let is_victory = self.campaign.stage == Stage::Victory;
 
         if self.demo_show_debug {
-            self.hud.debug_overlay(ui, 60.0, world.len(), self.camera.position());
+            let real_fps = if self.last_dt > 1e-4 { 1.0 / self.last_dt } else { 0.0 };
+            self.hud.debug_overlay(ui, real_fps, world.len(), self.camera.position());
         }
 
         if !is_victory && self.ads_blend < 0.5 && self.dialog_session.is_none() {
@@ -2865,7 +2948,7 @@ impl Game for FortressDemo {
                 "S = Save · L = Load · X = Delete",
                 11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = "Esc — пауза · ЛКМ — выстрел · ПКМ — прицел · E — говорить · 1/2/3/4 — оружие · R — перезарядка · Tab — stats · I — inventory";
+            let text = "Esc — pause · LMB — fire · RMB — aim · E — talk · 1/2/3/4 — weapon · R — reload · Tab — stats · I — inventory";
             ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
                 text, 12.0, [1.0, 1.0, 1.0, 0.5]);
         }
@@ -2875,8 +2958,6 @@ impl Game for FortressDemo {
         }
 
         if self.show_inventory && !self.demo_paused && !is_victory {
-            // ПКМ — use / equip / unequip. Обрабатываем ДО `draw`,
-            // чтобы не конфликтовать с drag-and-drop (который на ЛКМ).
             let input = ui.input();
             if self.rmb_pressed_this_frame {
                 let (mx, my) = input.mouse_pos;
@@ -2912,9 +2993,6 @@ impl Game for FortressDemo {
                 }
             }
 
-            // ЛКМ: drag / swap / split / drop. Split приходит как
-            // `InventoryAction::Split` напрямую из UI через
-            // `UiInput::modifiers.ctrl`.
             let action = inventory_ui::draw(
                 ui,
                 &self.inventory,
@@ -2924,9 +3002,7 @@ impl Game for FortressDemo {
             );
             match action {
                 InventoryAction::None => {}
-                InventoryAction::StartDrag(_) => {
-                    // Ничего — drag уже сохранён в `self.inv_drag`.
-                }
+                InventoryAction::StartDrag(_) => {}
                 InventoryAction::Swap(a, b) => self.handle_inv_swap(a, b),
                 InventoryAction::Split(idx) => {
                     if self.inventory.split_stack(idx).is_some() {
@@ -2956,7 +3032,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // === Vendor UI ===
         if let Some(session) = self.vendor_session.as_ref() {
             if let Some(def) = self.vendor_registry.get(&session.vendor_id).cloned() {
                 let action = vendor_ui::draw(
@@ -2986,7 +3061,6 @@ impl Game for FortressDemo {
             self.vendor_esc_pressed = false;
         }
 
-        // === Crafting UI ===
         if let Some(mut session) = self.crafting_session.take() {
             let action = crafting_ui::draw(
                 ui,
@@ -3017,7 +3091,6 @@ impl Game for FortressDemo {
             }
         }
 
-        // === Dialog UI ===
         let dialog_click: Option<usize> = if let Some(session_ref) = self.dialog_session.as_ref() {
             let ctx = crate::game::dialogs::DialogContext {
                 quest_manager: &self.quest_manager,
@@ -3048,8 +3121,29 @@ impl Game for FortressDemo {
                     for effect in effects {
                         match effect {
                             DialogEffect::StartQuest(qid) => {
-                                self.quest_manager.start_quest(&qid);
+                                let rewards = self.quest_manager.start_quest(&qid);
                                 self.hud.push(format!("📜 Quest started: {}", qid));
+                                for reward in rewards {
+                                    match reward {
+                                        Reward::Xp(amt) => {
+                                            let levels = self.player_stats.gain_xp(amt);
+                                            self.hud.push(format!("+{} XP", amt));
+                                            if levels > 0 {
+                                                self.hud.push(format!(
+                                                    "⭐ LEVEL UP → Lv {}",
+                                                    self.player_stats.experience.level
+                                                ));
+                                            }
+                                        }
+                                        Reward::Gold(amt) => {
+                                            self.campaign.gold += amt;
+                                            self.hud.push(format!("+{} Gold", amt));
+                                        }
+                                        Reward::Item { id, count } => {
+                                            self.try_pickup(&id, count);
+                                        }
+                                    }
+                                }
                             }
                             DialogEffect::CompleteQuest(qid) => {
                                 let rewards = self.quest_manager.complete_quest(&qid);

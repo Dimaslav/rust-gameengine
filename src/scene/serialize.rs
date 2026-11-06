@@ -13,6 +13,24 @@
 //! * Добавлены `dialog_npc: Option<String>` и `vendor_npc: Option<String>`
 //!   в `EntitySnapshot`. Раньше эти компоненты терялись при Save/Load
 //!   и при Editor Undo — все NPC переставали отвечать на `[E] Talk`.
+//!
+//! ## Изменения (FIX #2)
+//!
+//! * `SceneFile::texture_paths` теперь `HashMap<String, TextureRef>`.
+//!   `TextureRef` хранит `is_srgb` — иначе normal-map, metallic-roughness,
+//!   AO и height-map после Load/Undo загружались как sRGB, и освещение
+//!   ломалось (металл матовел, нормали инвертировались).
+//! * `TextureRef` — `#[serde(untagged)]`, чтобы старые сцены со
+//!   строковым `texture_paths` грузились без миграции (`is_srgb = true`
+//!   — то же поведение, что и было до фикса).
+//!
+//! ## Изменения (FIX #3)
+//!
+//! * Добавлена `save_scene_for_undo_to_string` — сериализует сцену
+//!   **без terrain** (heightmap 256×256 + splat = ~510 KB base64,
+//!   RON pretty-print = 60 ms). Undo-стек использует именно её.
+//!   Save Scene и Save Slot по-прежнему пишут terrain (им нужен
+//!   полный снапшот).
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -40,6 +58,46 @@ use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
 
 // ============================================================
+// TextureRef — FIX #2
+// ============================================================
+
+/// Ссылка на текстуру в сцене. Хранит путь к файлу и sRGB-флаг,
+/// чтобы Load/Undo восстанавливали текстуру с корректным цветовым
+/// профилем (albedo/emissive — sRGB, normal/MR/AO — linear).
+///
+/// `#[serde(untagged)]` — обратная совместимость: старые сцены
+/// хранят `"путь"` (строку), новые — `(path: "…", is_srgb: bool)`.
+/// Старая форма = `is_srgb = true` (поведение до FIX #2).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum TextureRef {
+    /// Старый формат: только путь. `is_srgb = true` по умолчанию.
+    Path(String),
+    /// Новый формат: путь + флаг.
+    Full {
+        path: String,
+        #[serde(default = "default_true")]
+        is_srgb: bool,
+    },
+}
+
+impl TextureRef {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(p) => p.as_str(),
+            Self::Full { path, .. } => path.as_str(),
+        }
+    }
+
+    pub fn is_srgb(&self) -> bool {
+        match self {
+            Self::Path(_) => true,
+            Self::Full { is_srgb, .. } => *is_srgb,
+        }
+    }
+}
+
+// ============================================================
 // SceneFile
 // ============================================================
 
@@ -51,8 +109,11 @@ pub struct SceneFile {
     pub player_spawn: Option<[f32; 3]>,
     #[serde(default)]
     pub materials: HashMap<String, Material>,
+    /// FIX #2: было `HashMap<String, String>`. Теперь `TextureRef`
+    /// хранит sRGB-флаг. Старые сцены (строковое значение) грузятся
+    /// через `#[serde(untagged)]` → `TextureRef::Path` → sRGB = true.
     #[serde(default)]
-    pub texture_paths: HashMap<String, String>,
+    pub texture_paths: HashMap<String, TextureRef>,
     #[serde(default)]
     pub game_state_ron: Option<String>,
     #[serde(default)]
@@ -556,10 +617,14 @@ fn collect_materials(world: &World, renderer: &Renderer) -> HashMap<String, Mate
     out
 }
 
+/// FIX #2: возвращает `TextureRef` с sRGB-флагом, взятым из
+/// `renderer.textures[name].is_srgb`. Раньше `is_srgb` терялся,
+/// и все текстуры после Load/Undo грузились как sRGB (металл матовел,
+/// нормали инвертировались).
 fn collect_texture_paths(
     renderer: &Renderer,
     materials: &HashMap<String, Material>,
-) -> HashMap<String, String> {
+) -> HashMap<String, TextureRef> {
     let mut out = HashMap::new();
     for mat in materials.values() {
         for tex_name in mat.referenced_textures() {
@@ -567,7 +632,18 @@ fn collect_texture_paths(
                 continue;
             }
             if let Some(path) = renderer.texture_source_path(tex_name) {
-                out.insert(tex_name.to_string(), path.to_string());
+                let is_srgb = renderer
+                    .textures
+                    .get(tex_name)
+                    .map(|t| t.is_srgb)
+                    .unwrap_or(true);
+                out.insert(
+                    tex_name.to_string(),
+                    TextureRef::Full {
+                        path: path.to_string(),
+                        is_srgb,
+                    },
+                );
             }
         }
     }
@@ -589,6 +665,56 @@ pub fn save_scene_with_assets_to_file(
     player_spawn: Option<Vec3>,
 ) -> Result<()> {
     save_scene_with_game_state_to_file(world, renderer, path, player_spawn, None)
+}
+
+// ============================================================
+// FIX #3: undo snapshot без terrain
+// ============================================================
+
+/// Snapshot для undo/redo. В отличие от `save_scene_with_assets_to_string`,
+/// **не включает terrain**.
+///
+/// # Зачем
+///
+/// 256×256 heightmap (u16 → 128 KB → base64 → 170 KB) + splat
+/// (256×256×4 → 256 KB → base64 → 340 KB) = ~510 KB base64 в каждом
+/// снапшоте. RON pretty-print этого — ~60 ms на десктопе. Undo-стек
+/// снимает снапшот при каждой undo-able операции, а `App::redraw` —
+/// потенциально каждый кадр. 60 ms фризы × 60 fps = неиграбельно.
+///
+/// Terrain почти никогда не меняется в рамках одного undo-шага.
+/// Terrain tool имеет свой undo (или его отсутствие — отдельный вопрос).
+/// Save Scene и Save Slot по-прежнему включают terrain (там нужен
+/// полный снапшот).
+///
+/// При undo terrain из текущей сцены **не трогается** — это правильно:
+/// если terrain не менялся, незачем его перезаписывать; если менялся —
+/// undo его не откатит (это ответственность terrain-tool'а).
+pub fn save_scene_for_undo_to_string(
+    world: &World,
+    renderer: &Renderer,
+) -> Result<String> {
+    let mut entities = Vec::new();
+    for &e in world.entities() {
+        if let Some(snap) = snapshot_entity(world, e) {
+            entities.push(snap);
+        }
+    }
+    let materials = collect_materials(world, renderer);
+    let texture_paths = collect_texture_paths(renderer, &materials);
+
+    let file = SceneFile {
+        entities,
+        player_spawn: None,
+        materials,
+        texture_paths,
+        game_state_ron: None,
+        // FIX #3: skip terrain. См. doc-комментарий.
+        terrain: None,
+    };
+    let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+        .context("serialize scene for undo")?;
+    Ok(text)
 }
 
 pub fn save_scene_with_game_state_to_string(
@@ -962,21 +1088,32 @@ pub fn load_scene_with_assets_from_str_full_with_ids(
             ),
             Err(e) => log::warn!("Scene load: terrain restore failed: {:#}", e),
         }
+    } else {
+        if renderer.terrain.is_some() {
+            log::info!("Scene load: clearing old terrain (new scene has none)");
+            renderer.terrain = None;
+            renderer.meshes.remove("terrain");
+        }
     }
 
     let mut restored_tex = 0usize;
     let mut failed_tex = 0usize;
-    for (name, path) in &file.texture_paths {
+    for (name, tex_ref) in &file.texture_paths {
         if renderer.textures.contains_key(name) {
             continue;
         }
-        match renderer.load_texture(name, path) {
+        let result = if tex_ref.is_srgb() {
+            renderer.load_texture(name, tex_ref.path())
+        } else {
+            renderer.load_texture_linear(name, tex_ref.path())
+        };
+        match result {
             Ok(()) => restored_tex += 1,
             Err(e) => {
                 log::warn!(
                     "Scene load: texture '{}' from '{}' failed: {}",
                     name,
-                    path,
+                    tex_ref.path(),
                     e
                 );
                 failed_tex += 1;
@@ -1287,8 +1424,15 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         if t.paused {
             timer.pause();
         }
+        // FIX (P0.3): было `timer.elapsed = timer.duration` — но
+        // `finished` оставалось `false`, и на следующем tick
+        // `TimerFinished` срабатывал повторно. Теперь `restore_finished`
+        // ставит `finished = true`, `just_finished = false`.
         if t.finished && mode == TimerMode::Once {
-            timer.elapsed = timer.duration;
+            timer = Timer::restore_finished(t.duration, t.elapsed);
+            if t.paused {
+                timer.pause();
+            }
         }
         world.insert(e, timer);
     }

@@ -47,13 +47,14 @@ pub fn draw_pause_overlay(
                         ui.label(egui::RichText::new("PAUSED").heading().strong()
                             .color(egui::Color32::from_rgb(230, 200, 130)));
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Esc — resume · F9 — stop").small().weak());
+                        // FIX (P0.6): Play/Stop — F10, не F9.
+                        ui.label(egui::RichText::new("Esc — resume · F10 — stop").small().weak());
                         ui.add_space(16.0);
                         if ui.button("▶ Resume (Esc)").clicked() {
                             *action = Some(EditorAction::TogglePlay);
                         }
                         ui.add_space(6.0);
-                        if ui.button("■ Stop (F9)").clicked() {
+                        if ui.button("■ Stop (F10)").clicked() {
                             *action = Some(EditorAction::TogglePlay);
                         }
                     });

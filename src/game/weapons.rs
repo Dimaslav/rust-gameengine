@@ -2,10 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-// ============================================================
-// WeaponKind
-// ============================================================
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeaponKind {
     Pistol,
@@ -32,10 +28,6 @@ impl WeaponKind {
         }
     }
 }
-
-// ============================================================
-// Weapon (data-driven, из RON)
-// ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Weapon {
@@ -91,10 +83,6 @@ pub struct Weapon {
     #[serde(default = "default_ammo_pickup")]
     pub ammo_pickup: u32,
 
-    // ============================================================
-    // View-model
-    // ============================================================
-
     #[serde(default)]
     pub mesh: Option<String>,
 
@@ -140,10 +128,6 @@ impl Weapon {
     }
 }
 
-// ============================================================
-// WeaponRuntime (per-weapon state)
-// ============================================================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeaponRuntime {
     pub mag: u32,
@@ -172,12 +156,12 @@ impl WeaponRuntime {
         !self.reloading && self.mag > 0 && self.fire_cooldown <= 0.0
     }
 
-    pub fn can_reload(&self) -> bool {
-        !self.reloading && self.mag < 100 && self.reserve > 0
+    pub fn can_reload(&self, w: &Weapon) -> bool {
+        !self.reloading && self.mag < w.mag_size && self.reserve > 0
     }
 
     pub fn start_reload(&mut self, w: &Weapon) {
-        if !self.can_reload() { return; }
+        if !self.can_reload(w) { return; }
         self.reloading = true;
         self.reload_timer = w.reload_time;
     }
@@ -203,10 +187,6 @@ impl WeaponRuntime {
     }
 }
 
-// ============================================================
-// Registry
-// ============================================================
-
 pub struct WeaponRegistry {
     weapons: Vec<Weapon>,
 }
@@ -216,7 +196,6 @@ impl WeaponRegistry {
         Self { weapons: Vec::new() }
     }
 
-    /// Загрузка всех `*.ron` из папки. Файлы сортируются по имени.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut paths: Vec<_> = std::fs::read_dir(dir)
@@ -228,11 +207,19 @@ impl WeaponRegistry {
         paths.sort();
 
         let mut weapons = Vec::with_capacity(paths.len());
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for p in paths {
             let text = std::fs::read_to_string(&p)
                 .with_context(|| format!("read {}", p.display()))?;
             let w: Weapon = ron::from_str(&text)
                 .with_context(|| format!("parse {}", p.display()))?;
+            if !seen.insert(w.id.clone()) {
+                log::error!(
+                    "weapon: duplicate id '{}' in {} — skipped (already loaded)",
+                    w.id, p.display()
+                );
+                continue;
+            }
             log::info!(
                 "weapon: loaded '{}' ({}) from {}",
                 w.name, w.kind.label(), p.display()
@@ -242,9 +229,6 @@ impl WeaponRegistry {
         Ok(Self { weapons })
     }
 
-    /// Fallback: если папка `assets/weapons/` пуста — регистрируем
-    /// встроенный набор из 4 стволов. Новые стволы (revolver/rifle/lmg/dmr)
-    /// загружаются только из `.ron` файлов.
     pub fn default_set() -> Self {
         Self {
             weapons: vec![

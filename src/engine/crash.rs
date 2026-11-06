@@ -54,13 +54,16 @@ pub fn install_crash_handler() {
 
 #[cfg(target_os = "windows")]
 fn show_crash_dialog(report: &str) {
-    use std::ffi::CString;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
 
+    // FIX (P1.4): MessageBoxA (ANSI) с UTF-8 кириллицей даёт `??????`.
+    // MessageBoxW + wide-строки — корректно.
     unsafe extern "system" {
-        fn MessageBoxA(
+        fn MessageBoxW(
             hwnd: *mut std::ffi::c_void,
-            text: *const u8,
-            caption: *const u8,
+            text: *const u16,
+            caption: *const u16,
             utype: u32,
         ) -> i32;
     }
@@ -70,14 +73,17 @@ fn show_crash_dialog(report: &str) {
         report.lines().take(15).collect::<Vec<_>>().join("\n")
     );
 
-    let Ok(text_cstr) = CString::new(text) else { return };
-    let Ok(cap) = CString::new("Rust Engine 3D — Crash") else { return };
+    let text_w: Vec<u16> = OsStr::new(&text).encode_wide().chain(Some(0)).collect();
+    let cap_w: Vec<u16> = OsStr::new("Rust Engine 3D — Crash")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
 
     unsafe {
-        MessageBoxA(
+        MessageBoxW(
             std::ptr::null_mut(),
-            text_cstr.as_ptr() as *const u8,
-            cap.as_ptr() as *const u8,
+            text_w.as_ptr(),
+            cap_w.as_ptr(),
             0x10, // MB_ICONERROR
         );
     }

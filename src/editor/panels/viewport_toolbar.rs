@@ -3,15 +3,12 @@
 use crate::editor::gizmo::GizmoMode;
 use crate::editor::EditorState;
 
-pub fn draw(ctx: &egui::Context, state: &mut EditorState) {
+pub fn draw(ctx: &egui::Context, viewport_rect: egui::Rect, state: &mut EditorState) {
     if state.play.active { return; }
 
-    // ИЗМЕНЕНО (egui 0.37): available_rect() убран с Context.
-    // content_rect() — весь экран. Тулбар прилипнет к левому верхнему
-    // углу экрана (а не viewport'а). Если нужен именно viewport,
-    // используй `ctx.available_rect()` — но его в 0.37 нет.
-    let viewport = ctx.input(|i| i.content_rect());
-    let pos = viewport.min + egui::vec2(12.0, 12.0);
+    // FIX (P3.1): тулбар привязан к viewport'у (CentralPanel), а не
+    // к content_rect() (= весь экран). Передаётся из `draw_all`.
+    let pos = viewport_rect.min + egui::vec2(12.0, 12.0);
 
     egui::Area::new(egui::Id::unique("viewport_toolbar"))
         .fixed_pos(pos)

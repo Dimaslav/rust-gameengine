@@ -15,29 +15,6 @@
 //! 3. **`active`** — запущенные квесты. `u32` — суммарные убийства
 //!    по всем Kill-целям (кэш для UI/логов). Источник правды —
 //!    `kills_by_prefix`.
-//!
-//! ## Что было исправлено
-//!
-//! * `start_quest` возвращает `Vec<Reward>`. Если квест `auto_complete`
-//!   и его цели были выполнены ДО старта — награда возвращается сразу,
-//!   иначе игрок «проходит» квест впустую. Caller должен обработать
-//!   возвращённое значение (см. `FortressDemo::collect_ui`,
-//!   `DialogEffect::StartQuest`).
-//!
-//! * `on_enemy_killed` больше не делает `break` на первом совпавшем
-//!   objective. Multi-objective квесты продвигаются корректно.
-//!
-//! * Один kill с префиксом, встречающимся в нескольких квестах,
-//!   инкрементит счётчик **один раз** (дедупликация по `HashSet`).
-//!
-//! ## Ограничения
-//!
-//! * **Collect-цели** не валидируются: `on_enemy_killed` их не видит,
-//!   `start_quest` не знает про `Inventory`. Если в будущем нужны
-//!   Collect-квесты — добавьте метод
-//!   `refresh_collect_objectives(&mut self, inventory: &Inventory)`
-//!   и вызывайте после каждого изменения инвентаря.
-//!   (Сейчас в `assets/quests/*.ron` только Kill-квесты.)
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -61,9 +38,7 @@ pub struct QuestDef {
     pub auto_complete: bool,
 }
 
-fn default_auto_complete() -> bool {
-    true
-}
+fn default_auto_complete() -> bool { true }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Objective {
@@ -88,9 +63,7 @@ pub struct QuestManager {
     pub objectives_done: HashSet<String>,
     pub completed: HashSet<String>,
     /// Убийства по `target_prefix`, независимо от активных квестов.
-    /// Нужен для retroactive completion: если игрок убил стражников
-    /// до разговора со Старейшиной, квест `hunt_wolves` сразу
-    /// окажется готов к сдаче.
+    /// Нужен для retroactive completion.
     kills_by_prefix: HashMap<String, u32>,
 }
 
@@ -108,9 +81,10 @@ impl QuestManager {
     /// Загрузка всех `.ron` из папки.
     ///
     /// Файлы, которые не парсятся как `QuestDef`, **пропускаются** с
-    /// `log::warn`. Раньше `?` валил всю загрузку — один ошибочно
-    /// положенный файл (например, DialogGraph в `assets/quests/`)
-    /// ломал ВСЕ квесты в игре.
+    /// `log::warn`.
+    ///
+    /// FIX (P1.3): дубликаты id логируются и пропускаются (раньше
+    /// `HashMap::insert` молча перезаписывал).
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut manager = Self::new();
@@ -134,6 +108,13 @@ impl QuestManager {
             };
             match ron::from_str::<QuestDef>(&text) {
                 Ok(quest) => {
+                    if manager.registry.contains_key(&quest.id) {
+                        log::error!(
+                            "quest '{}': duplicate id in {} — skipped (already loaded)",
+                            quest.id, path.display()
+                        );
+                        continue;
+                    }
                     log::info!(
                         "quest: loaded '{}' ({} objectives, {} rewards) from {}",
                         quest.id,
@@ -158,9 +139,6 @@ impl QuestManager {
 
     /// Запустить квест. Возвращает награды, если квест `auto_complete`
     /// и его цели уже были выполнены **до** старта (retroactive).
-    ///
-    /// Для `auto_complete: false` квест просто попадает в
-    /// `objectives_done` — игрок сдаст его через диалог.
     pub fn start_quest(&mut self, id: &str) -> Vec<Reward> {
         if self.completed.contains(id) || self.active.contains_key(id) {
             return Vec::new();
@@ -170,7 +148,6 @@ impl QuestManager {
             return Vec::new();
         };
 
-        // Cached progress = сумма kills по всем Kill-целям.
         let mut initial_progress: u32 = 0;
         let mut all_kill_met = true;
         let mut has_collect = false;
@@ -195,8 +172,6 @@ impl QuestManager {
 
         self.active.insert(id.to_string(), initial_progress);
 
-        // Retroactive completion только для чисто-Kill квестов.
-        // Collect-цели здесь валидировать нечем (нет inventory).
         if all_kill_met && !has_collect {
             if def.auto_complete {
                 self.active.remove(id);
@@ -224,13 +199,9 @@ impl QuestManager {
     /// Обработать убийство. Возвращает награды **только для
     /// auto-complete квестов**; для `auto_complete: false` пустой
     /// Vec, квест уходит в `objectives_done`.
-    ///
-    /// Килл логируется в `kills_by_prefix` до фильтрации по `active`,
-    /// поэтому последующий `start_quest` увидит его.
     pub fn on_enemy_killed(&mut self, target_name: &str) -> Vec<Reward> {
         // 1. Залогировать килл по всем подходящим префиксам,
-        //    дедуплицированно (один kill = +1 в каждый уникальный
-        //    префикс, даже если он встречается в нескольких квестах).
+        //    дедуплицированно.
         let mut matching: HashSet<String> = HashSet::new();
         for def in self.registry.values() {
             for obj in &def.objectives {
@@ -246,9 +217,6 @@ impl QuestManager {
         }
 
         // 2. Обновить активные квесты и найти завершённые.
-        //    Идём двумя проходами, чтобы не бороться с borrow checker
-        //    внутри iter_mut.
-
         struct Update {
             qid: String,
             total: u32,
@@ -256,7 +224,6 @@ impl QuestManager {
             has_collect: bool,
         }
 
-        // Pass 1: собрать (immutable borrows).
         let mut updates: Vec<Update> = Vec::new();
         for (qid, _) in self.active.iter() {
             if self.objectives_done.contains(qid) {
@@ -297,7 +264,6 @@ impl QuestManager {
             });
         }
 
-        // Pass 2: применить.
         let mut rewards: Vec<Reward> = Vec::new();
         for u in updates {
             if let Some(p) = self.active.get_mut(&u.qid) {
@@ -358,15 +324,11 @@ impl QuestManager {
         self.completed.contains(id)
     }
 
-    /// Сколько убийств залогировано по данному префиксу.
-    /// Для UI/отладки.
     pub fn kills_count(&self, prefix: &str) -> u32 {
         self.kills_by_prefix.get(prefix).copied().unwrap_or(0)
     }
 
     /// Снимок прогресса активных квестов: `(id, progress, required)`.
-    /// `required` — сумма `count` по всем Kill-целям (грубая оценка
-    /// для отображения, для multi-objective не идеальна, но приемлема).
     pub fn progress_snapshot(&self) -> Vec<(String, u32, u32)> {
         let mut out = Vec::with_capacity(self.active.len());
         for (id, progress) in &self.active {
@@ -437,7 +399,7 @@ mod tests {
         assert!(m.is_active("q1"));
 
         let r = m.on_enemy_killed("Enemy_B");
-        assert_eq!(r.len(), 2); // Xp + Gold
+        assert_eq!(r.len(), 2);
         assert!(!m.is_active("q1"));
         assert!(m.is_completed("q1"));
     }
@@ -468,7 +430,6 @@ mod tests {
         m.start_quest("multi");
 
         m.on_enemy_killed("A_1");
-        // B ещё не убит — квест активен.
         assert!(m.is_active("multi"));
         assert!(!m.is_completed("multi"));
 
@@ -479,7 +440,6 @@ mod tests {
 
     #[test]
     fn retroactive_kill_marks_objectives_done_on_start() {
-        // Игрок убил стражников до получения квеста.
         let mut m = manager_with(vec![kill_def("hunt", "A_", 2, false)]);
         m.on_enemy_killed("A_1");
         m.on_enemy_killed("A_2");
@@ -488,7 +448,6 @@ mod tests {
         assert!(!m.is_objectives_done("hunt"));
         assert!(!m.is_completed("hunt"));
 
-        // Сдаём квест — должен сразу оказаться готовым.
         m.start_quest("hunt");
         assert!(m.is_active("hunt"));
         assert!(m.is_objectives_done("hunt"));
@@ -502,11 +461,9 @@ mod tests {
     fn retroactive_auto_quest_returns_rewards_immediately() {
         let mut m = manager_with(vec![kill_def("auto", "X_", 1, true)]);
         m.on_enemy_killed("X_1");
-        // Квест ещё не запущен — награды не выдавались.
         assert!(!m.is_completed("auto"));
 
         let rewards = m.start_quest("auto");
-        // Retroactive completion → награды сразу.
         assert_eq!(rewards.len(), 2);
         assert!(m.is_completed("auto"));
         assert!(!m.is_active("auto"));
@@ -514,8 +471,6 @@ mod tests {
 
     #[test]
     fn duplicate_prefix_in_quest_counts_once_per_kill() {
-        // Экзотический кейс: два objective с одинаковым префиксом.
-        // Игрок должен убить 2 врагов, а не 1.
         let mut m = QuestManager::new();
         m.registry.insert(
             "dup".into(),
@@ -540,7 +495,7 @@ mod tests {
         m.start_quest("dup");
 
         m.on_enemy_killed("X_1");
-        assert!(m.is_active("dup")); // 1 < 2
+        assert!(m.is_active("dup"));
         assert_eq!(m.kills_count("X_"), 1);
 
         m.on_enemy_killed("X_2");
@@ -559,17 +514,13 @@ mod tests {
 
         m.on_enemy_killed("Z_1");
 
-        // Оба квеста завершены одним убийством.
         assert!(m.is_completed("a"));
         assert!(m.is_completed("b"));
-        // Но счётчик — 1, не 2.
         assert_eq!(m.kills_count("Z_"), 1);
     }
 
     #[test]
     fn collect_objective_blocks_auto_completion() {
-        // Collect-цель не валидируется через on_enemy_killed,
-        // поэтому квест не должен автоматически завершаться.
         let mut m = QuestManager::new();
         m.registry.insert(
             "col".into(),
@@ -597,8 +548,6 @@ mod tests {
     fn start_quest_is_idempotent() {
         let mut m = manager_with(vec![kill_def("q", "E_", 1, false)]);
         m.start_quest("q");
-        // Второй вызов не должен перезапускать квест и не должен
-        // возвращать награды.
         let rewards = m.start_quest("q");
         assert!(rewards.is_empty());
         assert!(m.is_active("q"));
@@ -608,7 +557,6 @@ mod tests {
     fn complete_quest_requires_objectives_done() {
         let mut m = manager_with(vec![kill_def("q", "E_", 1, false)]);
         m.start_quest("q");
-        // Цели ещё не выполнены.
         let rewards = m.complete_quest("q");
         assert!(rewards.is_empty());
         assert!(m.is_active("q"));
@@ -626,12 +574,9 @@ mod tests {
         m.on_enemy_killed("E_1");
 
         let snap = m.progress_snapshot();
-        // Только 'a' активен (b завершён, если F_1 убит... нет,
-        // F_1 ещё не убит — оба активны).
         assert_eq!(snap.len(), 2);
-        // Найти 'a'
         let a = snap.iter().find(|(id, _, _)| id == "a").unwrap();
-        assert_eq!(a.1, 1); // progress
-        assert_eq!(a.2, 3); // required
+        assert_eq!(a.1, 1);
+        assert_eq!(a.2, 3);
     }
 }

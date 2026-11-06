@@ -1,18 +1,6 @@
-//! Коллизии игрока со сценой.
-//!
-//! ## Что нового
-//!
-//! * **step3-spatial-hash**: broad-phase через `SpatialHash2D`.
-//! * **step4-collider-cache**: `resolve_movement_ex` и `find_support`
-//!   принимают `&ColliderCache` вместо обхода всего World. Это
-//!   ускоряет player collision в 5–10 раз при больших сценах.
-//! * Sprint B1: поддержка terrain. `resolve_movement_ex` принимает
-//!   `Option<&Heightmap>`.
-
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
-use crate::game::components::Visible;
 use crate::physics::Collider;
 use crate::render::terrain::Heightmap;
 
@@ -287,13 +275,4 @@ pub fn resolve_movement(
     cache.build(world);
     let r = resolve_movement_ex(world, &cache, start_feet, delta, cap, floor_y, 0.0, None);
     (r.new_feet, r.landed, r.support.map(|s| s.entity))
-}
-
-// ============================================================
-// Legacy: keep visible-check helper — некоторые системы его используют
-// ============================================================
-
-#[allow(dead_code)]
-fn entity_is_visible(world: &World, e: Entity) -> bool {
-    world.get::<Visible>(e).map(|v| v.0).unwrap_or(true)
 }

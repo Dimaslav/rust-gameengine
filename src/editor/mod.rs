@@ -200,6 +200,7 @@ pub enum EditorAction {
     Redo,
     FocusSelected,
     TogglePlay,
+    PausePlay,    
     SpawnPlayerHere,
     CopyEntity,
     PasteEntity,

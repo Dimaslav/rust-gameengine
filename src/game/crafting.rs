@@ -81,6 +81,8 @@ pub struct CraftingRegistry {
 impl CraftingRegistry {
     pub fn empty() -> Self { Self { recipes: HashMap::new() } }
 
+    /// FIX (P1.3): дубликаты id логируются и пропускаются (раньше
+    /// `HashMap::insert` молча перезаписывал).
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut recipes = HashMap::new();
@@ -104,6 +106,13 @@ impl CraftingRegistry {
                 .with_context(|| format!("parse {}", p.display()))?;
             if !r.is_valid() {
                 log::warn!("recipe '{}': invalid, skipped", p.display());
+                continue;
+            }
+            if recipes.contains_key(&r.id) {
+                log::error!(
+                    "recipe: duplicate id '{}' in {} — skipped (already loaded)",
+                    r.id, p.display()
+                );
                 continue;
             }
             log::info!(

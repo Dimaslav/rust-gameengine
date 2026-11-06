@@ -1,13 +1,10 @@
 //! Панель Palette (верхняя полоса).
 
-use egui::containers::panel::Panel;
-use egui::Ui;
-
 use crate::editor::palette::{PaletteItem, PaletteState};
 use crate::editor::EditorState;
 
-pub fn draw(ui: &mut Ui, state: &mut EditorState) {
-    Panel::top("palette_bar").show(ui, |ui| {
+pub fn draw(ui: &mut egui::Ui, state: &mut EditorState) {
+    egui::containers::panel::Panel::top("palette_bar").show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("🖌 Brush:").strong());
             for &item in PaletteItem::all_primitives() {

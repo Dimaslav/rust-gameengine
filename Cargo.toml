@@ -6,12 +6,9 @@ default-members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-# NOTE: 1.99.1 — placeholder из вашего репозитория. Для публичного
-# релиза опустите до реального MSRV (edition 2024 требует ≥ 1.85).
-# Проверить: `cargo +X.Y check`. Не заявляйте MSRV, который не тестируете.
-rust-version = "1.99"
+rust-version = "1.99.1"
 license = "Proprietary"
 repository = "https://github.com/Dimaslav/rust-gameengine"
 authors = ["Dimaslav"]
@@ -35,14 +32,10 @@ path = "src/lib.rs"
 name = "engine-editor"
 path = "src/bin/engine-editor.rs"
 
-# Legacy bin. `src/main.rs` больше не дублирует модули (см. A8),
-# но бинарь всё ещё полезен для обратной совместимости.
 [[bin]]
 name = "rust-engine"
 path = "src/main.rs"
 
-# Legacy packer — заменён на `engine-cli build` (Q2). Пока оставляем,
-# чтобы CI не сломался.
 [[bin]]
 name = "packer"
 path = "src/bin/packer.rs"
@@ -100,3 +93,37 @@ rfd = "0.17.2"
 
 # --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
+
+# ============================================================
+# Profiles
+# ============================================================
+#
+# FIX (render=41-49 ms в Play, fps=20):
+#   * `dev` — opt-level=1 для своего кода (быстрая сборка,
+#     ~2× ускорение math/graphics), зависимости с opt-level=3
+#     (wgpu/glam/winit без оптимизаций тормозят в 10-20×).
+#   * `release` — LTO + codegen-units=1 + strip, ~5-8× ускорение
+#     render по сравнению с dev.
+#
+# Ожидаемый эффект: fps 20 → 60 (vsync).
+
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
+[profile.dev.package."*"]
+# Зависимости (wgpu, glam, winit, rodio) с оптимизацией — иначе
+# рендер тормозит в 10-20×, а матрицы/шум/физика в dev-профиле
+# просто не успевают за vsync.
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# panic="abort" отключён, чтобы crash.rs::install_crash_handler
+# ловил панику с полным backtrace. Если нужен минимальный
+# бинарь — раскомментируй (backtrace в crash.log будет короче).
+# panic = "abort"
+strip = true

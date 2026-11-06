@@ -242,6 +242,7 @@ pub struct ItemRegistry {
 impl ItemRegistry {
     pub fn empty() -> Self { Self { items: Vec::new() } }
 
+    /// FIX (P1.3): дубликаты id логируются и пропускаются.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut paths: Vec<_> = std::fs::read_dir(dir)
@@ -253,11 +254,19 @@ impl ItemRegistry {
         paths.sort();
 
         let mut items = Vec::with_capacity(paths.len());
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for p in paths {
             let text = std::fs::read_to_string(&p)
                 .with_context(|| format!("read {}", p.display()))?;
             let item: Item = ron::from_str(&text)
                 .with_context(|| format!("parse {}", p.display()))?;
+            if !seen.insert(item.id.clone()) {
+                log::error!(
+                    "item: duplicate id '{}' in {} — skipped (already loaded)",
+                    item.id, p.display()
+                );
+                continue;
+            }
             log::info!(
                 "item: loaded '{}' ({}) from {}",
                 item.name, item.kind.label(), p.display()
@@ -368,6 +377,7 @@ pub struct LootRegistry {
 impl LootRegistry {
     pub fn empty() -> Self { Self { tables: Vec::new() } }
 
+    /// FIX (P1.3): дубликаты id логируются и пропускаются.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut paths: Vec<_> = std::fs::read_dir(dir)
@@ -379,11 +389,19 @@ impl LootRegistry {
         paths.sort();
 
         let mut tables = Vec::with_capacity(paths.len());
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for p in paths {
             let text = std::fs::read_to_string(&p)
                 .with_context(|| format!("read {}", p.display()))?;
             let table: LootTable = ron::from_str(&text)
                 .with_context(|| format!("parse {}", p.display()))?;
+            if !seen.insert(table.id.clone()) {
+                log::error!(
+                    "loot: duplicate table id '{}' in {} — skipped",
+                    table.id, p.display()
+                );
+                continue;
+            }
             log::info!(
                 "loot: table '{}' ({} entries) from {}",
                 table.id, table.entries.len(), p.display()
@@ -564,17 +582,12 @@ impl Inventory {
         count
     }
 
-    // ============================================================
-    // Swap / Split / Sort (Фаза 2.3)
-    // ============================================================
-
     /// Поменять местами два слота. Если оба слота содержат стеки
     /// одного item_id и стакуются — вместо swap пытается смерджить.
     pub fn swap(&mut self, a: usize, b: usize, registry: &ItemRegistry) {
         if a == b { return; }
         if a >= self.slots.len() || b >= self.slots.len() { return; }
 
-        // Попытка merge: оба слота с одинаковым item_id и стакуемым.
         if let (Some(sa), Some(sb)) = (
             self.slots[a].as_ref().cloned(),
             self.slots[b].as_ref().cloned(),
@@ -584,12 +597,10 @@ impl Inventory {
         {
             let max = item.max_stack.max(1);
             if sa.count + sb.count <= max {
-                // Полный merge: всё в b, a очищается.
                 self.slots[b] = Some(ItemStack::new(sa.item_id.clone(), sa.count + sb.count));
                 self.slots[a] = None;
                 return;
             }
-            // Частичный merge: переливаем сколько влезает.
             let space = max.saturating_sub(sb.count);
             let move_count = space.min(sa.count);
             if move_count > 0 {
@@ -622,14 +633,12 @@ impl Inventory {
 
     /// Сортировка инвентаря. Пустые слоты уходят в конец.
     pub fn sort(&mut self, registry: &ItemRegistry, key: SortKey) {
-        // Собираем все непустые стеки.
         let mut stacks: Vec<ItemStack> = self
             .slots
             .iter_mut()
             .filter_map(|s| s.take())
             .collect();
 
-        // Сортируем по ключу; fallback — по id, чтобы был детерминизм.
         stacks.sort_by(|a, b| {
             let ia = registry.get_by_id(&a.item_id);
             let ib = registry.get_by_id(&b.item_id);
@@ -653,7 +662,6 @@ impl Inventory {
             cmp.then_with(|| a.item_id.cmp(&b.item_id))
         });
 
-        // Раскладываем обратно: сначала стеки, потом None.
         let mut iter = stacks.into_iter();
         for slot in self.slots.iter_mut() {
             *slot = iter.next();

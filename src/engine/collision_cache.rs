@@ -5,20 +5,14 @@
 //! `collision::resolve_movement_ex` и `find_support` вместо прямого
 //! обхода `World`.
 //!
-//! # Зачем
+//! # FIX #1 (spatial hash: AABB insert)
 //!
-//! Раньше `capsule_hits` вызывался ~4 раза за кадр (по X, Z, Y,
-//! step-down), и каждый раз обходил **все** entity в World: `Visible`
-//! check → `Collider` get → `world_matrix` (обход Parent-цепочки) →
-//! `world_aabb` → `capsule_hits_aabb`.
-//!
-//! При 500 entity это 2000 полных обходов в кадр. При этом
-//! 99% коллайдеров далеко и не пересекаются с капсулой игрока.
-//!
-//! Теперь:
-//!   1. Один проход по World → `ColliderCache::build`.
-//!   2. Запросы к spatial hash → только кандидаты в AABB игрока.
-//!   3. AABB-проверка только для них.
+//! Раньше в hash вставлялся только **центр** AABB. Для больших
+//! статических коллайдеров (пол 20×20 м) игрок у края не находил
+//! пол в своей клетке → проваливался. Теперь используется
+//! `SpatialHash2D::insert_aabb` — payload попадает во все клетки,
+//! которые пересекает AABB, а объекты размером > 128×128 м уходят
+//! в `always_check` (см. `spatial_hash.rs`).
 
 use glam::{Quat, Vec3};
 
@@ -93,8 +87,12 @@ impl ColliderCache {
                 collider: col,
             });
 
-            let center = (aabb_min + aabb_max) * 0.5;
-            self.hash.insert(idx, center);
+            // FIX #1: было `let center = (aabb_min + aabb_max) * 0.5;
+            //              self.hash.insert(idx, center);`
+            // Теперь payload попадает во все клетки AABB. Иначе
+            // большой пол (20×20 м) с центром в клетке (15,0) не
+            // находился при проверке капсулы у края (клетка 12,0).
+            self.hash.insert_aabb(idx, aabb_min, aabb_max);
         }
     }
 
@@ -104,7 +102,8 @@ impl ColliderCache {
     pub fn entries(&self) -> &[ColliderEntry] { &self.entries }
 
     /// Кандидаты в AABB `[min, max]` (XZ-проекция + грубая Y).
-    /// Пишет индексы в `out` (очищая).
+    /// Пишет индексы в `out` (очищая). Возвращаемые индексы
+    /// **уникальны** (`query_aabb` делает dedup).
     pub fn query_aabb(&self, min: Vec3, max: Vec3, out: &mut Vec<u32>) {
         self.hash.query_aabb(min, max, out);
     }
@@ -340,6 +339,7 @@ mod tests {
             &mut out,
         );
         // Должны найтись два ближних, дальний (100,0,0) — вне AABB.
+        // FIX #1: query_aabb делает dedup — ровно 2, не больше.
         assert_eq!(out.len(), 2);
     }
 
@@ -391,5 +391,33 @@ mod tests {
         let mut cache = ColliderCache::new();
         cache.build(&w);
         assert_eq!(cache.len(), 1);
+    }
+
+    /// FIX #1: регрессионный тест. Раньше большой пол (20×20 м) с
+    /// центром в (0,0) не находился капсулой у края (±9.5, 0).
+    #[test]
+    fn large_floor_detected_at_edge() {
+        let mut w = World::new();
+        // Пол 20×20×0.5, центр в ZERO — как Act1_Floor.
+        spawn_box(&mut w, Vec3::ZERO, Vec3::new(10.0, 0.25, 10.0), false);
+
+        let mut cache = ColliderCache::new();
+        cache.build(&w);
+
+        // Капсула у восточного края пола.
+        let feet_a = Vec3::new(9.0, 0.35, 0.0);
+        let feet_b = Vec3::new(9.0, 1.45, 0.0);
+        assert!(
+            cache.capsule_hits(feet_a, feet_b, 0.35, false),
+            "capsule at (9, 0) should hit 20×20 floor centered at origin"
+        );
+
+        // Точка далеко за пределами пола — не должна попадать.
+        let far_a = Vec3::new(15.0, 0.35, 0.0);
+        let far_b = Vec3::new(15.0, 1.45, 0.0);
+        assert!(
+            !cache.capsule_hits(far_a, far_b, 0.35, false),
+            "capsule at (15, 0) is outside 20×20 floor"
+        );
     }
 }

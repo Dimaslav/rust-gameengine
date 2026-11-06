@@ -1,19 +1,16 @@
 //! Верхняя полоса редактора.
 
-use egui::containers::panel::Panel;
-use egui::Ui;
-
 use crate::editor::gizmo::GizmoMode;
 use crate::editor::panels::Stats;
 use crate::editor::{EditorAction, EditorState};
 
 pub fn draw(
-    ui: &mut Ui,
+    ui: &mut egui::Ui,
     state: &mut EditorState,
     stats: &Stats,
     action: &mut Option<EditorAction>,
 ) {
-    Panel::top("top_bar").show(ui, |ui| {
+    egui::containers::panel::Panel::top("top_bar").show(ui, |ui| {
         ui.horizontal(|ui| {
             crate::editor::panels::workspace_tabs::draw_inline(ui, state);
             if ui
@@ -55,18 +52,21 @@ pub fn draw(
                     if ui.button("▶ Resume").on_hover_text("Esc").clicked() {
                         *action = Some(EditorAction::TogglePlay);
                     }
-                    if ui.button("■ Stop").on_hover_text("F9").clicked() {
+                    if ui.button("■ Stop").on_hover_text("F10").clicked() {
                         *action = Some(EditorAction::TogglePlay);
                     }
                 } else {
-                    let _ = ui.button("⏸ Pause (Esc)");
-                    if ui.button("■ Stop").on_hover_text("F9").clicked() {
+                    // FIX (P0.1): кнопка Pause теперь работает.
+                    if ui.button("⏸ Pause (Esc)").clicked() {
+                        *action = Some(EditorAction::PausePlay);
+                    }
+                    if ui.button("■ Stop").on_hover_text("F10").clicked() {
                         *action = Some(EditorAction::TogglePlay);
                     }
                 }
             } else if ui
                 .button("▶ Play")
-                .on_hover_text("Run game (F9)")
+                .on_hover_text("Run game (F10)")
                 .clicked()
             {
                 *action = Some(EditorAction::TogglePlay);
@@ -219,7 +219,6 @@ pub fn draw(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Scene Validation
                 let clicked = ui
                     .toggle_value(&mut state.show_validation_panel, "🔍")
                     .on_hover_text("Scene Validation")

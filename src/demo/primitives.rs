@@ -13,7 +13,6 @@ use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 // GateMotion
 // ============================================================
 
-/// Компонент «ворота едут вверх до open_y».
 #[derive(Debug, Clone, Copy)]
 pub struct GateMotion {
     pub open_y: f32,
@@ -435,6 +434,15 @@ pub fn dialog_zone(
     e
 }
 
+/// FIX #4: `exit_zone` — точка победы, должна срабатывать **один раз**.
+///
+/// Раньше использовался `Trigger::repeatable`. `update_player` для
+/// repeatable-триггеров **не сохранял** `t.fired = true` в World,
+/// поэтому `process_triggers` (фильтр `t.fired && !processed.contains(e)`)
+/// не видел `exit_zone` → `on_trigger("exit_zone")` не вызывался →
+/// `trigger_victory` был недостижим.
+///
+/// Теперь `once = true` → `t.fired` сохраняется → победа работает.
 pub fn exit_zone(world: &mut World, name: impl Into<String>, pos: Vec3, radius: f32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
@@ -443,7 +451,8 @@ pub fn exit_zone(world: &mut World, name: impl Into<String>, pos: Vec3, radius: 
     world.insert(e, MaterialHandle("arena_marker".into()));
     world.insert(e, Spinner::new(Vec3::Y, 2.0));
     world.insert(e, PointLight::new([1.0, 0.5, 0.2], 4.0, 12.0));
-    world.insert(e, Trigger::repeatable(
+    // FIX #4: было `Trigger::repeatable`. См. doc-комментарий выше.
+    world.insert(e, Trigger::new(
         radius,
         TriggerAction::PlaySound("explosion".into()),
     ));
@@ -459,7 +468,7 @@ pub fn campaign_trigger(
     let e = world.spawn();
     world.insert(e, Name(name.into()));
     world.insert(e, Transform::at(pos));
-    world.insert(e, Trigger::repeatable(
+    world.insert(e, Trigger::new(
         radius,
         TriggerAction::PlaySound("ding".into()),
     ));
@@ -554,25 +563,21 @@ impl EnemyKind {
                 2.2, [0.85, 0.3, 0.85], 0.8,
                 120.0, 18.0, 0.7,
             ),
-            // Маг: медленный, но атакует с дистанции
             EnemyKind::Mage => (
                 2.0, 25.0, 70f32.to_radians(), 20.0,
                 8.0, [0.5, 0.55, 1.0], 0.9,
                 80.0, 20.0, 1.8,
             ),
-            // Убийца: очень быстрый, слабый, но злой
             EnemyKind::Assassin => (
                 6.5, 20.0, 50f32.to_radians(), 30.0,
                 1.2, [0.3, 0.3, 0.4], 0.6,
                 45.0, 18.0, 0.5,
             ),
-            // Танк: очень медленный, очень живучий
             EnemyKind::Tank => (
                 1.2, 14.0, 55f32.to_radians(), 15.0,
                 2.0, [0.5, 0.5, 0.5], 1.8,
                 250.0, 22.0, 1.5,
             ),
-            // Лучник: стреляет с большого расстояния
             EnemyKind::Archer => (
                 2.8, 30.0, 55f32.to_radians(), 25.0,
                 10.0, [0.4, 0.6, 0.3], 0.75,
@@ -700,5 +705,23 @@ pub fn wave_timer(
     world.insert(e, Name(name.into()));
     world.insert(e, Transform::at(pos));
     world.insert(e, Timer::new(delay));
+    e
+}
+
+pub fn elevator(
+    world: &mut World,
+    name: impl Into<String>,
+    pos: Vec3,
+    floors: Vec<f32>,
+) -> Entity {
+    let e = world.spawn();
+    world.insert(e, Name(name.into()));
+    world.insert(e, Transform::at(pos).with_scale_xyz(3.0, 0.3, 3.0));
+    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, MaterialHandle("arena_platform".into()));
+    world.insert(e, TextureTiling::new(2.0));
+    world.insert(e, RigidBody::kinematic());
+    world.insert(e, Collider::aabb(Vec3::splat(0.5)));
+    world.insert(e, Elevator::new(floors, 3.0));
     e
 }

@@ -20,9 +20,7 @@ pub fn draw_window(
     if !world.has::<AudioSource>(entity) { return; }
 
     let title = format!("🔊 AudioSource · #{}", entity);
-    let mut open = true;
     egui::Window::new(title)
-        .open(&mut open)
         .default_pos(egui::pos2(320.0, 120.0))
         .default_width(360.0)
         .resizable(true)
@@ -166,6 +164,4 @@ pub fn draw_window(
                 }
             });
         });
-
-    let _ = open;
 }

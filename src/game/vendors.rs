@@ -82,6 +82,7 @@ pub struct VendorRegistry {
 impl VendorRegistry {
     pub fn empty() -> Self { Self { vendors: HashMap::new() } }
 
+    /// FIX (P1.3): дубликаты id логируются и пропускаются.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut vendors = HashMap::new();
@@ -103,6 +104,13 @@ impl VendorRegistry {
                 .with_context(|| format!("read {}", p.display()))?;
             let v: VendorDef = ron::from_str(&text)
                 .with_context(|| format!("parse {}", p.display()))?;
+            if vendors.contains_key(&v.id) {
+                log::error!(
+                    "vendor: duplicate id '{}' in {} — skipped (already loaded)",
+                    v.id, p.display()
+                );
+                continue;
+            }
             log::info!(
                 "vendor: '{}' ({} items) from {}",
                 v.id, v.items.len(), p.display()

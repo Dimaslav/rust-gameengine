@@ -102,6 +102,24 @@ impl Timer {
         t
     }
 
+    /// FIX (P0.3): восстановить таймер в состоянии «завершён» после load.
+    ///
+    /// В отличие от `finished_now`, `just_finished = false` — событие
+    /// `TimerFinished` НЕ сработает на следующем `tick`. Это критично
+    /// при загрузке: иначе таймер, сработавший до сохранения,
+    /// сработает ещё раз сразу после загрузки.
+    pub fn restore_finished(duration: f32, elapsed: f32) -> Self {
+        let d = duration.max(1e-6);
+        Self {
+            duration: d,
+            elapsed: elapsed.min(d),
+            mode: TimerMode::Once,
+            paused: false,
+            just_finished: false,
+            finished: true,
+        }
+    }
+
     pub fn tick(&mut self, dt: f32) {
         // Сбрасываем флаг «только что завершился» в начале каждого tick.
         self.just_finished = false;

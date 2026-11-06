@@ -198,6 +198,39 @@ impl AudioSystem {
         sink.detach();
     }
 
+    /// FIX #7: пространственный одиночный звук.
+    ///
+    /// Раньше script-API `play_sound_at` игнорировал позицию —
+    /// `App::apply_script_commands` вызывал `audio.play(&sound)`
+    /// и всё. Звук всегда играл «из центра», независимо от того,
+    /// где находится source.
+    ///
+    /// Использует ту же `attenuation`, что и `AudioSource::update`:
+    /// внутри 1 м — полная громкость, за 20 м — тишина (обратный
+    /// квадрат).
+    pub fn play_at(&mut self, name: &str, position: Vec3, listener: Vec3) {
+        let Some(entry) = self.cache.get(name).cloned() else {
+            log::debug!("audio: sound '{}' not found (play_at)", name);
+            return;
+        };
+        let dist = (position - listener).length();
+        let atten = attenuation(dist, 1.0, 20.0);
+        let bus_vol = self.bus_volume_effective(AudioBus::Sfx);
+        let volume = (atten * bus_vol).clamp(0.0, 4.0);
+        if volume <= 1e-4 {
+            return;
+        }
+        let source = SharedSamples {
+            data: entry.samples,
+            pos: 0,
+            sample_rate: entry.sample_rate,
+        };
+        let sink = Sink::connect_new(self._stream.mixer());
+        sink.set_volume(volume);
+        sink.append(source);
+        sink.detach();
+    }
+
     pub fn update(&mut self, world: &mut World, listener_pos: Vec3, dt: f32) {
         let sources: Vec<(Entity, AudioSource, Vec3)> = world
             .query::<AudioSource>()
