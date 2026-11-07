@@ -291,6 +291,6 @@ pub fn update_lighting_uniform(
         };
         active += 1;
     }
-    data.counts = [active, 0, 0, 0];
+    data.counts = [0, 0, 0, 0];
     queue.write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&data));
 }

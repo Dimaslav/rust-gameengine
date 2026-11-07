@@ -92,7 +92,7 @@ impl Camera3D {
             fov_y: 60.0_f32.to_radians(),
             aspect,
             near: 0.1,
-            far: 1000.0,
+            far: 5000.0,
             mode: CameraMode::Orbit,
             first_person_pos: Vec3::new(0.0, 1.7, -8.0),
             shake_intensity: 0.0,

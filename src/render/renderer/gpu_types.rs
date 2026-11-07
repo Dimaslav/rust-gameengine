@@ -21,9 +21,9 @@ pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const CONTACT_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 pub const VOLUMETRIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-pub const VOLUMETRIC_GRID_W: u32 = 160;
-pub const VOLUMETRIC_GRID_H: u32 = 90;
-pub const VOLUMETRIC_GRID_D: u32 = 64;
+pub const VOLUMETRIC_GRID_W: u32 = 80;
+pub const VOLUMETRIC_GRID_H: u32 = 45;
+pub const VOLUMETRIC_GRID_D: u32 = 32;
 
 pub const MAX_DIR_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 16;

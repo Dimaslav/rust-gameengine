@@ -160,7 +160,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let fresnel_max = max(max(fresnel.x, fresnel.y), fresnel.z);
 
         let refl_strength = fresnel_max * (1.0 - roughness);
-        if (refl_strength > 0.02) {
+        if (refl_strength > 0.02 && roughness < 0.5) {
             let ssr = trace_ssr(
                 world_pos, world_normal, view_dir,
                 fresnel_max, roughness,

@@ -1582,14 +1582,14 @@ impl FortressDemo {
 
 fn default_postfx() -> PostFx {
     PostFx {
-        bloom_threshold: 0.9,
-        bloom_strength: 0.55,
+        bloom_threshold: 1.5,
+        bloom_strength: 0.15,
         bloom_knee: 0.5,
         bloom_radius: 1.1,
-        exposure: 0.6,
+        exposure: 0.35,
         ssao_strength: 0.9,
         ssao_radius: 0.65,
-        ibl_strength: 0.2,
+        ibl_strength: 0.0,
         debug_view: DebugView::Final,
         fxaa_strength: 1.0,
         fog_color: [0.35, 0.40, 0.55],
@@ -3324,7 +3324,7 @@ fn draw_character_sheet(ui: &mut crate::ui::UiLayer, stats: &mut PlayerStats) {
 
 fn add_materials(renderer: &mut Renderer) {
     renderer.add_material("arena_floor",
-        Material::new([0.42, 0.46, 0.50, 1.0]).with_metallic_roughness(0.0, 0.92));
+        Material::new([0.42, 0.46, 0.50, 1.0]).with_metallic_roughness(0.0, 1.0));
     renderer.add_material("arena_wall",
         Material::new([0.38, 0.40, 0.44, 1.0]).with_metallic_roughness(0.0, 0.88));
     renderer.add_material("arena_platform",

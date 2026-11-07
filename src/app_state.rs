@@ -345,7 +345,7 @@ impl QualityPreset {
                 p.exposure = 0.6; p.ssao_strength = 0.50; p.ssao_radius = 0.6; p.ibl_strength = 0.20;
                 p.taa_strength = 1.0; p.taa_sharpening = 0.05;
                 p.fxaa_strength = 0.0;
-                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.008;
+                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.0008;
                 p.volumetric_density = 0.0003; p.volumetric_scattering = 0.35; p.volumetric_phase_g = 0.5;
                 p.dof_enabled = 0.0; p.motion_blur_enabled = 0.0; p.lens_flare_intensity = 0.0;
                 p.contact_shadow_strength = 0.5; p.vignette_strength = 0.05;
@@ -356,7 +356,7 @@ impl QualityPreset {
                 p.exposure = 0.6; p.ssao_strength = 0.9; p.ssao_radius = 0.65; p.ibl_strength = 0.20;
                 p.taa_strength = 1.0; p.taa_sharpening = 0.10;
                 p.fxaa_strength = 0.5;
-                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.008; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
+                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.0008; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
                 p.volumetric_density = 0.0006; p.volumetric_scattering = 0.45; p.volumetric_phase_g = 0.6;
                 p.vignette_strength = 0.15; p.film_grain = 0.03; p.chromatic_aberration = 0.0;
                 p.dof_enabled = 0.0; p.motion_blur_enabled = 0.0; p.lens_flare_intensity = 0.0;
@@ -366,7 +366,7 @@ impl QualityPreset {
                 p.bloom_threshold = 0.9; p.bloom_strength = 0.65; p.bloom_knee = 0.4; p.bloom_radius = 1.2;
                 p.exposure = 0.6; p.ssao_strength = 1.0; p.ssao_radius = 0.8; p.ibl_strength = 0.25;
                 p.taa_strength = 1.0; p.taa_sharpening = 0.15; p.fxaa_strength = 0.5;
-                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.010; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
+                p.fog_color = [0.35, 0.40, 0.55]; p.fog_density = 0.001; p.fog_height_base = 0.0; p.fog_height_falloff = 0.06;
                 p.volumetric_density = 0.0008; p.volumetric_scattering = 0.50; p.volumetric_phase_g = 0.7;
                 p.dof_enabled = 1.0; p.dof_focus_distance = 12.0; p.dof_focus_range = 4.0;
                 p.dof_max_blur = 6.0; p.dof_blur_falloff = 5.0;

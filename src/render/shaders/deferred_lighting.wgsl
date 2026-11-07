@@ -180,11 +180,6 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, albedo: vec3<f32>, metallic: f32, ro
     return prefiltered * scale;
 }
 
-// ============================================================
-// Sprint 8: Probe selection
-// ============================================================
-
-// FIX: добавлен параметр roughness для выбора mip-уровня
 fn sample_probe_cubemap(idx: u32, dir: vec3<f32>, roughness: f32) -> vec3<f32> {
     let mip = roughness * 4.0;
     switch (idx) {

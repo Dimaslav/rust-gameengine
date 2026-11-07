@@ -65,47 +65,19 @@ image = { version = "0.25.10", default-features = false, features = [
     "rayon",
 ] }
 
-# --- zlib для FBX binary ---
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
-
-# --- Errors / glTF / serde / ron ---
 anyhow = "1.0.104"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 ron = "0.12.2"
-
-# --- base64 (заменяет самописный код в scene/serialize.rs) ---
 base64 = "0.22"
-
-# --- UI (editor) ---
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
-
-# --- Editor thumbnails ---
 egui_extras = { version = "0.37.0", features = ["image", "svg"] }
-
-# --- Audio ---
 rodio = "0.21"
-
-# --- Native file dialog ---
 rfd = "0.17.2"
-
-# --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
-
-# ============================================================
-# Profiles
-# ============================================================
-#
-# FIX (render=41-49 ms в Play, fps=20):
-#   * `dev` — opt-level=1 для своего кода (быстрая сборка,
-#     ~2× ускорение math/graphics), зависимости с opt-level=3
-#     (wgpu/glam/winit без оптимизаций тормозят в 10-20×).
-#   * `release` — LTO + codegen-units=1 + strip, ~5-8× ускорение
-#     render по сравнению с dev.
-#
-# Ожидаемый эффект: fps 20 → 60 (vsync).
 
 [profile.dev]
 opt-level = 1
@@ -113,17 +85,15 @@ debug = true
 incremental = true
 
 [profile.dev.package."*"]
-# Зависимости (wgpu, glam, winit, rodio) с оптимизацией — иначе
-# рендер тормозит в 10-20×, а матрицы/шум/физика в dev-профиле
-# просто не успевают за vsync.
 opt-level = 3
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-# panic="abort" отключён, чтобы crash.rs::install_crash_handler
-# ловил панику с полным backtrace. Если нужен минимальный
-# бинарь — раскомментируй (backtrace в crash.log будет короче).
-# panic = "abort"
 strip = true
+
+[profile.fast-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
