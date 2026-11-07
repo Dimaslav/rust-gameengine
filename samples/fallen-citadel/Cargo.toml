@@ -1,0 +1,15 @@
+[package]
+name = "fallen-citadel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Ссылка на наш движок (из папки samples/fallen-citadel на два уровня вверх)
+rust-engine = { path = "../../" }
+
+# Зависимости, которые нужны самой игре
+glam = "0.34.2"
+winit = "0.30.13"
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.12.2"
+log = "0.4"

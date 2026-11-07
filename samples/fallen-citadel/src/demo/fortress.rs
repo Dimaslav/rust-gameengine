@@ -7,34 +7,34 @@ use glam::{Mat4, Quat, Vec3};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
-use crate::ecs::{Entity, System, World};
-use crate::engine::{Game, Input, InputMap, Key, ShotFired, WorldLoadRequest};
-use crate::game::ai::{AiAgent, AiState, AiTarget, DebugPath};
-use crate::game::animation::{AnimationEventTriggered, AnimationEvents, AnimationRuntime};
-use crate::game::audio::{AudioBus, AudioSource};
-use crate::game::components::*;
-use crate::game::decals::Decal;
-use crate::game::dialogs::{DialogEffect, DialogGraph, DialogNpc, DialogSession};
-use crate::game::items::{
+use rust_engine::ecs::{Entity, System, World};
+use rust_engine::engine::{Game, Input, InputMap, Key, ShotFired, WorldLoadRequest};
+use rust_engine::game::ai::{AiAgent, AiState, AiTarget, DebugPath};
+use rust_engine::game::animation::{AnimationEventTriggered, AnimationEvents, AnimationRuntime};
+use rust_engine::game::audio::{AudioBus, AudioSource};
+use rust_engine::game::components::*;
+use rust_engine::game::decals::Decal;
+use rust_engine::game::dialogs::{DialogEffect, DialogGraph, DialogNpc, DialogSession};
+use rust_engine::game::items::{
     roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
 };
-use crate::game::vendors::{VendorDef, VendorNpc, VendorRegistry, VendorSession};
-use crate::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
-use crate::ui::vendor_ui::{self, VendorAction};
-use crate::ui::crafting_ui::{self, CraftingAction};
-use crate::game::rpg::GoldValue;
-use crate::game::lights::{DirectionalLight, PointLight};
-use crate::game::stats::{PlayerStats, STAT_DESCRIPTIONS, STAT_NAMES};
-use crate::game::timers::{Timer, TimerFinished, TimerSystem};
-use crate::game::weapons::{apply_spread, Weapon, WeaponRegistry, WeaponRuntime};
-use crate::game::quests::{QuestManager, Reward};
-use crate::physics::{Collider, RigidBody};
-use crate::render::{
+use rust_engine::game::vendors::{VendorDef, VendorNpc, VendorRegistry, VendorSession};
+use rust_engine::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
+use rust_engine::ui::vendor_ui::{self, VendorAction};
+use rust_engine::ui::crafting_ui::{self, CraftingAction};
+use rust_engine::game::rpg::GoldValue;
+use rust_engine::game::lights::{DirectionalLight, PointLight};
+use rust_engine::game::stats::{PlayerStats, STAT_DESCRIPTIONS, STAT_NAMES};
+use rust_engine::game::timers::{Timer, TimerFinished, TimerSystem};
+use rust_engine::game::weapons::{apply_spread, Weapon, WeaponRegistry, WeaponRuntime};
+use rust_engine::game::quests::{QuestManager, Reward};
+use rust_engine::physics::{Collider, RigidBody};
+use rust_engine::render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GpuLight, GpuPointLight,
     InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx, Renderer, Skeleton,
 };
-use crate::ui::Hud;
-use crate::ui::inventory_ui::{
+use rust_engine::ui::Hud;
+use rust_engine::ui::inventory_ui::{
     self, InvDragState, InvLocation, InventoryAction,
 };
 
@@ -284,9 +284,9 @@ pub struct FortressDemo {
     dialog_session: Option<DialogSession>,
 
     // === Save / Load ===
-    save_manager: crate::scene::SaveManager,
+    save_manager: rust_engine::scene::SaveManager,
     pending_world_request: Option<WorldLoadRequest>,
-    save_slots_cache: Vec<(u32, Option<crate::scene::SaveHeader>)>,
+    save_slots_cache: Vec<(u32, Option<rust_engine::scene::SaveHeader>)>,
     save_slots_cache_dirty: bool,
     pending_autosave: bool,
     pending_save_slot: Option<u32>,
@@ -309,7 +309,7 @@ impl FortressDemo {
             quest_manager = qm;
         }
 
-        let initial_lang = crate::game::locale::current_id().unwrap_or_else(|| "ru".to_string());
+        let initial_lang = rust_engine::game::locale::current_id().unwrap_or_else(|| "ru".to_string());
         let dialogs = DialogGraph::load_from_dir("assets/dialogs", &initial_lang).unwrap_or_default();
         log::info!("dialogs: {} graphs loaded [{}]", dialogs.len(), initial_lang);
 
@@ -385,7 +385,7 @@ impl FortressDemo {
             current_dialog_lang: initial_lang,
             dialog_session: None,
 
-            save_manager: crate::scene::SaveManager::new("saves"),
+            save_manager: rust_engine::scene::SaveManager::new("saves"),
             pending_world_request: None,
             save_slots_cache: Vec::new(),
             save_slots_cache_dirty: true,
@@ -408,11 +408,11 @@ impl FortressDemo {
     // ============================================================
 
     fn save_slot(&mut self, slot: u32, world: &World, renderer: &Renderer) {
-        match crate::scene::save_scene_with_assets_to_string(world, renderer, None) {
+        match rust_engine::scene::save_scene_with_assets_to_string(world, renderer, None) {
             Ok(scene_ron) => {
                 let gs = self.save_game_state();
-                let header = crate::scene::SaveHeader {
-                    format_version: crate::scene::CURRENT_FORMAT,
+                let header = rust_engine::scene::SaveHeader {
+                    format_version: rust_engine::scene::CURRENT_FORMAT,
                     game_version: env!("CARGO_PKG_VERSION").to_string(),
                     timestamp_unix: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -541,7 +541,7 @@ impl FortressDemo {
     // RPG helpers
     // ============================================================
 
-    fn total_attributes(&self) -> crate::game::stats::Attributes {
+    fn total_attributes(&self) -> rust_engine::game::stats::Attributes {
         let mut a = self.player_stats.attributes;
         let bonus = self.equipment.bonus_attributes(&self.item_registry);
         a.strength = a.strength.saturating_add(bonus.strength);
@@ -630,9 +630,9 @@ impl FortressDemo {
         let eq_x = px + INV_PAD;
         let eq_y = content_y + 8.0 + 18.0;
         let slots = [
-            (crate::game::items::EquipSlot::Weapon, 0usize),
-            (crate::game::items::EquipSlot::Armor, 1),
-            (crate::game::items::EquipSlot::Trinket, 2),
+            (rust_engine::game::items::EquipSlot::Weapon, 0usize),
+            (rust_engine::game::items::EquipSlot::Armor, 1),
+            (rust_engine::game::items::EquipSlot::Trinket, 2),
         ];
         for (slot, idx) in slots {
             let y = eq_y + idx as f32 * (INV_EQ_SLOT_H + INV_GAP);
@@ -764,9 +764,9 @@ impl FortressDemo {
                 }
                 let matches_slot = matches!(
                     (item.kind, slot),
-                    (ItemKind::Weapon, crate::game::items::EquipSlot::Weapon)
-                        | (ItemKind::Armor, crate::game::items::EquipSlot::Armor)
-                        | (ItemKind::Trinket, crate::game::items::EquipSlot::Trinket)
+                    (ItemKind::Weapon, rust_engine::game::items::EquipSlot::Weapon)
+                        | (ItemKind::Armor, rust_engine::game::items::EquipSlot::Armor)
+                        | (ItemKind::Trinket, rust_engine::game::items::EquipSlot::Trinket)
                 );
                 if !matches_slot {
                     return;
@@ -1553,7 +1553,7 @@ impl FortressDemo {
     }
 
     fn on_animation_event(&mut self, world: &World, ev: AnimationEventTriggered) {
-        let pos = crate::game::world_position(world, ev.entity).unwrap_or(Vec3::ZERO);
+        let pos = rust_engine::game::world_position(world, ev.entity).unwrap_or(Vec3::ZERO);
         match ev.name.as_str() {
             "footstep" => {
                 log::debug!("[ANIM] footstep #{} at ({:.1},{:.1},{:.1})",
@@ -1623,7 +1623,7 @@ impl Game for FortressDemo {
         &mut self,
         _world: &mut World,
         renderer: &mut Renderer,
-        assets: &crate::assets::AssetDatabase,
+        assets: &rust_engine::assets::AssetDatabase,
     ) {
         log::info!("FortressDemo: AssetDatabase {} assets", assets.len());
 
@@ -1636,7 +1636,7 @@ impl Game for FortressDemo {
         renderer.add_mesh("cone", Mesh::cone(&renderer.device, 0.5, 1.0, 24));
         renderer.add_mesh("capsule", Mesh::capsule(&renderer.device, 0.4, 0.8, 6, 20));
 
-        use crate::render::props;
+        use rust_engine::render::props;
         renderer.add_mesh("crate_detail",    props::crate_detail(&renderer.device));
         renderer.add_mesh("barrel_detail",   props::barrel_detail(&renderer.device));
         renderer.add_mesh("column_fluted",   props::column_fluted(&renderer.device));
@@ -1747,10 +1747,10 @@ impl Game for FortressDemo {
 
         add_materials(renderer);
 
-        let heightmap = crate::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
-        let terrain_mesh = crate::render::terrain::generate_terrain_mesh(&renderer.device, &heightmap);
+        let heightmap = rust_engine::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
+        let terrain_mesh = rust_engine::render::terrain::generate_terrain_mesh(&renderer.device, &heightmap);
         renderer.add_mesh("terrain", terrain_mesh);
-        let tex_data = crate::render::terrain::generate_terrain_texture(&heightmap, 2048);
+        let tex_data = rust_engine::render::terrain::generate_terrain_texture(&heightmap, 2048);
         renderer.load_texture_rgba("terrain_tex", &tex_data, 2048, 2048).expect("terrain texture");
         renderer.add_material("terrain_mat",
             Material::new([1.0, 1.0, 1.0, 1.0])
@@ -1758,7 +1758,7 @@ impl Game for FortressDemo {
                 .with_texture("terrain_tex"));
         renderer.terrain = Some(heightmap);
 
-        if let Ok(loaded) = crate::render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
+        if let Ok(loaded) = rust_engine::render::load_gltf_into(renderer, "assets/animated.glb", "anim") {
             self.skeletons = loaded.skeletons;
             self.animations = loaded.animations;
         }
@@ -1789,7 +1789,7 @@ impl Game for FortressDemo {
         renderer: &mut Renderer,
         dt: f32,
     ) -> bool {
-        if let Some(lang) = crate::game::locale::current_id() {
+        if let Some(lang) = rust_engine::game::locale::current_id() {
             if lang != self.current_dialog_lang {
                 log::info!("Language changed to '{}', reloading dialogs...", lang);
                 self.dialogs = DialogGraph::load_from_dir("assets/dialogs", &lang).unwrap_or_default();
@@ -1852,7 +1852,7 @@ impl Game for FortressDemo {
                 let draws = self.collect_draws(world, renderer);
                 let center = ACT2_CENTER + Vec3::Y * 3.0;
                 let box_half = Vec3::splat(35.0);
-                crate::render::renderer::probe::bake_probe(
+                rust_engine::render::renderer::probe::bake_probe(
                     renderer,
                     0,
                     &draws,
@@ -2106,7 +2106,7 @@ impl Game for FortressDemo {
             if input.key_pressed(KeyCode::KeyE) {
                 let cam_pos = self.camera.position();
                 let cam_dir = self.camera.forward();
-                if let Some(npc_e) = crate::game::dialogs::find_npc_in_front(
+                if let Some(npc_e) = rust_engine::game::dialogs::find_npc_in_front(
                     world, cam_pos, cam_dir, 3.0, 0.85,
                 ) {
                     if let Some(npc) = world.get::<DialogNpc>(npc_e).cloned() {
@@ -2393,7 +2393,7 @@ impl Game for FortressDemo {
                 world.get::<MaterialHandle>(e),
             ) else { continue };
 
-            let model = crate::game::world_matrix(world, e);
+            let model = rust_engine::game::world_matrix(world, e);
             let prev_model = self.prev_world_matrices.get(&e).copied().unwrap_or(model);
             new_prev.insert(e, model);
 
@@ -2604,7 +2604,7 @@ impl Game for FortressDemo {
         for &e in selected {
             if let (Some(_), Some(mh)) = (world.get::<Transform>(e), world.get::<MeshHandle>(e))
                 && let Some(mesh) = renderer.meshes.get(&mh.0) {
-                    let model = crate::game::world_matrix(world, e);
+                    let model = rust_engine::game::world_matrix(world, e);
                     let (center, radius) = mesh.world_bounds(&model);
                     batch.sphere_wireframe(center, radius * 1.05, [1.0, 0.85, 0.2, 1.0], 24);
                 }
@@ -2639,7 +2639,7 @@ impl Game for FortressDemo {
         &mut self,
         world: &mut World,
         _renderer: &Renderer,
-        ui: &mut crate::ui::UiLayer,
+        ui: &mut rust_engine::ui::UiLayer,
     ) {
         self.hud.tick(self.last_dt);
         if !self.last_play_mode { return; }
@@ -3087,21 +3087,21 @@ impl Game for FortressDemo {
         }
 
         let dialog_click: Option<usize> = if let Some(session_ref) = self.dialog_session.as_ref() {
-            let ctx = crate::game::dialogs::DialogContext {
+            let ctx = rust_engine::game::dialogs::DialogContext {
                 quest_manager: &self.quest_manager,
                 inventory: &self.inventory,
                 gold: self.campaign.gold,
                 player_level: self.player_stats.experience.level,
                 has_key_red: self.campaign.has_key_red,
             };
-            crate::ui::DialogUi::draw(ui, session_ref, &ctx)
+            rust_engine::ui::DialogUi::draw(ui, session_ref, &ctx)
         } else {
             None
         };
 
         if self.dialog_session.is_some() {
             match dialog_click {
-                Some(crate::ui::dialog::CLOSE_SENTINEL) => {
+                Some(rust_engine::ui::dialog::CLOSE_SENTINEL) => {
                     self.dialog_session = None;
                 }
                 Some(idx) => {
@@ -3190,7 +3190,7 @@ impl Game for FortressDemo {
                                         .dialog_session
                                         .as_ref()
                                         .map(|s| s.npc_entity)
-                                        .unwrap_or(crate::ecs::Entity::INVALID);
+                                        .unwrap_or(rust_engine::ecs::Entity::INVALID);
                                     self.vendor_session =
                                         Some(VendorSession::new(&def, npc_entity));
                                     self.dialog_session = None;
@@ -3207,7 +3207,7 @@ impl Game for FortressDemo {
                                         .dialog_session
                                         .as_ref()
                                         .map(|s| s.npc_entity)
-                                        .unwrap_or(crate::ecs::Entity::INVALID);
+                                        .unwrap_or(rust_engine::ecs::Entity::INVALID);
                                     self.crafting_session = Some(CraftingSession::new(
                                         &bench_id, npc_entity, &self.crafting_registry,
                                     ));
@@ -3223,7 +3223,7 @@ impl Game for FortressDemo {
         } else if self.last_play_mode && !self.demo_paused {
             let cam_pos = self.camera.position();
             let cam_dir = self.camera.forward();
-            if crate::game::dialogs::find_npc_in_front(
+            if rust_engine::game::dialogs::find_npc_in_front(
                 world, cam_pos, cam_dir, 3.0, 0.85,
             ).is_some() {
                 let sw = ui.screen_w();
@@ -3271,7 +3271,7 @@ fn rand01_crit() -> f32 {
 // Character Sheet UI
 // ============================================================
 
-fn draw_character_sheet(ui: &mut crate::ui::UiLayer, stats: &mut PlayerStats) {
+fn draw_character_sheet(ui: &mut rust_engine::ui::UiLayer, stats: &mut PlayerStats) {
     let sw = ui.screen_w();
     let sh = ui.screen_h();
     let pw = 460.0;

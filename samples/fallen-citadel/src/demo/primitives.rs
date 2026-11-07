@@ -1,13 +1,13 @@
 use glam::{Quat, Vec3};
 
-use crate::ecs::{Entity, World};
-use crate::game::ai::{AiAgent, DebugPath, Enemy, PatrolPath};
-use crate::game::audio::{AudioBus, AudioSource};
-use crate::game::components::*;
-use crate::game::decals::Decal;
-use crate::game::lights::PointLight;
-use crate::game::timers::Timer;
-use crate::physics::{Collider, PhysicsMaterial, RigidBody};
+use rust_engine::ecs::{Entity, World};
+use rust_engine::game::ai::{AiAgent, DebugPath, Enemy, PatrolPath};
+use rust_engine::game::audio::{AudioBus, AudioSource};
+use rust_engine::game::components::*;
+use rust_engine::game::decals::Decal;
+use rust_engine::game::lights::PointLight;
+use rust_engine::game::timers::Timer;
+use rust_engine::physics::{Collider, PhysicsMaterial, RigidBody};
 
 // ============================================================
 // GateMotion

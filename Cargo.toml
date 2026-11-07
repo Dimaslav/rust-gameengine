@@ -1,7 +1,6 @@
 [workspace]
-# Q2: `crates/engine-cli` и `samples/*` будут добавлены как отдельные
-# крейты (project wizard, примеры). Пока — single-package workspace.
-members = ["."]
+# Теперь у нас есть движок (корень ".") и игра-пример (samples/fallen-citadel)
+members = [".", "samples/fallen-citadel"]
 default-members = ["."]
 resolver = "2"
 
@@ -28,17 +27,18 @@ default-run = "engine-editor"
 name = "rust_engine"
 path = "src/lib.rs"
 
+# Редактор движка (пока пустой, запускает пустую сцену)
 [[bin]]
 name = "engine-editor"
 path = "src/bin/engine-editor.rs"
 
-[[bin]]
-name = "rust-engine"
-path = "src/main.rs"
-
+# Упаковщик ассетов
 [[bin]]
 name = "packer"
 path = "src/bin/packer.rs"
+
+# Бинарник rust-engine (src/main.rs) мы УДАЛИЛИ, 
+# так как игра теперь запускается из samples/fallen-citadel.
 
 [dependencies]
 # --- Window / scripting ---
@@ -65,20 +65,34 @@ image = { version = "0.25.10", default-features = false, features = [
     "rayon",
 ] }
 
+# --- zlib для FBX binary ---
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+
+# --- Errors / glTF / serde / ron ---
 anyhow = "1.0.104"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 ron = "0.12.2"
 base64 = "0.22"
+
+# --- UI (editor) ---
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["image", "svg"] }
+
+# --- Audio ---
 rodio = "0.21"
+
+# --- Native file dialog ---
 rfd = "0.17.2"
+
+# --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
 
+# ============================================================
+# Profiles (оставляем без изменений)
+# ============================================================
 [profile.dev]
 opt-level = 1
 debug = true

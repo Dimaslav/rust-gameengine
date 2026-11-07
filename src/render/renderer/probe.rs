@@ -277,7 +277,11 @@ pub fn update_lighting_uniform(
     probes: &[ProbeCubemap],
 ) {
     let mut data: ProbeLightingUniform = bytemuck::Zeroable::zeroed();
-    let mut active: u32 = 0;
+    
+    // Считаем количество активных проб ДО цикла, чтобы не ловить
+    // warning unused_assignments от компилятора.
+    let active_count = probes.iter().filter(|p| p.baked).count() as u32;
+
     for (i, p) in probes.iter().enumerate().take(MAX_REFLECTION_PROBES) {
         if !p.baked {
             continue;
@@ -289,8 +293,8 @@ pub fn update_lighting_uniform(
             box_max: [p.box_max.x, p.box_max.y, p.box_max.z, 0.0],
             params: [1.0, 8.0, 1.0, 0.0],
         };
-        active += 1;
     }
-    data.counts = [0, 0, 0, 0];
+    
+    data.counts = [active_count, 0, 0, 0];
     queue.write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&data));
 }

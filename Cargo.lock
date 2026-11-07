@@ -1129,6 +1129,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
+name = "fallen-citadel"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "log",
+ "ron",
+ "rust-engine",
+ "serde",
+ "winit",
+]
+
+[[package]]
 name = "fax"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
