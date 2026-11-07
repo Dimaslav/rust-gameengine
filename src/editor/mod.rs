@@ -39,10 +39,6 @@ use terrain_tool::TerrainTool;
 use theme::Theme;
 use undo::UndoStack;
 
-// ============================================================
-// ThumbnailCache
-// ============================================================
-
 pub enum ThumbnailState {
     Loaded(egui::TextureHandle),
     Failed,
@@ -56,42 +52,16 @@ pub struct ThumbnailCache {
 
 impl ThumbnailCache {
     pub fn new() -> Self { Self::default() }
-
-    pub fn get(&self, name: &str) -> Option<&ThumbnailState> {
-        self.entries.get(name)
-    }
-
-    pub fn insert_loaded(&mut self, name: String, handle: egui::TextureHandle) {
-        self.entries.insert(name, ThumbnailState::Loaded(handle));
-    }
-
-    pub fn insert_failed(&mut self, name: String) {
-        self.entries.insert(name, ThumbnailState::Failed);
-    }
-
-    pub fn insert_no_source(&mut self, name: String) {
-        self.entries.insert(name, ThumbnailState::NoSource);
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.entries.contains_key(name)
-    }
-
-    pub fn invalidate(&mut self, name: &str) {
-        self.entries.remove(name);
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
+    pub fn get(&self, name: &str) -> Option<&ThumbnailState> { self.entries.get(name) }
+    pub fn insert_loaded(&mut self, name: String, handle: egui::TextureHandle) { self.entries.insert(name, ThumbnailState::Loaded(handle)); }
+    pub fn insert_failed(&mut self, name: String) { self.entries.insert(name, ThumbnailState::Failed); }
+    pub fn insert_no_source(&mut self, name: String) { self.entries.insert(name, ThumbnailState::NoSource); }
+    pub fn contains(&self, name: &str) -> bool { self.entries.contains_key(name) }
+    pub fn invalidate(&mut self, name: &str) { self.entries.remove(name); }
+    pub fn clear(&mut self) { self.entries.clear(); }
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 }
-
-// ============================================================
-// Editor
-// ============================================================
 
 pub struct Editor {
     pub egui_ctx: egui::Context,
@@ -101,19 +71,11 @@ pub struct Editor {
     pub state: EditorState,
 }
 
-// ============================================================
-// BoxSelect
-// ============================================================
-
 #[derive(Debug, Clone, Copy)]
 pub struct BoxSelect {
     pub start: (f32, f32),
     pub current: (f32, f32),
 }
-
-// ============================================================
-// EditorState
-// ============================================================
 
 pub struct EditorState {
     pub selected: Vec<Entity>,
@@ -181,111 +143,47 @@ pub struct EditorState {
 
     pub clipboard_component: Option<ClipboardComponent>,
     pub show_welcome_panel: bool,
-}
 
-// ============================================================
-// EditorAction
-// ============================================================
+    // НОВЫЕ ПОЛЯ ДЛЯ СЕТКИ
+    pub grid_size: f32,
+    pub snap_enabled: bool,
+}
 
 #[derive(Debug, Clone)]
 pub enum EditorAction {
-    Save,
-    QuickSave,
-    Load,
-    AddCube,
-    AddSphere,
-    DeleteSelected,
-    Duplicate,
-    Undo,
-    Redo,
-    FocusSelected,
-    TogglePlay,
-    PausePlay,    
-    SpawnPlayerHere,
-    CopyEntity,
-    PasteEntity,
-    MakeMaterialUnique,
-    PlacePalette,
-    ClearPalette,
-    NewScene,
-    SavePrefab,
-    RefreshPrefabs,
-    InstantiatePrefab(u32),
-
-    LoadTextures,
-    LoadTexturesLinear,
-
-    RemoveTexture(String),
-    ExportFbxAll,
-    ExportFbxSelected,
-    ImportFbx,
-    LoadPath(String),
-
-    SaveCameraBookmark(usize),
-    GotoCameraBookmark(usize),
-    CameraPreset(u8),
-
-    DeselectAll,
-    InvertSelection,
-    SelectAll,
-    CleanupEmptyEntities,
-
-    SetBusVolume(AudioBus, f32),
-    LoadSound,
-    PreviewSound(String),
-
-    BakeNavmesh,
-
-    TerrainRegenerate,
-    TerrainSaveFile,
-    TerrainSavePNG,
-    TerrainLoadFile,
-
-    ReloadScripts,
-    AttachScript { entity: Entity, script: String },
-    DetachScript(Entity),
-    SelectEntity(Entity),
-
-    ValidateScene,
-    SelectEntities(Vec<Entity>),
-    DeleteEntities(Vec<Entity>),
-    RemoveParent(Vec<Entity>),
-    ReplaceMissingMesh(Vec<Entity>, String),
-    ReplaceMissingMaterial(Vec<Entity>, String),
-
-    CopyComponent(Entity, ComponentKind),
-    PasteComponent(Entity),
+    Save, QuickSave, Load, AddCube, AddSphere, DeleteSelected, Duplicate,
+    Undo, Redo, FocusSelected, TogglePlay, PausePlay, SpawnPlayerHere,
+    CopyEntity, PasteEntity, MakeMaterialUnique, PlacePalette, ClearPalette,
+    NewScene, SavePrefab, RefreshPrefabs, InstantiatePrefab(u32),
+    LoadTextures, LoadTexturesLinear, RemoveTexture(String),
+    ExportFbxAll, ExportFbxSelected, ImportFbx, LoadPath(String),
+    SaveCameraBookmark(usize), GotoCameraBookmark(usize), CameraPreset(u8),
+    DeselectAll, InvertSelection, SelectAll, CleanupEmptyEntities,
+    SetBusVolume(AudioBus, f32), LoadSound, PreviewSound(String),
+    BakeNavmesh, TerrainRegenerate, TerrainSaveFile, TerrainSavePNG, TerrainLoadFile,
+    ReloadScripts, AttachScript { entity: Entity, script: String }, DetachScript(Entity),
+    SelectEntity(Entity), ValidateScene, SelectEntities(Vec<Entity>), DeleteEntities(Vec<Entity>),
+    RemoveParent(Vec<Entity>), ReplaceMissingMesh(Vec<Entity>, String), ReplaceMissingMaterial(Vec<Entity>, String),
+    CopyComponent(Entity, ComponentKind), PasteComponent(Entity),
 }
-
-// ============================================================
-// EditorState impl
-// ============================================================
 
 impl EditorState {
     pub fn new() -> Self {
         let settings = EditorSettings::load("editor.ron");
-
         let initial_theme = settings.theme;
         let initial_hotkeys = settings.hotkeys.clone();
 
         let mut saved_workspaces: WorkspaceLayouts = settings.workspace_layouts.clone();
-
         if saved_workspaces.is_empty() {
             let legacy = LayoutState::from_settings(&settings);
             saved_workspaces.insert(Workspace::Layout, legacy);
         }
-
         for ws in Workspace::ALL {
-            saved_workspaces
-                .entry(*ws)
-                .or_insert_with(|| LayoutState::preset_for(*ws));
+            saved_workspaces.entry(*ws).or_insert_with(|| LayoutState::preset_for(*ws));
         }
 
         let active_workspace = settings.active_workspace;
-        let layout = saved_workspaces
-            .get(&active_workspace)
-            .cloned()
-            .unwrap_or_else(|| LayoutState::preset_for(active_workspace));
+        let layout = saved_workspaces.get(&active_workspace).cloned().unwrap_or_else(|| LayoutState::preset_for(active_workspace));
 
         let mut s = Self {
             selected: Vec::new(),
@@ -293,65 +191,50 @@ impl EditorState {
             locked: HashSet::new(),
             solo: None,
             hint: None,
-
             save_path: "scene.ron".to_string(),
             quick_save_path: "saves/quick.ron".to_string(),
             pending_action: None,
-
             gizmo: GizmoState::default(),
             palette: PaletteState::default(),
             terrain: TerrainTool::default(),
-
             dirty_materials: Vec::new(),
-
             undo: UndoStack::new(),
             undo_requested: false,
             play: PlayState::default(),
-
             search_filter: String::new(),
             outliner_filter: OutlinerFilter::All,
             details_filter: String::new(),
             clipboard_transform: None,
             box_select: None,
             context_menu_pos: None,
-
             renaming: None,
             rename_buffer: String::new(),
-
             prefabs_dir: "prefabs".to_string(),
             prefab_list: Vec::new(),
             prefab_save_name: String::new(),
-
             flying: false,
             fly_speed: 15.0,
             fly_sensitivity: 0.0025,
-
             clipboard_entities: Vec::new(),
-
             fbx_export_path: "scene.fbx".to_string(),
-
             settings,
-
             layout,
             active_workspace,
             saved_workspaces,
-
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_selected: 0,
-
             thumbnails: ThumbnailCache::new(),
-
             theme: initial_theme,
             settings_open: false,
-
             hotkeys: initial_hotkeys,
             hotkey_capture: None,
-
             show_validation_panel: false,
             validation_issues: Vec::new(),
             clipboard_component: None,
             show_welcome_panel: true,
+            grid_size: 1.0,       // ДОБАВЛЕНО
+            snap_enabled: true,   // ДОБАВЛЕНО
         };
 
         s.save_path = s.settings.save_path.clone();
@@ -363,7 +246,6 @@ impl EditorState {
         s.palette.keep_active = s.settings.palette_keep_active;
         s.palette.snap_to_grid = s.settings.palette_snap_to_grid;
         s.palette.grid_step = s.settings.palette_grid_step;
-
         s.prefab_list = crate::scene::prefab::list_prefabs(&s.prefabs_dir);
         s
     }
@@ -378,46 +260,27 @@ impl EditorState {
         s.gizmo_snap = self.gizmo.snap_enabled;
         s.palette_keep_active = self.palette.keep_active;
         s.palette_snap_to_grid = self.palette.snap_to_grid;
-        s.palette_grid_step = self.palette.grid_step;    // <-- ИСПРАВЛЕНО
-
+        s.palette_grid_step = self.palette.grid_step;
         let mut layouts: BTreeMap<Workspace, LayoutState> = self.saved_workspaces.clone();
         layouts.insert(self.active_workspace, self.layout.clone());
-
         s.active_workspace = self.active_workspace;
         s.workspace_layouts = layouts;
-
         self.layout.write_into_settings(&mut s);
-
         s.theme = self.theme;
         s.hotkeys = self.hotkeys.clone();
-
         s
     }
 
     pub fn switch_workspace(&mut self, new_ws: Workspace) {
-        if self.active_workspace == new_ws {
-            return;
-        }
-        self.saved_workspaces
-            .insert(self.active_workspace, self.layout.clone());
-
-        let new_layout = self
-            .saved_workspaces
-            .get(&new_ws)
-            .cloned()
-            .unwrap_or_else(|| LayoutState::preset_for(new_ws));
-
+        if self.active_workspace == new_ws { return; }
+        self.saved_workspaces.insert(self.active_workspace, self.layout.clone());
+        let new_layout = self.saved_workspaces.get(&new_ws).cloned().unwrap_or_else(|| LayoutState::preset_for(new_ws));
         self.layout = new_layout;
         self.active_workspace = new_ws;
     }
 
-    pub fn apply_theme(&self, ctx: &egui::Context) {
-        self.theme.apply(ctx);
-    }
-
-    pub fn is_selected(&self, e: Entity) -> bool {
-        self.selected.contains(&e)
-    }
+    pub fn apply_theme(&self, ctx: &egui::Context) { self.theme.apply(ctx); }
+    pub fn is_selected(&self, e: Entity) -> bool { self.selected.contains(&e) }
 
     pub fn select_single(&mut self, e: Entity) {
         self.selected.clear();
@@ -432,6 +295,7 @@ impl EditorState {
         }
     }
 
+    // ВОЗВРАЩЕННЫЙ МЕТОД
     pub fn select_range(&mut self, list: &[Entity], anchor: Entity, e: Entity) {
         let (Some(a), Some(b)) = (
             list.iter().position(|&x| x == anchor),
@@ -447,9 +311,7 @@ impl EditorState {
         }
     }
 
-    pub fn primary(&self) -> Option<Entity> {
-        self.selected.last().copied()
-    }
+    pub fn primary(&self) -> Option<Entity> { self.selected.last().copied() }
 
     pub fn prune_selection(&mut self, world: &World) {
         self.selected.retain(|&e| world.entities().contains(&e));
@@ -461,6 +323,7 @@ impl EditorState {
             }
     }
 
+    // ВОЗВРАЩЕННЫЙ МЕТОД
     pub fn is_locked(&self, world: &World, mut e: Entity) -> bool {
         for _ in 0..64 {
             if self.locked.contains(&e) {
@@ -488,59 +351,19 @@ impl EditorState {
     }
 }
 
-impl Default for EditorState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================
-// Editor impl
-// ============================================================
+impl Default for EditorState { fn default() -> Self { Self::new() } }
 
 impl Editor {
-    pub fn new(
-        window: &Window,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        viewport_id: egui::ViewportId,
-    ) -> Self {
+    pub fn new(window: &Window, device: &wgpu::Device, surface_format: wgpu::TextureFormat, viewport_id: egui::ViewportId) -> Self {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_fonts(egui::FontDefinitions::default());
         egui_ctx.set_visuals(egui::Visuals::dark());
-
-        let egui_state = EguiWinitState::new(
-            egui_ctx.clone(),
-            viewport_id,
-            window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-
-        let egui_renderer = EguiRenderer::new(
-            device,
-            surface_format,
-            egui_wgpu::RendererOptions::default(),
-        );
-
-        Self {
-            egui_ctx,
-            egui_state,
-            egui_renderer,
-            enabled: true,
-            state: EditorState::new(),
-        }
+        let egui_state = EguiWinitState::new(egui_ctx.clone(), viewport_id, window, Some(window.scale_factor() as f32), None, None);
+        let egui_renderer = EguiRenderer::new(device, surface_format, egui_wgpu::RendererOptions::default());
+        Self { egui_ctx, egui_state, egui_renderer, enabled: true, state: EditorState::new() }
     }
-
-    pub fn on_window_event(
-        &mut self,
-        window: &Window,
-        event: &winit::event::WindowEvent,
-    ) -> bool {
-        if !self.enabled {
-            return false;
-        }
+    pub fn on_window_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
+        if !self.enabled { return false; }
         self.egui_state.on_window_event(window, event).consumed
     }
 }

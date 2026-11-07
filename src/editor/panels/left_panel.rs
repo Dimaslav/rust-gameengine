@@ -1,4 +1,4 @@
-//! Левая панель: Stats + Outliner + Prefabs + Assets.
+//! Левая панель: Stats + Grid + Outliner + Prefabs + Assets.
 
 use crate::ecs::World;
 use crate::editor::panels::{content, outliner, stats, Stats, UiAssets};
@@ -23,6 +23,25 @@ pub fn draw(
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
+                    // === БЛОК СЕТКИ И ПРИВЯЗКИ ===
+                    ui.heading("Grid & Snap");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.snap_enabled, "Snap to Grid");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Grid Size:");
+                        egui::ComboBox::from_id_salt("grid_size_combo")
+                            .selected_text(format!("{:.2} m", state.grid_size))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut state.grid_size, 0.1, "0.1 m (10 cm)");
+                                ui.selectable_value(&mut state.grid_size, 0.5, "0.5 m");
+                                ui.selectable_value(&mut state.grid_size, 1.0, "1 m");
+                                ui.selectable_value(&mut state.grid_size, 10.0, "10 m");
+                                ui.selectable_value(&mut state.grid_size, 100.0, "100 m");
+                            });
+                    });
+                    ui.separator();
+
                     if state.layout.show_stats_panel {
                         stats::draw_section(ui, stats);
                     }

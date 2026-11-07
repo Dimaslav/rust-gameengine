@@ -32,6 +32,10 @@ path = "src/lib.rs"
 name = "engine-editor"
 path = "src/bin/engine-editor.rs"
 
+[[bin]]
+name = "engine-cli"
+path = "src/bin/engine-cli.rs"
+
 # Упаковщик ассетов
 [[bin]]
 name = "packer"
@@ -90,13 +94,10 @@ rfd = "0.17.2"
 # --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
 
-# ============================================================
-# Profiles (оставляем без изменений)
-# ============================================================
 [profile.dev]
-opt-level = 1
-debug = true
-incremental = true
+opt-level = 0
+debug = 1
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 3

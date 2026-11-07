@@ -47,20 +47,7 @@ use super::input::Input;
 use super::particles::{self, Particle, MAX_PARTICLES};
 use super::time::Time;
 
-// ============================================================
-// Fallback constants
-// ============================================================
-
-/// Fallback-позиция камеры (eye) при входе в Play, если
-/// `saved_position` невалидна (NaN, за пределами сцены, под полом).
-///
-/// НЕ привязана к демо-сцене намеренно: движок не должен знать
-/// про `demo::fortress`.
 const DEFAULT_PLAY_SPAWN: Vec3 = Vec3::new(0.0, 1.7, 0.0);
-
-// ============================================================
-// Game trait
-// ============================================================
 
 pub trait Game: 'static {
     fn init(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
@@ -144,6 +131,10 @@ pub trait Game: 'static {
     }
     fn take_quit_to_menu(&mut self) -> bool {
         false
+    }
+    
+    fn gizmo_snap_size(&self) -> Option<f32> {
+        None
     }
 }
 
@@ -2110,6 +2101,14 @@ impl<G: Game> App<G> {
             lines.extend_from_slice(batch.vertices());
         }
 
+        if !in_menu && !self.editor.state.play.active {
+            let mut batch = LineBatch::new();
+            let grid_step = self.editor.state.grid_size.max(0.1);
+            batch.grid(100.0, grid_step, [0.2, 0.2, 0.2, 0.4], [0.4, 0.4, 0.4, 0.8], 10);
+            batch.axes(5.0);
+            lines.extend_from_slice(batch.vertices());
+        }
+
         if !in_menu && !self.editor.state.play.active && !selected.is_empty() {
             let mut batch = LineBatch::new();
             gizmo::draw_gizmo(
@@ -2515,13 +2514,29 @@ impl<G: Game> App<G> {
             .state
             .undo
             .push_forced(&self.world, &self.renderer, gs);
+        
         let mut pos = hit;
         if item.snaps_to_ground() {
             pos.y += item.half_height();
         } else if item.is_light() || item.is_decal() {
             pos.y = hit.y + item.half_height();
         }
+
+        // ПРИВЯЗКА К СЕТКЕ
+        if self.editor.state.snap_enabled {
+            let step = self.editor.state.grid_size;
+            pos.x = (pos.x / step).round() * step;
+            pos.z = (pos.z / step).round() * step;
+            if !item.snaps_to_ground() {
+                pos.y = (pos.y / step).round() * step;
+            }
+        }
+
         let e = self.world.spawn();
+
+        self.world.insert(e, crate::physics::Collider::aabb(glam::Vec3::splat(0.5)));
+        self.world.insert(e, crate::physics::RigidBody::static_body());
+
         self.world.insert(
             e,
             Name(format!("{}_{:04}", item.label(), e.to_bits())),
@@ -2556,6 +2571,10 @@ impl<G: Game> App<G> {
             .insert(e, MaterialHandle(item.material().to_string()));
         self.world
             .insert(e, TextureTiling::new(item.default_tiling_size()));
+
+        self.world.insert(e, crate::physics::Collider::aabb(glam::Vec3::splat(0.5)));
+        self.world.insert(e, crate::physics::RigidBody::static_body());
+
         match item {
             PaletteItem::Enemy => {
                 self.world.insert(e, Health::new(50.0));
@@ -2932,17 +2951,26 @@ impl<G: Game> App<G> {
             }
             EditorAction::AddCube | EditorAction::AddSphere => {
                 let gs = self.game.save_game_state();
-                self.editor
-                    .state
-                    .undo
-                    .push_forced(&self.world, &self.renderer, gs);
+                self.editor.state.undo.push_forced(&self.world, &self.renderer, gs);
                 let (mesh, mat, base_name) = match action {
                     EditorAction::AddCube => ("cube", "flat_blue", "Cube"),
                     EditorAction::AddSphere => ("sphere", "gold", "Sphere"),
                     _ => unreachable!(),
                 };
+                
                 let cam_target = self.game.camera().target;
-                let pos = cam_target + Vec3::new(0.0, 1.0, 0.0);
+                let mut pos = cam_target + Vec3::new(0.0, 1.0, 0.0);
+                
+                // ПРИВЯЗКА К СЕТКЕ ПРИ СОЗДАНИИ
+                if self.editor.state.snap_enabled {
+                    let step = self.editor.state.grid_size;
+                    pos = Vec3::new(
+                        (pos.x / step).round() * step,
+                        (pos.y / step).round() * step,
+                        (pos.z / step).round() * step,
+                    );
+                }
+
                 let e = self.world.spawn();
                 self.world.insert(
                     e,
@@ -2956,6 +2984,11 @@ impl<G: Game> App<G> {
                 self.world.insert(e, MeshHandle(mesh.to_string()));
                 self.world.insert(e, MaterialHandle(mat.to_string()));
                 self.world.insert(e, TextureTiling::default());
+                
+                // ДОБАВЛЯЕМ КОЛЛАЙДЕРЫ
+                self.world.insert(e, crate::physics::Collider::aabb(glam::Vec3::splat(0.5)));
+                self.world.insert(e, crate::physics::RigidBody::static_body());
+
                 self.ensure_unique_material_for(e);
                 self.editor.state.select_single(e);
             }
@@ -3793,7 +3826,7 @@ impl<G: Game> App<G> {
                     }
                 }
             }
-            
+
             WindowEvent::CursorMoved { position, .. } => {
                 if in_menu {
                     return;
@@ -3806,12 +3839,12 @@ impl<G: Game> App<G> {
                 let (mx, my) = self.input.mouse_pos;
                 let in_vp = self.in_viewport(mx, my);
 
-                // FIX: Пропускаем движение мыши во вьюпорте, даже если egui пытается его забрать
                 if consumed && !in_active_drag && !in_vp {
                 } else {
                     if let Some(bs) = &mut self.editor.state.box_select {
                         bs.current = (mx, my);
                     }
+                    
                     if self.editor.state.terrain.active
                         && self.editor.state.terrain.dragging
                         && in_vp
@@ -3831,6 +3864,7 @@ impl<G: Game> App<G> {
                             }
                         }
                     }
+                    
                     if self.input.mouse_down(MouseButton::Right)
                         && let Some((px, py)) = self.rmb_press_pos
                         && !self.rmb_dragged
@@ -3841,6 +3875,7 @@ impl<G: Game> App<G> {
                             self.rmb_dragged = true;
                         }
                     }
+                    
                     if !in_play
                         && !self.editor.state.flying
                         && !self.editor.state.selected.is_empty()
@@ -3848,14 +3883,16 @@ impl<G: Game> App<G> {
                         && !self.editor.state.terrain.dragging
                     {
                         if let Some(drag) = self.editor.state.gizmo.drag.clone() {
-                            let snap = self.input.key_down(KeyCode::ControlLeft)
-                                || self.input.key_down(KeyCode::ControlRight)
-                                || self.editor.state.gizmo.snap_enabled;
+                            // БЕРЕМ ДАННЫЕ ИЗ ИНТЕРФЕЙСА РЕДАКТОРА, А НЕ С КЛАВИАТУРЫ
+                            let snap = self.editor.state.snap_enabled;
+                            let snap_size = self.editor.state.grid_size;
+
                             gizmo::apply_drag_with_mode(
                                 &mut self.world,
                                 &drag,
                                 self.editor.state.gizmo.mode,
                                 snap,
+                                snap_size,
                                 self.game.camera(),
                                 &self.renderer,
                                 mx,

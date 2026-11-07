@@ -1534,10 +1534,10 @@ impl Renderer {
                         }),
                         primitive: wgpu::PrimitiveState::default(),
                         depth_stencil: Some(wgpu::DepthStencilState {
-                            format: DEPTH_FORMAT,
-                            depth_write_enabled: Some(false),
-                            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                            stencil: wgpu::StencilState::default(),
+                            format: DEPTH_FORMAT, 
+                            depth_write_enabled: Some(false), // Не записываем в буфер глубины
+                            depth_compare: Some(wgpu::CompareFunction::Always), // ВСЕГДА рисуем поверх объектов
+                            stencil: wgpu::StencilState::default(), 
                             bias: wgpu::DepthBiasState::default(),
                         }),
                         multisample: wgpu::MultisampleState::default(),
