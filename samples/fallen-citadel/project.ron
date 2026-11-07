@@ -1,0 +1,6 @@
+(
+    name: "The Fallen Citadel",
+    engine_version: "0.3.0",
+    assets_root: "assets",
+    entry_scene: Some("scene.ron"),
+)

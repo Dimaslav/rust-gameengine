@@ -12,6 +12,7 @@ pub mod engine;
 pub mod game;
 pub mod menu;
 pub mod physics;
+pub mod project;
 pub mod render;
 pub mod scene;
 pub mod scripting;

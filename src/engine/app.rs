@@ -3577,9 +3577,12 @@ impl<G: Game> App<G> {
                 if !in_play {
                     let in_active_drag = self.editor.state.gizmo.drag.is_some()
                         || self.editor.state.box_select.is_some();
-                    let allow = !consumed || in_active_drag;
+                    
                     let (mx, my) = self.input.mouse_pos;
                     let in_vp = self.in_viewport(mx, my);
+                    
+                    // FIX: Разрешаем движку перехватывать мышь во вьюпорте
+                    let allow = !consumed || in_active_drag || in_vp;
 
                     if allow && button == MouseButton::Left && in_vp {
                         match state {
@@ -3790,6 +3793,7 @@ impl<G: Game> App<G> {
                     }
                 }
             }
+            
             WindowEvent::CursorMoved { position, .. } => {
                 if in_menu {
                     return;
@@ -3798,10 +3802,13 @@ impl<G: Game> App<G> {
                     .on_mouse_move(position.x as f32, position.y as f32);
                 let in_active_drag = self.editor.state.gizmo.drag.is_some()
                     || self.editor.state.box_select.is_some();
-                if consumed && !in_active_drag {
+                
+                let (mx, my) = self.input.mouse_pos;
+                let in_vp = self.in_viewport(mx, my);
+
+                // FIX: Пропускаем движение мыши во вьюпорте, даже если egui пытается его забрать
+                if consumed && !in_active_drag && !in_vp {
                 } else {
-                    let (mx, my) = self.input.mouse_pos;
-                    let in_vp = self.in_viewport(mx, my);
                     if let Some(bs) = &mut self.editor.state.box_select {
                         bs.current = (mx, my);
                     }
@@ -3871,6 +3878,7 @@ impl<G: Game> App<G> {
                     }
                 }
             }
+
             WindowEvent::CursorEntered { .. } => {
                 self.input.on_cursor_enter();
             }
