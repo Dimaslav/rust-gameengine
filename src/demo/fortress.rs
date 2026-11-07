@@ -1593,16 +1593,12 @@ fn default_postfx() -> PostFx {
         debug_view: DebugView::Final,
         fxaa_strength: 1.0,
         fog_color: [0.35, 0.40, 0.55],
-        // FIX: было 0.008 — 55% тумана на 100м, 80% на 200м →
-        // сцена сливалась с небом. 0.0008 = 8% / 15%.
         fog_density: 0.0008,
         fog_height_base: 0.0,
         fog_height_falloff: 0.06,
         vignette_strength: 0.15,
         film_grain: 0.03,
         chromatic_aberration: 0.0,
-        // FIX: было 0.0015 / 3.0 / 150 / 200 — CSM acne (чёрные полосы
-        // на горизонте). Увеличен bias, fade сдвинут ближе.
         shadow_bias: 0.0050,
         shadow_normal_bias: 5.0,
         shadow_fade_start: 80.0,
@@ -1611,7 +1607,6 @@ fn default_postfx() -> PostFx {
         lod_distances: [30.0, 80.0, 200.0, 500.0],
         taa_strength: 1.0,
         taa_sharpening: 0.1,
-        // FIX: было 0.006. Volumetric fog — отдельная система.
         volumetric_density: 0.0006,
         volumetric_scattering: 0.35,
         volumetric_phase_g: 0.5,
