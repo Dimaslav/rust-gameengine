@@ -1,24 +1,3 @@
-//! PhysicsWorld: пошаговая симуляция.
-//!
-//! ## Что нового
-//!
-//! * Angular dynamics (quaternion derivative, inertia tensor).
-//! * Sleep management — тела засыпают через 0.5 сек.
-//! * Kinematic support transfer — ящики на лифте двигаются.
-//! * Rotation-aware AABB (`world_aabb` с учётом `rotation`).
-//! * **step3-spatial-hash**: broad-phase через `SpatialHash2D`,
-//!   O(n²) → O(n) на реальных сценах.
-//! * Terrain collision: dynamic-тела получают вертикальный контакт
-//!   с heightmap.
-//!
-//! ## FIX #1 (spatial hash: AABB insert)
-//!
-//! В `broad_phase` раньше вставлялся только **центр** AABB. Два
-//! больших тела (пол и стена) никогда не сталкивались, если их
-//! центры в разных клетках. Теперь используется
-//! `SpatialHash2D::insert_aabb` — payload попадает во все клетки,
-//! которые пересекает AABB.
-
 use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
@@ -40,6 +19,8 @@ const MAX_ANGULAR_VELOCITY: f32 = 50.0;
 const VELOCITY_ITERATIONS: u32 = 4;
 
 pub const MAX_DT: f32 = 0.05;
+
+const CAPSULE_AABB_SAMPLES: u32 = 8;
 
 pub struct PhysicsWorld {
     pub gravity: Vec3,
@@ -96,7 +77,9 @@ impl PhysicsWorld {
         terrain: Option<&Heightmap>,
         dt: f32,
     ) {
-        if !self.enabled || dt <= 0.0 { return; }
+        if !self.enabled || dt <= 0.0 {
+            return;
+        }
         let dt = dt.min(MAX_DT);
 
         let (mut states, skipped) = collect_states(world);
@@ -140,10 +123,14 @@ impl PhysicsWorld {
         // === Terrain: вертикальная коллизия с heightmap ===
         if let Some(hm) = terrain {
             for s in states.iter_mut() {
-                if s.body_type != BodyType::Dynamic { continue; }
+                if s.body_type != BodyType::Dynamic {
+                    continue;
+                }
                 let (mn, _mx) = global_aabb(s);
                 let feet = Vec3::new(s.position.x, mn.y, s.position.z);
-                if !hm.contains(feet.x, feet.z) { continue; }
+                if !hm.contains(feet.x, feet.z) {
+                    continue;
+                }
                 let ground = hm.sample(feet.x, feet.z);
                 if feet.y < ground {
                     let pen = ground - feet.y;
@@ -206,7 +193,9 @@ impl PhysicsWorld {
 
         // 6. Sleep management.
         for s in states.iter_mut() {
-            if s.body_type != BodyType::Dynamic { continue; }
+            if s.body_type != BodyType::Dynamic {
+                continue;
+            }
             let lin = s.velocity.length();
             let ang = s.angular_velocity.length();
             if lin < SLEEP_LINEAR_THRESHOLD && ang < SLEEP_ANGULAR_THRESHOLD {
@@ -245,7 +234,9 @@ impl PhysicsWorld {
 // ============================================================
 
 fn integrate_rotation(s: &mut BodyState, dt: f32) {
-    if s.angular_velocity.length_squared() < 1e-10 { return; }
+    if s.angular_velocity.length_squared() < 1e-10 {
+        return;
+    }
     let w = s.angular_velocity;
     let wq = Quat::from_xyzw(w.x, w.y, w.z, 0.0);
     let dq = wq * s.rotation;
@@ -263,7 +254,9 @@ fn integrate_rotation(s: &mut BodyState, dt: f32) {
 // ============================================================
 
 fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
-    if mass < 1e-6 { return 0.0; }
+    if mass < 1e-6 {
+        return 0.0;
+    }
     let i = match col {
         Collider::Sphere { radius } => {
             let r = radius * scale.max_element();
@@ -290,8 +283,12 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
     let mut skipped = Vec::new();
     for &e in world.entities() {
-        let Some(rb) = world.get::<RigidBody>(e).copied() else { continue };
-        let Some(col) = world.get::<Collider>(e).copied() else { continue };
+        let Some(rb) = world.get::<RigidBody>(e).copied() else {
+            continue;
+        };
+        let Some(col) = world.get::<Collider>(e).copied() else {
+            continue;
+        };
 
         if world.get::<Parent>(e).is_some() {
             if rb.body_type != BodyType::Static {
@@ -300,7 +297,9 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
             continue;
         }
 
-        let Some(t) = world.get::<Transform>(e) else { continue };
+        let Some(t) = world.get::<Transform>(e) else {
+            continue;
+        };
 
         let material = world.get::<PhysicsMaterial>(e).copied().unwrap_or_default();
         let mass = rb.mass.max(1e-4);
@@ -359,13 +358,14 @@ fn write_back(world: &mut World, states: &[BodyState]) {
 /// уходят в `always_check` (см. `spatial_hash.rs`).
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
     let n = states.len();
-    if n < 2 { return Vec::new(); }
+    if n < 2 {
+        return Vec::new();
+    }
 
     let aabbs: Vec<(Vec3, Vec3)> = states.iter().map(global_aabb).collect();
 
     let mut hash = SpatialHash2D::new(4.0);
     for (i, (mn, mx)) in aabbs.iter().enumerate() {
-        // FIX #1: было `hash.insert(i as u32, (*mn + *mx) * 0.5);`
         hash.insert_aabb(i as u32, *mn, *mx);
     }
 
@@ -378,16 +378,21 @@ fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
 
         candidates.clear();
         hash.query_aabb(mn_i, mx_i, &mut candidates);
-        // candidates уникальны (dedup встроен в query_aabb).
 
         for &j_u32 in &candidates {
             let j = j_u32 as usize;
-            if j <= i { continue; } // пару один раз
+            if j <= i {
+                continue;
+            }
 
             let sj = &states[j];
 
-            if !can_move(si.body_type) && !can_move(sj.body_type) { continue; }
-            if si.sleeping && sj.sleeping { continue; }
+            if !can_move(si.body_type) && !can_move(sj.body_type) {
+                continue;
+            }
+            if si.sleeping && sj.sleeping {
+                continue;
+            }
 
             if aabb_overlap(aabbs[i], aabbs[j]) {
                 pairs.push((i, j));
@@ -418,11 +423,13 @@ fn aabb_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
 
 fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact> {
     match (a.collider, b.collider) {
+        // --- Sphere vs Sphere ---
         (Collider::Sphere { radius: ra }, Collider::Sphere { radius: rb }) => {
             let r_a = ra * a.scale.max_element();
             let r_b = rb * b.scale.max_element();
             sphere_sphere(a.position, r_a, b.position, r_b, ia, ib)
         }
+        // --- Sphere vs AABB ---
         (Collider::Sphere { radius }, Collider::Aabb { half_extents }) => {
             let r = radius * a.scale.max_element();
             let hb = half_extents * b.scale;
@@ -433,17 +440,68 @@ fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact
             let r = radius * b.scale.max_element();
             let mut c = sphere_aabb(b.position, r, a.position, ha, ib, ia)?;
             c.normal = -c.normal;
-            Some(Contact { a: ia, b: ib, normal: c.normal, penetration: c.penetration, point: c.point })
+            Some(Contact {
+                a: ia,
+                b: ib,
+                normal: c.normal,
+                penetration: c.penetration,
+                point: c.point,
+            })
         }
+        // --- AABB vs AABB ---
         (Collider::Aabb { half_extents: ha }, Collider::Aabb { half_extents: hb }) => {
             let h_a = ha * a.scale;
             let h_b = hb * b.scale;
             aabb_aabb(a.position, h_a, b.position, h_b, ia, ib)
         }
-        _ => {
-            let (pa, ha) = state_as_aabb(a);
-            let (pb, hb) = state_as_aabb(b);
-            aabb_aabb(pa, ha, pb, hb, ia, ib)
+        // === FIX #2: capsule narrow-phase ===
+        // --- Capsule vs Capsule ---
+        (
+            Collider::Capsule { radius: ra, height: ha },
+            Collider::Capsule { radius: rb, height: hb },
+        ) => {
+            let (a1, a2, r_a) = capsule_endpoints(a.position, a.rotation, a.scale, ra, ha);
+            let (b1, b2, r_b) = capsule_endpoints(b.position, b.rotation, b.scale, rb, hb);
+            capsule_capsule(a1, a2, r_a, b1, b2, r_b, ia, ib)
+        }
+        // --- Capsule vs Sphere ---
+        (Collider::Capsule { radius, height }, Collider::Sphere { radius: r_b }) => {
+            let (a1, a2, r_a) = capsule_endpoints(a.position, a.rotation, a.scale, radius, height);
+            let sr = r_b * b.scale.max_element();
+            capsule_sphere(a1, a2, r_a, b.position, sr, ia, ib)
+        }
+        (Collider::Sphere { radius }, Collider::Capsule { radius: r_b, height }) => {
+            let sr = radius * a.scale.max_element();
+            let (b1, b2, r_b_world) =
+                capsule_endpoints(b.position, b.rotation, b.scale, r_b, height);
+            let mut c = capsule_sphere(b1, b2, r_b_world, a.position, sr, ib, ia)?;
+            c.normal = -c.normal;
+            Some(Contact {
+                a: ia,
+                b: ib,
+                normal: c.normal,
+                penetration: c.penetration,
+                point: c.point,
+            })
+        }
+        // --- Capsule vs AABB ---
+        (Collider::Capsule { radius, height }, Collider::Aabb { half_extents }) => {
+            let (a1, a2, r_a) = capsule_endpoints(a.position, a.rotation, a.scale, radius, height);
+            let hb = half_extents * b.scale;
+            capsule_aabb(a1, a2, r_a, b.position, hb, ia, ib)
+        }
+        (Collider::Aabb { half_extents }, Collider::Capsule { radius, height }) => {
+            let ha = half_extents * a.scale;
+            let (b1, b2, r_b) = capsule_endpoints(b.position, b.rotation, b.scale, radius, height);
+            let mut c = capsule_aabb(b1, b2, r_b, a.position, ha, ib, ia)?;
+            c.normal = -c.normal;
+            Some(Contact {
+                a: ia,
+                b: ib,
+                normal: c.normal,
+                penetration: c.penetration,
+                point: c.point,
+            })
         }
     }
 }
@@ -457,23 +515,190 @@ fn closest_point_on_aabb(p: Vec3, center: Vec3, half: Vec3) -> Vec3 {
     p.clamp(center - half, center + half)
 }
 
-fn sphere_sphere(pa: Vec3, ra: f32, pb: Vec3, rb: f32, ia: usize, ib: usize) -> Option<Contact> {
+// ============================================================
+// Capsule helpers (FIX #2)
+// ============================================================
+
+/// Возвращает `(a1, a2, radius)` — концы оси капсулы (segment) и
+/// **масштабированный** радиус. Для `Collider::Capsule::world_aabb`
+/// используется тот же расчёт — держим в синхроне.
+#[inline]
+fn capsule_endpoints(
+    pos: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+    radius: f32,
+    height: f32,
+) -> (Vec3, Vec3, f32) {
+    let r = radius * scale.max_element();
+    let hy = height * scale.y.abs() * 0.5;
+    let up = rotation * Vec3::new(0.0, hy, 0.0);
+    (pos - up, pos + up, r)
+}
+
+/// Closest points между двумя сегментами.
+/// Ericson, Real-Time Collision Detection, 5.1.9.
+fn closest_segment_segment(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+    let d1 = q1 - p1;
+    let d2 = q2 - p2;
+    let r = p1 - p2;
+    let a = d1.dot(d1);
+    let e = d2.dot(d2);
+    let f = d2.dot(r);
+
+    let (mut s, mut t);
+    if a <= 1e-8 && e <= 1e-8 {
+        return (p1, p2);
+    }
+    if a <= 1e-8 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(r);
+        if e <= 1e-8 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.dot(d2);
+            let denom = a * e - b * b;
+            s = if denom.abs() > 1e-8 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+        }
+    }
+    (p1 + d1 * s, p2 + d2 * t)
+}
+
+fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let ab = b - a;
+    let t = (p - a).dot(ab) / ab.length_squared().max(1e-12);
+    a + ab * t.clamp(0.0, 1.0)
+}
+
+fn capsule_capsule(
+    a1: Vec3,
+    a2: Vec3,
+    ra: f32,
+    b1: Vec3,
+    b2: Vec3,
+    rb: f32,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
+    let (ca, cb) = closest_segment_segment(a1, a2, b1, b2);
+    let d = cb - ca;
+    let dist = d.length();
+    let r_sum = ra + rb;
+    if dist >= r_sum {
+        return None;
+    }
+    let normal = if dist > 1e-6 { d / dist } else { Vec3::Y };
+    let pen = r_sum - dist;
+    let point = ca + normal * (ra - pen * 0.5);
+    Some(Contact {
+        a: ia,
+        b: ib,
+        normal,
+        penetration: pen,
+        point,
+    })
+}
+
+fn capsule_sphere(
+    c1: Vec3,
+    c2: Vec3,
+    cr: f32,
+    center: Vec3,
+    sr: f32,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
+    let closest = closest_on_segment(center, c1, c2);
+    sphere_sphere(closest, cr, center, sr, ia, ib)
+}
+
+fn capsule_aabb(
+    c1: Vec3,
+    c2: Vec3,
+    cr: f32,
+    center: Vec3,
+    half: Vec3,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
+    // Sampling вдоль оси капсулы. Для типичных FPS (игрок-капсула на
+    // коробке) 8 сэмплов дают точность < 1 см на краю.
+    // Возвращаем контакт с **максимальной** пенетрацией — это
+    // соответствует «глубокой» точке сближения.
+    let mut best: Option<Contact> = None;
+    let n = CAPSULE_AABB_SAMPLES;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let p = c1.lerp(c2, t);
+        if let Some(c) = sphere_aabb(p, cr, center, half, ia, ib)
+            && best.as_ref().is_none_or(|b| c.penetration > b.penetration)
+        {
+            best = Some(c);
+        }
+    }
+    best
+}
+
+// ============================================================
+// Primitive narrow-phase
+// ============================================================
+
+fn sphere_sphere(
+    pa: Vec3,
+    ra: f32,
+    pb: Vec3,
+    rb: f32,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
     let d = pb - pa;
     let dist_sq = d.length_squared();
     let r_sum = ra + rb;
-    if dist_sq >= r_sum * r_sum { return None; }
+    if dist_sq >= r_sum * r_sum {
+        return None;
+    }
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 { d / dist } else { Vec3::Y };
     let pen = r_sum - dist;
     let point = pa + normal * (ra - pen * 0.5);
-    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
+    Some(Contact {
+        a: ia,
+        b: ib,
+        normal,
+        penetration: pen,
+        point,
+    })
 }
 
-fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize) -> Option<Contact> {
+fn sphere_aabb(
+    pc: Vec3,
+    r: f32,
+    center: Vec3,
+    half: Vec3,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
     let closest = closest_point_on_aabb(pc, center, half);
     let d = pc - closest;
     let dist_sq = d.length_squared();
-    if dist_sq >= r * r { return None; }
+    if dist_sq >= r * r {
+        return None;
+    }
     let dist = dist_sq.sqrt();
     let normal = if dist > 1e-6 {
         -(d / dist)
@@ -492,15 +717,30 @@ fn sphere_aabb(pc: Vec3, r: f32, center: Vec3, half: Vec3, ia: usize, ib: usize)
     };
     let pen = r - dist;
     let point = closest;
-    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
+    Some(Contact {
+        a: ia,
+        b: ib,
+        normal,
+        penetration: pen,
+        point,
+    })
 }
 
-fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Option<Contact> {
+fn aabb_aabb(
+    pa: Vec3,
+    ha: Vec3,
+    pb: Vec3,
+    hb: Vec3,
+    ia: usize,
+    ib: usize,
+) -> Option<Contact> {
     let d = pb - pa;
     let ox = ha.x + hb.x - d.x.abs();
     let oy = ha.y + hb.y - d.y.abs();
     let oz = ha.z + hb.z - d.z.abs();
-    if ox <= 0.0 || oy <= 0.0 || oz <= 0.0 { return None; }
+    if ox <= 0.0 || oy <= 0.0 || oz <= 0.0 {
+        return None;
+    }
     let (pen, normal) = if ox <= oy && ox <= oz {
         (ox, Vec3::new(d.x.signum(), 0.0, 0.0))
     } else if oy <= oz {
@@ -511,7 +751,13 @@ fn aabb_aabb(pa: Vec3, ha: Vec3, pb: Vec3, hb: Vec3, ia: usize, ib: usize) -> Op
     let point_a = closest_point_on_aabb(pb, pa, ha);
     let point_b = closest_point_on_aabb(pa, pb, hb);
     let point = (point_a + point_b) * 0.5;
-    Some(Contact { a: ia, b: ib, normal, penetration: pen, point })
+    Some(Contact {
+        a: ia,
+        b: ib,
+        normal,
+        penetration: pen,
+        point,
+    })
 }
 
 // ============================================================
@@ -524,7 +770,9 @@ fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let inv_i_a = states[c.a].inv_inertia;
     let inv_i_b = states[c.b].inv_inertia;
     let inv_sum = inv_m_a + inv_m_b;
-    if inv_sum <= 0.0 && inv_i_a <= 0.0 && inv_i_b <= 0.0 { return; }
+    if inv_sum <= 0.0 && inv_i_a <= 0.0 && inv_i_b <= 0.0 {
+        return;
+    }
 
     let ra = c.point - states[c.a].position;
     let rb = c.point - states[c.b].position;
@@ -533,16 +781,23 @@ fn resolve_velocity(c: &Contact, states: &mut [BodyState]) {
     let vb = states[c.b].velocity + states[c.b].angular_velocity.cross(rb);
     let v_rel = vb - va;
     let v_n = v_rel.dot(c.normal);
-    if v_n > 0.0 { return; }
+    if v_n > 0.0 {
+        return;
+    }
 
     let ra_xn = ra.cross(c.normal);
     let rb_xn = rb.cross(c.normal);
     let ang_a = inv_i_a * ra_xn.length_squared();
     let ang_b = inv_i_b * rb_xn.length_squared();
     let k = inv_sum + ang_a + ang_b;
-    if k <= 1e-8 { return; }
+    if k <= 1e-8 {
+        return;
+    }
 
-    let e = states[c.a].material.restitution.min(states[c.b].material.restitution);
+    let e = states[c.a]
+        .material
+        .restitution
+        .min(states[c.b].material.restitution);
     let j = -(1.0 + e) * v_n / k;
     let impulse = c.normal * j;
 
@@ -585,12 +840,160 @@ fn resolve_position(c: &Contact, states: &mut [BodyState]) {
     let inv_m_a = states[c.a].inv_mass;
     let inv_m_b = states[c.b].inv_mass;
     let inv_sum = inv_m_a + inv_m_b;
-    if inv_sum <= 0.0 { return; }
+    if inv_sum <= 0.0 {
+        return;
+    }
 
     let pen = (c.penetration - CONTACT_SLOP).max(0.0);
-    if pen < 1e-6 { return; }
+    if pen < 1e-6 {
+        return;
+    }
 
     let correction = c.normal * (BAUMGARTE * pen / inv_sum);
     states[c.a].position -= correction * inv_m_a;
     states[c.b].position += correction * inv_m_b;
+}
+
+// ============================================================
+// Тесты (FIX #2)
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closest_segment_segment_parallel() {
+        let (a, b) = closest_segment_segment(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        );
+        assert!((a.y).abs() < 1e-4);
+        assert!((b.y - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn closest_segment_segment_crossing() {
+        let (a, b) = closest_segment_segment(
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        assert!((a - Vec3::ZERO).length() < 1e-4);
+        assert!((b - Vec3::ZERO).length() < 1e-4);
+    }
+
+    #[test]
+    fn capsule_capsule_head_on() {
+        let c = capsule_capsule(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(0.0, 0.5, 0.0),
+            0.5,
+            Vec3::new(0.0, 0.3, 0.0),
+            Vec3::new(0.0, 1.3, 0.0),
+            0.5,
+            0,
+            1,
+        );
+        let c = c.expect("капсулы должны пересекаться");
+        assert!((c.penetration - 0.2).abs() < 0.05, "pen = {}", c.penetration);
+        assert!(c.normal.y > 0.9, "normal = {:?}", c.normal);
+    }
+
+    #[test]
+    fn capsule_capsule_apart() {
+        let c = capsule_capsule(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            0.3,
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(5.0, 1.0, 0.0),
+            0.3,
+            0,
+            1,
+        );
+        assert!(c.is_none());
+    }
+
+    #[test]
+    fn capsule_sphere_hit() {
+        let c = capsule_sphere(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            0.5,
+            Vec3::new(0.7, 0.5, 0.0),
+            0.3,
+            0,
+            1,
+        );
+        assert!(c.is_some());
+        let c = c.unwrap();
+        assert!((c.penetration - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn capsule_aabb_stand_on_top() {
+        let c = capsule_aabb(
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+            0.4,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::splat(0.5),
+            0,
+            1,
+        );
+        let c = c.expect("капсула стоит на коробке");
+        assert!(c.normal.y > 0.9);
+        assert!(c.penetration > 0.0 && c.penetration < 0.5);
+    }
+
+    #[test]
+    fn collide_dispatches_capsule() {
+        let cap = BodyState {
+            entity: Entity::from_raw(0, 0),
+            body_type: BodyType::Dynamic,
+            inv_mass: 1.0,
+            inv_inertia: 1.0,
+            position: Vec3::new(0.0, 1.0, 0.0),
+            velocity: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            gravity_scale: 1.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            collider: Collider::Capsule {
+                radius: 0.5,
+                height: 1.0,
+            },
+            material: PhysicsMaterial::default(),
+            scale: Vec3::ONE,
+            sleeping: false,
+            sleep_timer: 0.0,
+        };
+        let box_ = BodyState {
+            entity: Entity::from_raw(1, 0),
+            body_type: BodyType::Static,
+            inv_mass: 0.0,
+            inv_inertia: 0.0,
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            gravity_scale: 0.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            collider: Collider::Aabb {
+                half_extents: Vec3::splat(0.5),
+            },
+            material: PhysicsMaterial::default(),
+            scale: Vec3::ONE,
+            sleeping: false,
+            sleep_timer: 0.0,
+        };
+        let c = collide(&cap, &box_, 0, 1);
+        assert!(c.is_some(), "capsule-vs-aabb must produce contact");
+    }
 }

@@ -26,6 +26,7 @@ use crate::game::audio::AudioBus;
 use crate::game::components::{Parent, Transform};
 use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
+use crate::game::world_gen::WorldGenConfig; // <-- импорт для состояния
 
 use clipboard::{ClipboardComponent, ComponentKind};
 use gizmo::GizmoState;
@@ -147,6 +148,9 @@ pub struct EditorState {
     // НОВЫЕ ПОЛЯ ДЛЯ СЕТКИ
     pub grid_size: f32,
     pub snap_enabled: bool,
+
+    // НОВОЕ ПОЛЕ ДЛЯ ГЕНЕРАТОРА
+    pub last_gen_config: WorldGenConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +169,7 @@ pub enum EditorAction {
     SelectEntity(Entity), ValidateScene, SelectEntities(Vec<Entity>), DeleteEntities(Vec<Entity>),
     RemoveParent(Vec<Entity>), ReplaceMissingMesh(Vec<Entity>, String), ReplaceMissingMaterial(Vec<Entity>, String),
     CopyComponent(Entity, ComponentKind), PasteComponent(Entity),
+    GenerateWorld { biome: crate::game::world_gen::Biome, seed: u64 }, // <-- НОВОЕ ДЕЙСТВИЕ
 }
 
 impl EditorState {
@@ -233,8 +238,9 @@ impl EditorState {
             validation_issues: Vec::new(),
             clipboard_component: None,
             show_welcome_panel: true,
-            grid_size: 1.0,       // ДОБАВЛЕНО
-            snap_enabled: true,   // ДОБАВЛЕНО
+            grid_size: 1.0,
+            snap_enabled: true,
+            last_gen_config: WorldGenConfig::default(), // <-- Инициализация
         };
 
         s.save_path = s.settings.save_path.clone();
@@ -295,7 +301,6 @@ impl EditorState {
         }
     }
 
-    // ВОЗВРАЩЕННЫЙ МЕТОД
     pub fn select_range(&mut self, list: &[Entity], anchor: Entity, e: Entity) {
         let (Some(a), Some(b)) = (
             list.iter().position(|&x| x == anchor),
@@ -323,7 +328,6 @@ impl EditorState {
             }
     }
 
-    // ВОЗВРАЩЕННЫЙ МЕТОД
     pub fn is_locked(&self, world: &World, mut e: Entity) -> bool {
         for _ in 0..64 {
             if self.locked.contains(&e) {

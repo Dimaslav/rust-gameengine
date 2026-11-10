@@ -26,33 +26,17 @@ pub fn draw(
     assets: &UiAssets<'_>,
     action: &mut Option<EditorAction>,
 ) {
-    ui.heading("Inspector");
-    ui.separator();
-
-    // Кнопка помощи для новичков
-    ui.horizontal(|ui| {
-        if ui.small_button("❓ Help").clicked() {
-            editor.show_welcome_panel = true;
-        }
-        if editor.clipboard_component.is_some() {
-            let label = editor.clipboard_component.as_ref()
-                .map(|c| c.label()).unwrap_or("?");
-            ui.label(
-                egui::RichText::new(format!("📋 {}", label))
-                    .small()
-                    .weak()
-                    .italics(),
-            );
-        }
-    });
-    ui.separator();
-
     let n = editor.selected.len();
     if n == 0 {
-        ui.label("Nothing selected");
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("Кликни на объект во вьюпорте или в Outliner")
+            egui::RichText::new("Nothing selected")
+                .weak()
+                .italics(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Click an object in the viewport or Outliner")
                 .small()
                 .weak()
                 .italics(),
@@ -103,10 +87,14 @@ fn draw_single(
     assets: &UiAssets<'_>,
     action: &mut Option<EditorAction>,
 ) {
+    // === Unity-style заголовок ===
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("#{}", e)).weak().monospace());
         if let Some(n) = world.get_mut::<Name>(e) {
-            let r = ui.add(egui::TextEdit::singleline(&mut n.0).desired_width(160.0));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut n.0)
+                    .desired_width(140.0)
+                    .font(egui::TextStyle::Heading),
+            );
             if r.gained_focus() {
                 editor.undo_requested = true;
             }
@@ -114,16 +102,41 @@ fn draw_single(
             editor.undo_requested = true;
             world.insert(e, Name(format!("Entity_{}", e)));
         }
-        if ui.button("Focus (F)").clicked() {
-            *action = Some(EditorAction::FocusSelected);
-        }
-        if ui.button("Spawn Player Here").clicked() {
-            *action = Some(EditorAction::SpawnPlayerHere);
-        }
-        if ui.button("Export FBX").clicked() {
-            *action = Some(EditorAction::ExportFbxSelected);
-        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut is_static = !world.has::<crate::physics::RigidBody>(e);
+            if ui.checkbox(&mut is_static, "Static").changed() {
+                editor.undo_requested = true;
+                if is_static {
+                    world.remove::<crate::physics::RigidBody>(e);
+                } else {
+                    world.insert(e, crate::physics::RigidBody::static_body());
+                }
+            }
+        });
     });
+
+    ui.horizontal(|ui| {
+        ui.label("Tag");
+        egui::ComboBox::from_id_salt("tag")
+            .selected_text("Player")
+            .show_ui(ui, |ui| {
+                ui.label("Player");
+                ui.label("Untagged");
+            });
+        ui.label("Layer");
+        egui::ComboBox::from_id_salt("layer")
+            .selected_text("Default")
+            .show_ui(ui, |ui| {
+                ui.label("Default");
+                ui.label("Water");
+                ui.label("UI");
+            });
+    });
+
+    ui.separator();
+
+    // === Инструменты и видимость ===
     ui.horizontal(|ui| {
         let mut visible = world.get::<Visible>(e).map(|v| v.0).unwrap_or(true);
         if ui.checkbox(&mut visible, "Visible").changed() {
@@ -134,10 +147,25 @@ fn draw_single(
                 world.insert(e, Visible(false));
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Focus (F)").clicked() {
+                *action = Some(EditorAction::FocusSelected);
+            }
+            if ui.button("Spawn Player").clicked() {
+                *action = Some(EditorAction::SpawnPlayerHere);
+            }
+            if ui.button("Export FBX").clicked() {
+                *action = Some(EditorAction::ExportFbxSelected);
+            }
+        });
     });
+
+    // === Чипы компонентов (копирование/удаление) ===
     draw_component_chips(ui, world, e, editor, action);
 
     ui.separator();
+    
+    // === Фильтр ===
     ui.horizontal(|ui| {
         ui.label("🔍");
         ui.add(
@@ -156,6 +184,7 @@ fn draw_single(
         filter.is_empty() || group.to_lowercase().contains(&filter)
     };
 
+    // === ВСЕ КОМПОНЕНТЫ (как в оригинале) ===
     if world.has::<Transform>(e) && matches("transform") {
         inspector_transform(ui, world, e, editor);
     }
@@ -324,9 +353,10 @@ fn draw_single(
     }
 
     if let Some((name, original)) = &assets.selected_material
-        && matches("material") {
-            inspector_material(ui, e, editor, action, assets, name, original);
-        }
+        && matches("material")
+    {
+        inspector_material(ui, e, editor, action, assets, name, original);
+    }
 
     ui.separator();
     if ui.button("Deselect").clicked() {
@@ -335,7 +365,7 @@ fn draw_single(
 }
 
 // ============================================================
-// MULTI-EDIT (главная фича)
+// MULTI-EDIT
 // ============================================================
 
 fn draw_multi_edit(
@@ -346,23 +376,24 @@ fn draw_multi_edit(
 ) {
     let selected: Vec<Entity> = editor.selected.clone();
     let n = selected.len();
-    if n < 2 { return; }
+    if n < 2 {
+        return;
+    }
 
-    // Хелпер: есть ли компонент у ВСЕХ выбранных
     let all_have = |world: &World, check: fn(&World, Entity) -> bool| -> bool {
         selected.iter().all(|&e| check(world, e))
     };
 
     // ---------- TRANSFORM ----------
     {
-        let with_tf: Vec<(Entity, Transform)> = selected.iter()
+        let with_tf: Vec<(Entity, Transform)> = selected
+            .iter()
             .filter_map(|&e| world.get::<Transform>(e).map(|t| (e, *t)))
             .collect();
-        if with_tf.len() == n && with_tf.len() > 0 {
+        if with_tf.len() == n && !with_tf.is_empty() {
             egui::CollapsingHeader::new("Transform (group)")
                 .default_open(true)
                 .show(ui, |ui| {
-                    // Позиция
                     let positions: Vec<Vec3> = with_tf.iter().map(|(_, t)| t.position).collect();
                     let mixed_pos = positions.windows(2).any(|w| (w[0] - w[1]).length() > 1e-4);
                     let mut pos = positions[0].to_array();
@@ -375,13 +406,16 @@ fn draw_multi_edit(
                     ui.horizontal(|ui| {
                         for i in 0..3 {
                             let r = ui.add(
-                                egui::DragValue::new(&mut pos[i]).speed(0.01)
+                                egui::DragValue::new(&mut pos[i])
+                                    .speed(0.01)
                                     .prefix(["X ", "Y ", "Z "][i]),
                             );
                             if r.drag_started() || r.gained_focus() {
                                 editor.undo_requested = true;
                             }
-                            if r.changed() { changed = true; }
+                            if r.changed() {
+                                changed = true;
+                            }
                         }
                     });
                     if changed {
@@ -393,7 +427,6 @@ fn draw_multi_edit(
                         }
                     }
 
-                    // Масштаб
                     let scales: Vec<Vec3> = with_tf.iter().map(|(_, t)| t.scale).collect();
                     let mixed_scale = scales.windows(2).any(|w| (w[0] - w[1]).length() > 1e-4);
                     let mut sc = scales[0].to_array();
@@ -406,13 +439,16 @@ fn draw_multi_edit(
                     ui.horizontal(|ui| {
                         for i in 0..3 {
                             let r = ui.add(
-                                egui::DragValue::new(&mut sc[i]).speed(0.01)
+                                egui::DragValue::new(&mut sc[i])
+                                    .speed(0.01)
                                     .prefix(["X ", "Y ", "Z "][i]),
                             );
                             if r.drag_started() || r.gained_focus() {
                                 editor.undo_requested = true;
                             }
-                            if r.changed() { sc_changed = true; }
+                            if r.changed() {
+                                sc_changed = true;
+                            }
                         }
                     });
                     if sc_changed {
@@ -432,7 +468,8 @@ fn draw_multi_edit(
         egui::CollapsingHeader::new("Material (group)")
             .default_open(true)
             .show(ui, |ui| {
-                let current_names: Vec<String> = selected.iter()
+                let current_names: Vec<String> = selected
+                    .iter()
                     .filter_map(|&e| world.get::<MaterialHandle>(e).map(|m| m.0.clone()))
                     .collect();
                 let mixed = current_names.windows(2).any(|w| w[0] != w[1]);
@@ -464,7 +501,8 @@ fn draw_multi_edit(
         egui::CollapsingHeader::new("Mesh (group)")
             .default_open(false)
             .show(ui, |ui| {
-                let current_names: Vec<String> = selected.iter()
+                let current_names: Vec<String> = selected
+                    .iter()
                     .filter_map(|&e| world.get::<MeshHandle>(e).map(|m| m.0.clone()))
                     .collect();
                 let mixed = current_names.windows(2).any(|w| w[0] != w[1]);
@@ -496,7 +534,8 @@ fn draw_multi_edit(
         egui::CollapsingHeader::new("Health (group)")
             .default_open(true)
             .show(ui, |ui| {
-                let maxes: Vec<f32> = selected.iter()
+                let maxes: Vec<f32> = selected
+                    .iter()
                     .filter_map(|&e| world.get::<Health>(e).map(|h| h.max))
                     .collect();
                 let mixed = maxes.windows(2).any(|w| (w[0] - w[1]).abs() > 0.01);
@@ -519,52 +558,15 @@ fn draw_multi_edit(
             });
     }
 
-    // ---------- TINT ----------
-    if all_have(world, |w, e| w.has::<Tint>(e)) {
-        egui::CollapsingHeader::new("Tint (group)")
-            .default_open(false)
-            .show(ui, |ui| {
-                let tints: Vec<[f32; 4]> = selected.iter()
-                    .filter_map(|&e| world.get::<Tint>(e).map(|t| t.0))
-                    .collect();
-                let mixed = tints.windows(2).any(|w| {
-                    (w[0][0] - w[1][0]).abs() > 0.01 || (w[0][1] - w[1][1]).abs() > 0.01
-                });
-                let mut color = tints.first().copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
-                ui.horizontal(|ui| {
-                    ui.label(if mixed { "Color (mixed)" } else { "Color" });
-                    if ui.color_edit_button_rgba_unmultiplied(&mut color).changed() {
-                        editor.undo_requested = true;
-                        for &e in &selected {
-                            world.insert(e, Tint(color));
-                        }
-                    }
-                });
-            });
-    }
-
-    // ---------- VISIBLE ----------
-    if all_have(world, |w, e| w.has::<Visible>(e)) {
-        egui::CollapsingHeader::new("Visible (group)")
-            .default_open(false)
-            .show(ui, |ui| {
-                let mut vis = world.get::<Visible>(selected[0]).map(|v| v.0).unwrap_or(true);
-                if ui.checkbox(&mut vis, "Visible").changed() {
-                    editor.undo_requested = true;
-                    for &e in &selected {
-                        world.insert(e, Visible(vis));
-                    }
-                }
-            });
-    }
-
     // ---------- RIGIDBODY ----------
     if all_have(world, |w, e| w.has::<RigidBody>(e)) {
         egui::CollapsingHeader::new("RigidBody (group)")
             .default_open(false)
             .show(ui, |ui| {
-                let mut bt = world.get::<RigidBody>(selected[0])
-                    .map(|rb| rb.body_type).unwrap_or(BodyType::Static);
+                let mut bt = world
+                    .get::<RigidBody>(selected[0])
+                    .map(|rb| rb.body_type)
+                    .unwrap_or(BodyType::Static);
                 ui.horizontal(|ui| {
                     ui.label("Type:");
                     let mut changed = false;
@@ -588,98 +590,17 @@ fn draw_multi_edit(
             });
     }
 
-    // ---------- PHYSICS MATERIAL ----------
-    if all_have(world, |w, e| w.has::<PhysicsMaterial>(e)) {
-        egui::CollapsingHeader::new("PhysicsMaterial (group)")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Presets (apply to all):");
-                ui.horizontal_wrapped(|ui| {
-                    for (label, preset) in [
-                        ("Wood", PhysicsMaterial::wood()),
-                        ("Metal", PhysicsMaterial::metal()),
-                        ("Rubber", PhysicsMaterial::rubber()),
-                        ("Ice", PhysicsMaterial::ice()),
-                        ("Concrete", PhysicsMaterial::concrete()),
-                    ] {
-                        if ui.small_button(label).clicked() {
-                            editor.undo_requested = true;
-                            for &e in &selected {
-                                world.insert(e, preset);
-                            }
-                        }
-                    }
-                });
-            });
-    }
-
-    // ---------- AUDIO ----------
-    if all_have(world, |w, e| w.has::<AudioSource>(e)) {
-        egui::CollapsingHeader::new("AudioSource (group)")
-            .default_open(false)
-            .show(ui, |ui| {
-                let vols: Vec<f32> = selected.iter()
-                    .filter_map(|&e| world.get::<AudioSource>(e).map(|a| a.volume))
-                    .collect();
-                let mixed = vols.windows(2).any(|w| (w[0] - w[1]).abs() > 0.01);
-                let mut v = vols.first().copied().unwrap_or(1.0);
-                ui.horizontal(|ui| {
-                    ui.label(if mixed { "Volume (mixed)" } else { "Volume" });
-                    let r = ui.add(egui::Slider::new(&mut v, 0.0..=2.0).fixed_decimals(2));
-                    if r.drag_started() || r.gained_focus() {
-                        editor.undo_requested = true;
-                    }
-                    if r.changed() {
-                        for &e in &selected {
-                            if let Some(src) = world.get_mut::<AudioSource>(e) {
-                                src.volume = v;
-                            }
-                        }
-                    }
-                });
-            });
-    }
-
-    // ---------- POINT LIGHT ----------
-    if all_have(world, |w, e| w.has::<PointLight>(e)) {
-        egui::CollapsingHeader::new("PointLight (group)")
-            .default_open(false)
-            .show(ui, |ui| {
-                let intensities: Vec<f32> = selected.iter()
-                    .filter_map(|&e| world.get::<PointLight>(e).map(|l| l.intensity))
-                    .collect();
-                let mixed = intensities.windows(2).any(|w| (w[0] - w[1]).abs() > 0.01);
-                let mut val = intensities.first().copied().unwrap_or(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(if mixed { "Intensity (mixed)" } else { "Intensity" });
-                    let r = ui.add(egui::Slider::new(&mut val, 0.0..=20.0).logarithmic(true));
-                    if r.drag_started() || r.gained_focus() {
-                        editor.undo_requested = true;
-                    }
-                    if r.changed() {
-                        for &e in &selected {
-                            if let Some(l) = world.get_mut::<PointLight>(e) {
-                                l.intensity = val;
-                            }
-                        }
-                    }
-                });
-            });
-    }
-
     ui.add_space(8.0);
     ui.label(
-        egui::RichText::new(
-            "💡 Подсказка: изменения применяются ко всем выделенным объектам сразу",
-        )
-        .small()
-        .weak()
-        .italics(),
+        egui::RichText::new("💡 Changes apply to all selected objects")
+            .small()
+            .weak()
+            .italics(),
     );
 }
 
 // ============================================================
-// Component chips (с copy/paste)
+// Component chips (copy/paste)
 // ============================================================
 
 fn draw_component_chips(
@@ -737,25 +658,23 @@ fn draw_component_chips(
                 } else {
                     "Right-click to remove"
                 });
-            
-            // ЛКМ — копировать компонент
-            if resp.clicked() && kind.is_copyable() {
-                if let Some(clip) = ClipboardComponent::from_entity(world, e, *kind) {
-                    let name = clip.label();
-                    editor.clipboard_component = Some(clip);
-                    editor.hud_hint(format!("📋 Copied: {}", name));
-                }
+
+            if resp.clicked() && kind.is_copyable()
+                && let Some(clip) = ClipboardComponent::from_entity(world, e, *kind)
+            {
+                let name = clip.label();
+                editor.clipboard_component = Some(clip);
+                editor.hud_hint(format!("📋 Copied: {}", name));
             }
-            
-            // ПКМ — контекстное меню
+
             resp.context_menu(|ui| {
                 if kind.is_copyable()
-                    && ui.button(format!("📋 Copy {}", label)).clicked() {
-                        if let Some(clip) = ClipboardComponent::from_entity(world, e, *kind) {
-                            editor.clipboard_component = Some(clip);
-                            ui.close();
-                        }
-                    }
+                    && ui.button(format!("📋 Copy {}", label)).clicked()
+                    && let Some(clip) = ClipboardComponent::from_entity(world, e, *kind)
+                {
+                    editor.clipboard_component = Some(clip);
+                    ui.close();
+                }
                 if ui.button(format!("🗑 Remove {}", label)).clicked() {
                     remove_component(world, e, *kind);
                     editor.undo_requested = true;
@@ -766,7 +685,6 @@ fn draw_component_chips(
     });
     ui.horizontal(|ui| {
         ui.menu_button("+ Add Component", |ui| {
-            // Паста из clipboard
             if editor.clipboard_component.is_some() {
                 let clip_label = editor.clipboard_component.as_ref()
                     .map(|c| c.label()).unwrap_or("?");
@@ -793,7 +711,7 @@ fn draw_component_chips(
 }
 
 // ============================================================
-// Transform / helpers (без изменений от старой версии)
+// Helpers
 // ============================================================
 
 fn inspector_transform(
@@ -813,13 +731,12 @@ fn inspector_transform(
                     editor.clipboard_transform = Some(*t);
                 }
                 let paste_enabled = editor.clipboard_transform.is_some();
-                if ui
-                    .add_enabled(paste_enabled, egui::Button::new("Paste"))
-                    .clicked()
-                    && let Some(src) = editor.clipboard_transform {
-                        editor.undo_requested = true;
-                        *t = src;
-                    }
+                if ui.add_enabled(paste_enabled, egui::Button::new("Paste")).clicked()
+                    && let Some(src) = editor.clipboard_transform
+                {
+                    editor.undo_requested = true;
+                    *t = src;
+                }
                 if ui.button("Reset").clicked() {
                     editor.undo_requested = true;
                     t.position = Vec3::ZERO;
@@ -846,13 +763,16 @@ fn draw_vec3_row(
     ui.horizontal(|ui| {
         for i in 0..3 {
             let r = ui.add(
-                egui::DragValue::new(&mut arr[i]).speed(speed)
+                egui::DragValue::new(&mut arr[i])
+                    .speed(speed)
                     .prefix(["X ", "Y ", "Z "][i]),
             );
             if r.drag_started() || r.gained_focus() {
                 editor.undo_requested = true;
             }
-            if r.changed() { changed = true; }
+            if r.changed() {
+                changed = true;
+            }
         }
     });
     if changed {
@@ -873,13 +793,16 @@ fn draw_euler_row(
     ui.horizontal(|ui| {
         for i in 0..3 {
             let r = ui.add(
-                egui::DragValue::new(&mut e[i]).speed(0.5)
+                egui::DragValue::new(&mut e[i])
+                    .speed(0.5)
                     .prefix(["X ", "Y ", "Z "][i]),
             );
             if r.drag_started() || r.gained_focus() {
                 editor.undo_requested = true;
             }
-            if r.changed() { changed = true; }
+            if r.changed() {
+                changed = true;
+            }
         }
     });
     if changed {
@@ -891,10 +814,6 @@ fn draw_euler_row(
         );
     }
 }
-
-// ============================================================
-// Остальные инспекторы — БЕЗ ИЗМЕНЕНИЙ от старой версии
-// ============================================================
 
 fn inspector_hierarchy(
     ui: &mut egui::Ui,
@@ -917,19 +836,22 @@ fn inspector_hierarchy(
                         world.remove::<Parent>(e);
                     }
                 }
-                None => { ui.label("Parent: (none)"); }
-            }
-            if editor.selected.len() >= 2
-                && ui.button("Set parent from last selected").clicked() {
-                    let primary = *editor.selected.last().unwrap();
-                    if primary != e && !would_create_cycle(world, e, primary) {
-                        editor.undo_requested = true;
-                        world.insert(e, Parent(primary));
-                    }
+                None => {
+                    ui.label("Parent: (none)");
                 }
+            }
+            if editor.selected.len() >= 2 && ui.button("Set parent from last selected").clicked() {
+                let primary = *editor.selected.last().unwrap();
+                if primary != e && !would_create_cycle(world, e, primary) {
+                    editor.undo_requested = true;
+                    world.insert(e, Parent(primary));
+                }
+            }
             ui.separator();
             let children: Vec<Entity> = world
-                .entities().iter().copied()
+                .entities()
+                .iter()
+                .copied()
                 .filter(|&c| world.get::<Parent>(c).map(|p| p.0 == e).unwrap_or(false))
                 .collect();
             if children.is_empty() {
@@ -970,7 +892,9 @@ fn inspector_geometry(
                             }
                         });
                 });
-                if current != mh.0 { mh.0 = current; }
+                if current != mh.0 {
+                    mh.0 = current;
+                }
             }
             if let Some(mh) = world.get_mut::<MaterialHandle>(e) {
                 let mut current = mh.0.clone();
@@ -984,7 +908,9 @@ fn inspector_geometry(
                             }
                         });
                 });
-                if current != mh.0 { mh.0 = current; }
+                if current != mh.0 {
+                    mh.0 = current;
+                }
             }
         });
 }
@@ -998,23 +924,29 @@ fn inspector_texture_tiling(
     egui::CollapsingHeader::new("Texture Tiling")
         .default_open(true)
         .show(ui, |ui| {
-            let Some(t) = world.get_mut::<TextureTiling>(e) else { return; };
+            let Some(t) = world.get_mut::<TextureTiling>(e) else {
+                return;
+            };
             let r = ui.add(
                 egui::Slider::new(&mut t.size, 0.05..=50.0)
-                    .logarithmic(true).text("Tile size"),
+                    .logarithmic(true)
+                    .text("Tile size"),
             );
             if r.drag_started() || r.gained_focus() {
                 editor.undo_requested = true;
             }
             ui.horizontal(|ui| {
                 if ui.small_button("Fine (0.25)").clicked() {
-                    t.size = 0.25; editor.undo_requested = true;
+                    t.size = 0.25;
+                    editor.undo_requested = true;
                 }
                 if ui.small_button("Default (1.0)").clicked() {
-                    t.size = 1.0; editor.undo_requested = true;
+                    t.size = 1.0;
+                    editor.undo_requested = true;
                 }
                 if ui.small_button("Coarse (4.0)").clicked() {
-                    t.size = 4.0; editor.undo_requested = true;
+                    t.size = 4.0;
+                    editor.undo_requested = true;
                 }
             });
         });
@@ -1029,7 +961,9 @@ fn inspector_elevator(
     egui::CollapsingHeader::new("Elevator")
         .default_open(true)
         .show(ui, |ui| {
-            let Some(el) = world.get_mut::<Elevator>(e) else { return; };
+            let Some(el) = world.get_mut::<Elevator>(e) else {
+                return;
+            };
             let mut floors = el.floors.clone();
             let floor_count = floors.len();
             let mut remove: Option<usize> = None;
@@ -1038,11 +972,18 @@ fn inspector_elevator(
                 ui.horizontal(|ui| {
                     ui.label(format!("#{}:", i));
                     let r = ui.add(egui::DragValue::new(y).speed(0.1).suffix(" m"));
-                    if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-                    if floor_count > 2 && ui.small_button("✖").clicked() { remove = Some(i); }
+                    if r.drag_started() || r.gained_focus() {
+                        editor.undo_requested = true;
+                    }
+                    if floor_count > 2 && ui.small_button("✖").clicked() {
+                        remove = Some(i);
+                    }
                 });
             }
-            if floors != el.floors { el.floors = floors; editor.undo_requested = true; }
+            if floors != el.floors {
+                el.floors = floors;
+                editor.undo_requested = true;
+            }
             if let Some(i) = remove {
                 el.floors.remove(i);
                 el.current_floor = el.current_floor.min(el.floors.len().saturating_sub(1));
@@ -1072,7 +1013,9 @@ fn inspector_sliding_door(
     egui::CollapsingHeader::new("Sliding Door")
         .default_open(true)
         .show(ui, |ui| {
-            let Some(sd) = world.get_mut::<SlidingDoor>(e) else { return; };
+            let Some(sd) = world.get_mut::<SlidingDoor>(e) else {
+                return;
+            };
             ui.add(egui::Slider::new(&mut sd.open_amount, 0.0..=1.0).text("Open amount"));
             ui.add(egui::Slider::new(&mut sd.target, 0.0..=1.0).text("Target"));
             ui.add(egui::Slider::new(&mut sd.speed, 0.1..=5.0).text("Speed"));
@@ -1081,13 +1024,16 @@ fn inspector_sliding_door(
             let mut ax = sd.slide_axis.to_array();
             ui.horizontal(|ui| {
                 for i in 0..3 {
-                    let r = ui.add(egui::DragValue::new(&mut ax[i]).speed(0.01)
-                        .prefix(["X ", "Y ", "Z "][i]));
-                    if r.changed() { editor.undo_requested = true; }
+                    let r = ui.add(
+                        egui::DragValue::new(&mut ax[i])
+                            .speed(0.01)
+                            .prefix(["X ", "Y ", "Z "][i]),
+                    );
+                    if r.changed() {
+                        editor.undo_requested = true;
+                    }
                 }
             });
-            // FIX (P1.5): нулевая ось раньше давала молчаливую поломку
-            // (дверь не двигается, без объяснения). Теперь — предупреждение.
             let new_axis = Vec3::from_array(ax);
             if new_axis.length_squared() > 1e-6 {
                 sd.slide_axis = new_axis.normalize();
@@ -1100,7 +1046,6 @@ fn inspector_sliding_door(
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn inspector_material(
     ui: &mut egui::Ui,
     e: Entity,
@@ -1124,27 +1069,37 @@ fn inspector_material(
             let mut changed = false;
             ui.label("Base color");
             if ui.color_edit_button_rgba_unmultiplied(&mut m.base_color).changed() {
-                changed = true; editor.undo_requested = true;
+                changed = true;
+                editor.undo_requested = true;
             }
             let r = ui.add(egui::Slider::new(&mut m.metallic, 0.0..=1.0).text("Metallic"));
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-            if r.changed() { changed = true; }
+            if r.drag_started() || r.gained_focus() {
+                editor.undo_requested = true;
+            }
+            if r.changed() {
+                changed = true;
+            }
             let r = ui.add(egui::Slider::new(&mut m.roughness, 0.0..=1.0).text("Roughness"));
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-            if r.changed() { changed = true; }
+            if r.drag_started() || r.gained_focus() {
+                editor.undo_requested = true;
+            }
+            if r.changed() {
+                changed = true;
+            }
             ui.label("Emissive");
             if ui.color_edit_button_rgb(&mut m.emissive).changed() {
-                changed = true; editor.undo_requested = true;
+                changed = true;
+                editor.undo_requested = true;
             }
             ui.separator();
             ui.label(egui::RichText::new("Textures").strong());
-            if texture_picker(ui, "mat_base_tex", "Base color:",
-                &mut m.base_color_texture, assets.texture_list) {
-                changed = true; editor.undo_requested = true;
+            if texture_picker(ui, "mat_base_tex", "Base color:", &mut m.base_color_texture, assets.texture_list) {
+                changed = true;
+                editor.undo_requested = true;
             }
-            if texture_picker(ui, "mat_normal_tex", "Normal map:",
-                &mut m.normal_texture, assets.texture_list) {
-                changed = true; editor.undo_requested = true;
+            if texture_picker(ui, "mat_normal_tex", "Normal map:", &mut m.normal_texture, assets.texture_list) {
+                changed = true;
+                editor.undo_requested = true;
             }
             if changed {
                 editor.dirty_materials.push((e, name.to_string(), m));
@@ -1158,50 +1113,67 @@ fn inspector_tint(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("Tint").default_open(true)
+    egui::CollapsingHeader::new("Tint")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(t) = world.get_mut::<Tint>(e) else { return; };
+            let Some(t) = world.get_mut::<Tint>(e) else {
+                return;
+            };
             let mut color = t.0;
             ui.horizontal(|ui| {
                 ui.label("Color:");
                 if ui.color_edit_button_rgba_unmultiplied(&mut color).changed() {
-                    t.0 = color; editor.undo_requested = true;
+                    t.0 = color;
+                    editor.undo_requested = true;
                 }
                 if ui.small_button("White").clicked() {
-                    t.0 = [1.0, 1.0, 1.0, 1.0]; editor.undo_requested = true;
+                    t.0 = [1.0, 1.0, 1.0, 1.0];
+                    editor.undo_requested = true;
                 }
             });
         });
 }
 
 fn inspector_health(ui: &mut egui::Ui, world: &mut World, e: Entity) {
-    egui::CollapsingHeader::new("Health").default_open(true)
+    egui::CollapsingHeader::new("Health")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(h) = world.get_mut::<Health>(e) else { return; };
+            let Some(h) = world.get_mut::<Health>(e) else {
+                return;
+            };
             ui.add(egui::Slider::new(&mut h.max, 1.0..=1000.0).text("Max"));
             ui.add(egui::Slider::new(&mut h.current, 0.0..=h.max).text("Current"));
         });
 }
 
 fn inspector_chase(ui: &mut egui::Ui, world: &mut World, e: Entity) {
-    egui::CollapsingHeader::new("Chase").default_open(true)
+    egui::CollapsingHeader::new("Chase")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(c) = world.get_mut::<Chase>(e) else { return; };
+            let Some(c) = world.get_mut::<Chase>(e) else {
+                return;
+            };
             ui.add(egui::Slider::new(&mut c.speed, 0.1..=20.0).text("Speed"));
             ui.add(egui::Slider::new(&mut c.stop_distance, 0.1..=10.0).text("Stop dist"));
         });
 }
 
 fn inspector_spinner(ui: &mut egui::Ui, world: &mut World, e: Entity) {
-    egui::CollapsingHeader::new("Spinner").default_open(true)
+    egui::CollapsingHeader::new("Spinner")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(sp) = world.get_mut::<Spinner>(e) else { return; };
+            let Some(sp) = world.get_mut::<Spinner>(e) else {
+                return;
+            };
             let mut axis = sp.axis.to_array();
             ui.label("Axis");
             ui.horizontal(|ui| {
                 for i in 0..3 {
-                    ui.add(egui::DragValue::new(&mut axis[i]).speed(0.01)
-                        .prefix(["X ", "Y ", "Z "][i]));
+                    ui.add(
+                        egui::DragValue::new(&mut axis[i])
+                            .speed(0.01)
+                            .prefix(["X ", "Y ", "Z "][i]),
+                    );
                 }
             });
             sp.axis = Vec3::from_array(axis);
@@ -1210,14 +1182,20 @@ fn inspector_spinner(ui: &mut egui::Ui, world: &mut World, e: Entity) {
 }
 
 fn inspector_velocity(ui: &mut egui::Ui, world: &mut World, e: Entity) {
-    egui::CollapsingHeader::new("Velocity").default_open(true)
+    egui::CollapsingHeader::new("Velocity")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(v) = world.get_mut::<Velocity>(e) else { return; };
+            let Some(v) = world.get_mut::<Velocity>(e) else {
+                return;
+            };
             let mut val = v.value.to_array();
             ui.horizontal(|ui| {
                 for i in 0..3 {
-                    ui.add(egui::DragValue::new(&mut val[i]).speed(0.01)
-                        .prefix(["X ", "Y ", "Z "][i]));
+                    ui.add(
+                        egui::DragValue::new(&mut val[i])
+                            .speed(0.01)
+                            .prefix(["X ", "Y ", "Z "][i]),
+                    );
                 }
             });
             v.value = Vec3::from_array(val);
@@ -1230,16 +1208,23 @@ fn inspector_rigidbody(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("RigidBody").default_open(true)
+    egui::CollapsingHeader::new("RigidBody")
+        .default_open(true)
         .show(ui, |ui| {
             let has_parent = world.has::<Parent>(e);
             if has_parent
                 && let Some(rb) = world.get::<RigidBody>(e)
-                    && rb.body_type != BodyType::Static {
-                        ui.label(egui::RichText::new("⚠ Physics disabled: has Parent")
-                            .strong().color(egui::Color32::from_rgb(240, 130, 130)));
-                    }
-            let Some(rb) = world.get_mut::<RigidBody>(e) else { return; };
+                && rb.body_type != BodyType::Static
+            {
+                ui.label(
+                    egui::RichText::new("⚠ Physics disabled: has Parent")
+                        .strong()
+                        .color(egui::Color32::from_rgb(240, 130, 130)),
+                );
+            }
+            let Some(rb) = world.get_mut::<RigidBody>(e) else {
+                return;
+            };
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Type:");
@@ -1247,9 +1232,14 @@ fn inspector_rigidbody(
                 ui.selectable_value(&mut bt, BodyType::Static, "Static");
                 ui.selectable_value(&mut bt, BodyType::Dynamic, "Dynamic");
                 ui.selectable_value(&mut bt, BodyType::Kinematic, "Kinematic");
-                if bt != rb.body_type { rb.body_type = bt; changed = true; }
+                if bt != rb.body_type {
+                    rb.body_type = bt;
+                    changed = true;
+                }
             });
-            if changed { editor.undo_requested = true; }
+            if changed {
+                editor.undo_requested = true;
+            }
         });
 }
 
@@ -1259,7 +1249,8 @@ fn inspector_collider(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("Collider").default_open(true)
+    egui::CollapsingHeader::new("Collider")
+        .default_open(true)
         .show(ui, |ui| {
             let current_kind = match world.get::<Collider>(e) {
                 Some(Collider::Sphere { .. }) => 0,
@@ -1286,7 +1277,9 @@ fn inspector_collider(
                 editor.undo_requested = true;
                 return;
             }
-            let Some(col) = world.get_mut::<Collider>(e) else { return; };
+            let Some(col) = world.get_mut::<Collider>(e) else {
+                return;
+            };
             match col {
                 Collider::Sphere { radius } => {
                     ui.add(egui::Slider::new(radius, 0.05..=20.0).text("Radius"));
@@ -1296,8 +1289,11 @@ fn inspector_collider(
                     ui.label("Half extents");
                     ui.horizontal(|ui| {
                         for i in 0..3 {
-                            ui.add(egui::DragValue::new(&mut h[i]).speed(0.01)
-                                .prefix(["X ", "Y ", "Z "][i]));
+                            ui.add(
+                                egui::DragValue::new(&mut h[i])
+                                    .speed(0.01)
+                                    .prefix(["X ", "Y ", "Z "][i]),
+                            );
                         }
                     });
                     *half_extents = Vec3::from_array(h);
@@ -1316,7 +1312,8 @@ fn inspector_physics_material(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("PhysicsMaterial").default_open(false)
+    egui::CollapsingHeader::new("PhysicsMaterial")
+        .default_open(false)
         .show(ui, |ui| {
             ui.label("Presets:");
             ui.horizontal_wrapped(|ui| {
@@ -1328,13 +1325,17 @@ fn inspector_physics_material(
                     ("Concrete", PhysicsMaterial::concrete()),
                 ] {
                     if ui.small_button(label).clicked()
-                        && let Some(m) = world.get_mut::<PhysicsMaterial>(e) {
-                            *m = preset; editor.undo_requested = true;
-                        }
+                        && let Some(m) = world.get_mut::<PhysicsMaterial>(e)
+                    {
+                        *m = preset;
+                        editor.undo_requested = true;
+                    }
                 }
             });
             ui.separator();
-            let Some(m) = world.get_mut::<PhysicsMaterial>(e) else { return; };
+            let Some(m) = world.get_mut::<PhysicsMaterial>(e) else {
+                return;
+            };
             ui.add(egui::Slider::new(&mut m.restitution, 0.0..=1.0).text("Restitution"));
             ui.add(egui::Slider::new(&mut m.friction, 0.0..=2.0).text("Friction"));
         });
@@ -1346,15 +1347,20 @@ fn inspector_directional_light(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("☀ Directional Light").default_open(true)
+    egui::CollapsingHeader::new("☀ Directional Light")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(light) = world.get_mut::<DirectionalLight>(e) else { return; };
+            let Some(light) = world.get_mut::<DirectionalLight>(e) else {
+                return;
+            };
             ui.horizontal_wrapped(|ui| {
                 if ui.small_button("Sun").clicked() {
-                    *light = DirectionalLight::sun(); editor.undo_requested = true;
+                    *light = DirectionalLight::sun();
+                    editor.undo_requested = true;
                 }
                 if ui.small_button("Fill").clicked() {
-                    *light = DirectionalLight::fill(); editor.undo_requested = true;
+                    *light = DirectionalLight::fill();
+                    editor.undo_requested = true;
                 }
             });
             ui.horizontal(|ui| {
@@ -1363,8 +1369,14 @@ fn inspector_directional_light(
                     editor.undo_requested = true;
                 }
             });
-            let r = ui.add(egui::Slider::new(&mut light.intensity, 0.0..=5.0).logarithmic(true).text("Intensity"));
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
+            let r = ui.add(
+                egui::Slider::new(&mut light.intensity, 0.0..=5.0)
+                    .logarithmic(true)
+                    .text("Intensity"),
+            );
+            if r.drag_started() || r.gained_focus() {
+                editor.undo_requested = true;
+            }
         });
 }
 
@@ -1374,19 +1386,34 @@ fn inspector_point_light(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("💡 Point Light").default_open(true)
+    egui::CollapsingHeader::new("💡 Point Light")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(light) = world.get_mut::<PointLight>(e) else { return; };
+            let Some(light) = world.get_mut::<PointLight>(e) else {
+                return;
+            };
             ui.horizontal(|ui| {
                 ui.label("Color:");
                 if ui.color_edit_button_rgb(&mut light.color).changed() {
                     editor.undo_requested = true;
                 }
             });
-            let r = ui.add(egui::Slider::new(&mut light.intensity, 0.0..=20.0).logarithmic(true).text("Intensity"));
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
-            let r = ui.add(egui::Slider::new(&mut light.range, 0.5..=100.0).logarithmic(true).text("Range (m)"));
-            if r.drag_started() || r.gained_focus() { editor.undo_requested = true; }
+            let r = ui.add(
+                egui::Slider::new(&mut light.intensity, 0.0..=20.0)
+                    .logarithmic(true)
+                    .text("Intensity"),
+            );
+            if r.drag_started() || r.gained_focus() {
+                editor.undo_requested = true;
+            }
+            let r = ui.add(
+                egui::Slider::new(&mut light.range, 0.5..=100.0)
+                    .logarithmic(true)
+                    .text("Range (m)"),
+            );
+            if r.drag_started() || r.gained_focus() {
+                editor.undo_requested = true;
+            }
         });
 }
 
@@ -1396,13 +1423,19 @@ fn inspector_decal(
     e: Entity,
     editor: &mut EditorState,
 ) {
-    egui::CollapsingHeader::new("🎨 Decal").default_open(true)
+    egui::CollapsingHeader::new("🎨 Decal")
+        .default_open(true)
         .show(ui, |ui| {
-            let Some(dec) = world.get_mut::<crate::game::decals::Decal>(e) else { return; };
+            let Some(dec) = world.get_mut::<crate::game::decals::Decal>(e) else {
+                return;
+            };
             ui.horizontal(|ui| {
                 ui.label("Texture:");
-                ui.add(egui::TextEdit::singleline(&mut dec.texture)
-                    .desired_width(140.0).hint_text("blood"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut dec.texture)
+                        .desired_width(140.0)
+                        .hint_text("blood"),
+                );
             });
             ui.label("Tint (RGB + Alpha)");
             if ui.color_edit_button_rgba_unmultiplied(&mut dec.tint).changed() {
@@ -1412,13 +1445,15 @@ fn inspector_decal(
 }
 
 // ============================================================
-// Helpers
+// Helpers (cycle check, texture picker, add/remove components)
 // ============================================================
 
 fn would_create_cycle(world: &World, child: Entity, new_parent: Entity) -> bool {
     let mut cur = new_parent;
     for _ in 0..64 {
-        if cur == child { return true; }
+        if cur == child {
+            return true;
+        }
         match world.get::<Parent>(cur) {
             Some(&Parent(p)) => cur = p,
             None => return false,
@@ -1443,7 +1478,8 @@ fn texture_picker(
             .width(170.0)
             .show_ui(ui, |ui| {
                 if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None; changed = true;
+                    *current = None;
+                    changed = true;
                 }
                 for (name, _w, _h, _srgb) in textures {
                     let selected = current.as_deref() == Some(name.as_str());
@@ -1460,34 +1496,90 @@ fn texture_picker(
 fn remove_component(world: &mut World, e: Entity, kind: ComponentKind) {
     use crate::game::components::*;
     match kind {
-        ComponentKind::Transform => { world.remove::<Transform>(e); }
-        ComponentKind::Mesh => { world.remove::<MeshHandle>(e); }
-        ComponentKind::Material => { world.remove::<MaterialHandle>(e); }
-        ComponentKind::Skeleton => { world.remove::<SkeletonHandle>(e); }
-        ComponentKind::Animation => { world.remove::<AnimationPlayer>(e); }
-        ComponentKind::Spinner => { world.remove::<Spinner>(e); }
-        ComponentKind::Velocity => { world.remove::<Velocity>(e); }
-        ComponentKind::Health => { world.remove::<Health>(e); }
-        ComponentKind::Chase => { world.remove::<Chase>(e); }
-        ComponentKind::Interactable => { world.remove::<Interactable>(e); }
-        ComponentKind::Trigger => { world.remove::<Trigger>(e); }
-        ComponentKind::Parent => { world.remove::<Parent>(e); }
-        ComponentKind::Tint => { world.remove::<Tint>(e); }
-        ComponentKind::Visible => { world.remove::<Visible>(e); }
-        ComponentKind::TextureTiling => { world.remove::<TextureTiling>(e); }
-        ComponentKind::Elevator => { world.remove::<Elevator>(e); }
-        ComponentKind::SlidingDoor => { world.remove::<SlidingDoor>(e); }
-        ComponentKind::RigidBody => { world.remove::<RigidBody>(e); }
-        ComponentKind::Collider => { world.remove::<Collider>(e); }
-        ComponentKind::PhysicsMaterial => { world.remove::<PhysicsMaterial>(e); }
-        ComponentKind::DirectionalLight => { world.remove::<DirectionalLight>(e); }
-        ComponentKind::PointLight => { world.remove::<PointLight>(e); }
-        ComponentKind::Decal => { world.remove::<crate::game::decals::Decal>(e); }
-        ComponentKind::AudioSource => { world.remove::<AudioSource>(e); }
-        ComponentKind::AiAgent => { world.remove::<crate::game::ai::AiAgent>(e); }
-        ComponentKind::PatrolPath => { world.remove::<crate::game::ai::PatrolPath>(e); }
-        ComponentKind::Enemy => { world.remove::<crate::game::ai::Enemy>(e); }
-        ComponentKind::AiTarget => { world.remove::<crate::game::ai::AiTarget>(e); }
+        ComponentKind::Transform => {
+            world.remove::<Transform>(e);
+        }
+        ComponentKind::Mesh => {
+            world.remove::<MeshHandle>(e);
+        }
+        ComponentKind::Material => {
+            world.remove::<MaterialHandle>(e);
+        }
+        ComponentKind::Skeleton => {
+            world.remove::<SkeletonHandle>(e);
+        }
+        ComponentKind::Animation => {
+            world.remove::<AnimationPlayer>(e);
+        }
+        ComponentKind::Spinner => {
+            world.remove::<Spinner>(e);
+        }
+        ComponentKind::Velocity => {
+            world.remove::<Velocity>(e);
+        }
+        ComponentKind::Health => {
+            world.remove::<Health>(e);
+        }
+        ComponentKind::Chase => {
+            world.remove::<Chase>(e);
+        }
+        ComponentKind::Interactable => {
+            world.remove::<Interactable>(e);
+        }
+        ComponentKind::Trigger => {
+            world.remove::<Trigger>(e);
+        }
+        ComponentKind::Parent => {
+            world.remove::<Parent>(e);
+        }
+        ComponentKind::Tint => {
+            world.remove::<Tint>(e);
+        }
+        ComponentKind::Visible => {
+            world.remove::<Visible>(e);
+        }
+        ComponentKind::TextureTiling => {
+            world.remove::<TextureTiling>(e);
+        }
+        ComponentKind::Elevator => {
+            world.remove::<Elevator>(e);
+        }
+        ComponentKind::SlidingDoor => {
+            world.remove::<SlidingDoor>(e);
+        }
+        ComponentKind::RigidBody => {
+            world.remove::<RigidBody>(e);
+        }
+        ComponentKind::Collider => {
+            world.remove::<Collider>(e);
+        }
+        ComponentKind::PhysicsMaterial => {
+            world.remove::<PhysicsMaterial>(e);
+        }
+        ComponentKind::DirectionalLight => {
+            world.remove::<DirectionalLight>(e);
+        }
+        ComponentKind::PointLight => {
+            world.remove::<PointLight>(e);
+        }
+        ComponentKind::Decal => {
+            world.remove::<crate::game::decals::Decal>(e);
+        }
+        ComponentKind::AudioSource => {
+            world.remove::<AudioSource>(e);
+        }
+        ComponentKind::AiAgent => {
+            world.remove::<crate::game::ai::AiAgent>(e);
+        }
+        ComponentKind::PatrolPath => {
+            world.remove::<crate::game::ai::PatrolPath>(e);
+        }
+        ComponentKind::Enemy => {
+            world.remove::<crate::game::ai::Enemy>(e);
+        }
+        ComponentKind::AiTarget => {
+            world.remove::<crate::game::ai::AiTarget>(e);
+        }
     }
 }
 
@@ -1552,10 +1644,18 @@ fn add_component_menu(
         any = true;
         ui.menu_button("🔊 Audio Source", |ui| {
             let presets = [
-                ("pickup (SFX)", AudioSource::new("pickup")
-                    .with_bus(crate::game::audio::AudioBus::Sfx).with_range(1.0, 20.0)),
-                ("shot (SFX)", AudioSource::new("shot")
-                    .with_bus(crate::game::audio::AudioBus::Sfx).with_range(1.0, 30.0)),
+                (
+                    "pickup (SFX)",
+                    AudioSource::new("pickup")
+                        .with_bus(crate::game::audio::AudioBus::Sfx)
+                        .with_range(1.0, 20.0),
+                ),
+                (
+                    "shot (SFX)",
+                    AudioSource::new("shot")
+                        .with_bus(crate::game::audio::AudioBus::Sfx)
+                        .with_range(1.0, 30.0),
+                ),
             ];
             for (label, src) in presets {
                 if ui.button(label).clicked() {
@@ -1570,15 +1670,27 @@ fn add_component_menu(
         any = true;
         ui.menu_button("🤖 AI Agent", |ui| {
             let presets: [(&str, crate::game::ai::AiAgent); 4] = [
-                ("Melee (fast)", crate::game::ai::AiAgent::new()
-                    .with_speed(4.0).with_vision(18.0, 60_f32.to_radians())
-                    .with_attack(1.5, 10.0, 0.8)),
-                ("Brute (slow)", crate::game::ai::AiAgent::new()
-                    .with_speed(2.0).with_vision(12.0, 45_f32.to_radians())
-                    .with_attack(2.0, 25.0, 1.5)),
-                ("Sniper (range)", crate::game::ai::AiAgent::new()
-                    .with_speed(3.0).with_vision(30.0, 30_f32.to_radians())
-                    .with_attack(8.0, 15.0, 2.0)),
+                (
+                    "Melee (fast)",
+                    crate::game::ai::AiAgent::new()
+                        .with_speed(4.0)
+                        .with_vision(18.0, 60_f32.to_radians())
+                        .with_attack(1.5, 10.0, 0.8),
+                ),
+                (
+                    "Brute (slow)",
+                    crate::game::ai::AiAgent::new()
+                        .with_speed(2.0)
+                        .with_vision(12.0, 45_f32.to_radians())
+                        .with_attack(2.0, 25.0, 1.5),
+                ),
+                (
+                    "Sniper (range)",
+                    crate::game::ai::AiAgent::new()
+                        .with_speed(3.0)
+                        .with_vision(30.0, 30_f32.to_radians())
+                        .with_attack(8.0, 15.0, 2.0),
+                ),
                 ("Default", crate::game::ai::AiAgent::new()),
             ];
             for (label, agent) in presets {
@@ -1707,7 +1819,6 @@ fn add_component_menu(
         }
     }
     if !any {
-        ui.label(egui::RichText::new("All components already present")
-            .weak().italics());
+        ui.label(egui::RichText::new("All components already present").weak().italics());
     }
 }

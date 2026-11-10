@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod bookmarks;
 pub mod command_palette;
+pub mod console;
 pub mod content;
 pub mod details;
 pub mod inspector_audio;
@@ -68,10 +69,6 @@ pub struct AudioSnapshot {
     pub selected_source_entity: Option<crate::ecs::Entity>,
 }
 
-// FIX (P2.2): удалена неиспользуемая структура `PanelContext`.
-// Она была объявлена, но нигде не использовалась — попытка упаковать
-// аргументы `draw_all`, которая не удалась.
-
 #[allow(clippy::too_many_arguments)]
 pub fn draw_all(
     ui: &mut egui::Ui,
@@ -86,6 +83,53 @@ pub fn draw_all(
 ) -> (Option<EditorAction>, egui::Rect) {
     let mut action: Option<EditorAction> = None;
 
+    // 1. Верхнее меню (File, Edit, Assets, GameObject -> Generate World...)
+    top_bar::draw_menu(ui, state, &mut action);
+
+    // 2. Тулбар (Play/Pause, инструменты, статус)
+    top_bar::draw_toolbar(ui, state, stats, &mut action);
+
+    // 3. Нижняя панель (Project / Assets + Console)
+    let bottom_height = 260.0;
+    egui::Panel::bottom("bottom_panel")
+        .resizable(true)
+        .default_size(bottom_height)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let half_width = ui.available_width() * 0.6;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(half_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        content::draw_project_panel(ui, state, asset_db);
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        console::draw(ui, state);
+                    },
+                );
+            });
+        });
+
+    // 4. Левая панель (Hierarchy + Stats)
+    left_panel::draw(ui, state, world, assets, stats, &mut action);
+
+    // 5. Правая панель (Inspector + Renderer)
+    right_panel::draw(ui, state, world, assets, postfx, &mut action);
+
+    // 6. Центральная панель (Viewport)
+    let central = egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            viewport_toolbar::draw(ui, state);
+        });
+    let viewport_rect = central.response.rect;
+
+    // --- Оверлеи и модальные окна ---
     overlays::draw_box_select_overlay(ui.ctx(), state);
     overlays::draw_context_menu(ui.ctx(), state, world, &mut action);
 
@@ -93,33 +137,7 @@ pub fn draw_all(
         command_palette::draw(ui.ctx(), state, &mut action);
     }
 
-    // FIX #11: панели — напрямую на `ui`, без `egui::Area`.
-    // В egui 0.34+ `Panel::show` принимает `&mut Ui`, а не `&Context`.
-    top_bar::draw(ui, state, stats, &mut action);
-
     if !state.play.active {
-        if state.layout.show_palette_bar {
-            palette::draw(ui, state);
-        }
-        if state.layout.show_terrain_bar {
-            terrain::draw(ui, state, &mut action);
-        }
-    }
-
-    if !state.play.active {
-        left_panel::draw(ui, state, world, assets, stats, &mut action);
-        right_panel::draw(ui, state, world, assets, postfx, &mut action);
-    }
-
-    let central = egui::containers::panel::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show(ui, |_ui| {});
-    let viewport_rect = central.response.rect;
-
-    if !state.play.active {
-        // FIX (P3.1): передаём viewport_rect, чтобы тулбар был в углу
-        // viewport'а, а не всего экрана.
-        viewport_toolbar::draw(ui.ctx(), viewport_rect, state);
         bookmarks::draw(ui.ctx(), state, &mut action);
         audio::draw(ui.ctx(), state, audio, &mut action);
     }
@@ -156,13 +174,19 @@ pub fn draw_all(
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(egui::Color32::from_rgba_unmultiplied(
-                        20, 20, 30, (220.0 * alpha) as u8,
+                        20,
+                        20,
+                        30,
+                        (220.0 * alpha) as u8,
                     ))
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new(text).color(
                             egui::Color32::from_rgba_unmultiplied(
-                                255, 230, 180, (255.0 * alpha) as u8,
+                                255,
+                                230,
+                                180,
+                                (255.0 * alpha) as u8,
                             ),
                         ));
                     });

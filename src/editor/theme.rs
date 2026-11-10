@@ -35,10 +35,16 @@ impl Theme {
         let mut visuals = match self {
             Self::Dark => {
                 let mut v = egui::Visuals::dark();
-                v.panel_fill = egui::Color32::from_rgb(30, 32, 38);
-                v.window_fill = egui::Color32::from_rgb(36, 38, 45);
-                v.extreme_bg_color = egui::Color32::from_rgb(22, 24, 28);
-                v.selection.bg_fill = egui::Color32::from_rgb(60, 100, 170);
+                // Фон панелей (как в Unity)
+                v.panel_fill = egui::Color32::from_rgb(40, 40, 40);
+                v.window_fill = egui::Color32::from_rgb(45, 45, 45);
+                v.extreme_bg_color = egui::Color32::from_rgb(28, 28, 28);
+                v.faint_bg_color = egui::Color32::from_rgb(50, 50, 50);
+                v.selection.bg_fill = egui::Color32::from_rgb(43, 93, 163);
+                v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(40, 40, 40);
+                v.widgets.inactive.bg_fill = egui::Color32::from_rgb(50, 50, 50);
+                v.widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 60, 60);
+                v.widgets.active.bg_fill = egui::Color32::from_rgb(70, 70, 70);
                 v
             }
             Self::Light => {
@@ -65,12 +71,12 @@ impl Theme {
             }
         };
 
-        visuals.window_corner_radius = egui::CornerRadius::same(6);
-        visuals.menu_corner_radius = egui::CornerRadius::same(4);
-        visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(3);
-        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(3);
-        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(3);
-        visuals.widgets.active.corner_radius = egui::CornerRadius::same(3);
+        visuals.window_corner_radius = egui::CornerRadius::same(0);
+        visuals.menu_corner_radius = egui::CornerRadius::same(0);
+        visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(2);
+        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(2);
+        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(2);
+        visuals.widgets.active.corner_radius = egui::CornerRadius::same(2);
 
         ctx.set_visuals(visuals);
     }

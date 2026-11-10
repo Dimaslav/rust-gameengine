@@ -1,26 +1,12 @@
 (
     id: "en",
     entries: {
-        // Settings
-        "settings.title": "SETTINGS",
-        "settings.window": "Window",
-        "settings.graphics": "Graphics",
-        "settings.audio": "Audio",
-        "settings.language": "Language",
-        "settings.language.ru": "Русский",
-        "settings.language.en": "English",
-        "settings.apply": "Apply",
-        "settings.back": "Back",
-        "settings.vsync": "V-Sync",
-        "settings.fullscreen": "Fullscreen",
-        "settings.resolution": "Resolution",
-        "settings.master": "Master",
-        "settings.sfx": "SFX",
-        "settings.music": "Music",
-        "settings.voice": "Voice",
-        "settings.ui": "UI",
-        // Dialog
-        "dialog.no_options": "No options available",
-        "dialog.close_hint": "Esc — close  ·  1-9 — pick option",
+        "menu.title": "RUST ENGINE 3D",
+        "menu.new_game": "New Game",
+        "menu.continue": "Continue",
+        "menu.settings": "Settings",
+        "menu.quit": "Quit",
+        "hud.health": "HP",
+        "hud.ammo": "AMMO",
     },
 )

@@ -7,6 +7,7 @@ pub mod crash;
 pub mod input;
 pub mod input_actions;
 pub mod input_keys;
+pub mod logger; // <-- НОВЫЙ МОДУЛЬ
 pub mod particles;
 pub mod spatial_hash;
 pub mod time;

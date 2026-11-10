@@ -14,6 +14,7 @@ pub mod stats;
 pub mod timers;
 pub mod vendors;
 pub mod weapons;
+pub mod world_gen; // <-- НОВЫЙ МОДУЛЬ
 
 pub use ai::{
     AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath,
@@ -47,6 +48,7 @@ pub use vendors::{
 pub use weapons::{
     apply_spread, Weapon, WeaponKind, WeaponRegistry, WeaponRuntime,
 };
+pub use world_gen::{Biome, WorldGen, WorldGenConfig, WorldGenResult}; // <-- ЭКСПОРТ
 
 use glam::Mat4;
 

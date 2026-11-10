@@ -1,242 +1,216 @@
-//! Верхняя полоса редактора.
-
 use crate::editor::gizmo::GizmoMode;
 use crate::editor::panels::Stats;
 use crate::editor::{EditorAction, EditorState};
+use crate::game::world_gen::Biome;
+use egui::containers::menu::MenuBar;
 
-pub fn draw(
+fn random_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(42)
+        ^ (std::process::id() as u64)
+}
+
+fn random_biome(seed: u64) -> Biome {
+    let idx = (seed % 3) as usize;
+    Biome::ALL[idx]
+}
+
+pub fn draw_menu(ui: &mut egui::Ui, state: &mut EditorState, action: &mut Option<EditorAction>) {
+    egui::Panel::top("menu_bar").show(ui, |ui| {
+        MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New Scene").clicked() {
+                    *action = Some(EditorAction::NewScene);
+                    ui.close();
+                }
+                if ui.button("Open...").clicked() {
+                    *action = Some(EditorAction::Load);
+                    ui.close();
+                }
+                if ui.button("Save").clicked() {
+                    *action = Some(EditorAction::Save);
+                    ui.close();
+                }
+                if ui.button("Save As...").clicked() {
+                    *action = Some(EditorAction::QuickSave);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Exit").clicked() {
+                    std::process::exit(0);
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Undo").clicked() {
+                    *action = Some(EditorAction::Undo);
+                    ui.close();
+                }
+                if ui.button("Redo").clicked() {
+                    *action = Some(EditorAction::Redo);
+                    ui.close();
+                }
+            });
+            ui.menu_button("Assets", |ui| {
+                if ui.button("Refresh Prefabs").clicked() {
+                    *action = Some(EditorAction::RefreshPrefabs);
+                    ui.close();
+                }
+                if ui.button("Import FBX...").clicked() {
+                    *action = Some(EditorAction::ImportFbx);
+                    ui.close();
+                }
+                if ui.button("Export FBX (All)").clicked() {
+                    *action = Some(EditorAction::ExportFbxAll);
+                    ui.close();
+                }
+            });
+            ui.menu_button("GameObject", |ui| {
+                if ui.button("Create Empty").clicked() {
+                    ui.close();
+                }
+                if ui.button("3D Object / Cube").clicked() {
+                    *action = Some(EditorAction::AddCube);
+                    ui.close();
+                }
+                if ui.button("3D Object / Sphere").clicked() {
+                    *action = Some(EditorAction::AddSphere);
+                    ui.close();
+                }
+                ui.separator();
+                
+                // Полностью случайный мир (Биом + Seed)
+                if ui.button("🎲 Random World").on_hover_text("Generate a completely random world (any biome)").clicked() {
+                    let new_seed = random_seed();
+                    let biome = random_biome(new_seed);
+                    state.last_gen_config.seed = new_seed;
+                    
+                    log::info!("Requesting RANDOM world: {:?} seed={}", biome, new_seed);
+                    
+                    *action = Some(EditorAction::GenerateWorld {
+                        biome,
+                        seed: new_seed,
+                    });
+                    ui.close();
+                }
+                
+                ui.separator();
+                ui.menu_button("Generate Specific Biome", |ui| {
+                    for biome in Biome::ALL {
+                        if ui
+                            .button(biome.label())
+                            .on_hover_text(format!("{} (Random Seed)", biome.description()))
+                            .clicked()
+                        {
+                            let new_seed = random_seed();
+                            state.last_gen_config.seed = new_seed;
+                            
+                            log::info!("Requesting world: {:?} seed={}", biome, new_seed);
+                            
+                            *action = Some(EditorAction::GenerateWorld {
+                                biome: *biome,
+                                seed: new_seed,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            ui.menu_button("Component", |ui| {
+                ui.label("(Use Inspector '+' button)");
+            });
+            ui.menu_button("Window", |ui| {
+                ui.checkbox(&mut state.layout.show_inspector_panel, "Inspector");
+                ui.checkbox(&mut state.layout.show_stats_panel, "Stats");
+                ui.checkbox(&mut state.layout.show_content_browser, "Content Browser");
+                ui.checkbox(&mut state.layout.show_script_panel, "Scripts");
+                ui.checkbox(&mut state.layout.show_audio_panel, "Audio");
+            });
+            ui.menu_button("Help", |ui| {
+                ui.label("Rust Engine 3D v0.3.0");
+            });
+        });
+    });
+}
+
+pub fn draw_toolbar(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     stats: &Stats,
     action: &mut Option<EditorAction>,
 ) {
-    egui::containers::panel::Panel::top("top_bar").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            crate::editor::panels::workspace_tabs::draw_inline(ui, state);
-            if ui
-                .button("⌘")
-                .on_hover_text("Command palette (Ctrl+P)")
-                .clicked()
-            {
-                state.command_palette_open = true;
-                state.command_palette_query.clear();
-                state.command_palette_selected = 0;
-            }
-            if ui
-                .button("⚙")
-                .on_hover_text("Settings (theme, …)")
-                .clicked()
-            {
-                state.settings_open = true;
-            }
-
-            ui.separator();
-            if ui
-                .add_enabled(state.undo.can_undo(), egui::Button::new("↶ Undo"))
-                .on_hover_text("Ctrl+Z")
-                .clicked()
-            {
-                *action = Some(EditorAction::Undo);
-            }
-            if ui
-                .add_enabled(state.undo.can_redo(), egui::Button::new("↷ Redo"))
-                .on_hover_text("Ctrl+Y")
-                .clicked()
-            {
-                *action = Some(EditorAction::Redo);
-            }
-            ui.separator();
-
-            if state.play.active {
-                if state.play.paused {
-                    if ui.button("▶ Resume").on_hover_text("Esc").clicked() {
-                        *action = Some(EditorAction::TogglePlay);
-                    }
-                    if ui.button("■ Stop").on_hover_text("F10").clicked() {
-                        *action = Some(EditorAction::TogglePlay);
-                    }
-                } else {
-                    // FIX (P0.1): кнопка Pause теперь работает.
-                    if ui.button("⏸ Pause (Esc)").clicked() {
-                        *action = Some(EditorAction::PausePlay);
-                    }
-                    if ui.button("■ Stop").on_hover_text("F10").clicked() {
-                        *action = Some(EditorAction::TogglePlay);
-                    }
-                }
-            } else if ui
-                .button("▶ Play")
-                .on_hover_text("Run game (F10)")
-                .clicked()
-            {
-                *action = Some(EditorAction::TogglePlay);
-            }
-            ui.separator();
-
-            if !state.play.active {
-                let m = &mut state.gizmo.mode;
+    egui::Panel::top("toolbar")
+        .frame(
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(35, 35, 35))
+                .inner_margin(egui::Margin::symmetric(4, 4)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(*m == GizmoMode::Translate, "T")
-                    .on_hover_text("Translate (1)")
+                    .selectable_label(state.gizmo.mode == GizmoMode::Translate, "✥")
                     .clicked()
                 {
-                    *m = GizmoMode::Translate;
+                    state.gizmo.mode = GizmoMode::Translate;
                 }
                 if ui
-                    .selectable_label(*m == GizmoMode::Rotate, "R")
-                    .on_hover_text("Rotate (2)")
+                    .selectable_label(state.gizmo.mode == GizmoMode::Rotate, "⟳")
                     .clicked()
                 {
-                    *m = GizmoMode::Rotate;
+                    state.gizmo.mode = GizmoMode::Rotate;
                 }
                 if ui
-                    .selectable_label(*m == GizmoMode::Scale, "S")
-                    .on_hover_text("Scale (3)")
+                    .selectable_label(state.gizmo.mode == GizmoMode::Scale, "⤡")
                     .clicked()
                 {
-                    *m = GizmoMode::Scale;
+                    state.gizmo.mode = GizmoMode::Scale;
                 }
-                ui.toggle_value(&mut state.gizmo.snap_enabled, "Snap")
-                    .on_hover_text("Snap без Ctrl (0.5 м / 15°)");
+
                 ui.separator();
-            }
+                if ui.button("Save").clicked() {
+                    *action = Some(EditorAction::Save);
+                }
 
-            if ui
-                .add_enabled(
-                    !state.selected.is_empty(),
-                    egui::Button::new("Copy (Ctrl+C)"),
-                )
-                .clicked()
-            {
-                *action = Some(EditorAction::CopyEntity);
-            }
-            if ui
-                .add_enabled(
-                    !state.clipboard_entities.is_empty(),
-                    egui::Button::new("Paste (Ctrl+V)"),
-                )
-                .clicked()
-            {
-                *action = Some(EditorAction::PasteEntity);
-            }
-            ui.separator();
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                    |ui| {
+                        let avail = ui.available_width();
+                        ui.add_space(avail / 2.0 - 50.0);
 
-            if ui.button("New").on_hover_text("New empty scene").clicked() {
-                *action = Some(EditorAction::NewScene);
-            }
-            if ui.button("Save").clicked() {
-                *action = Some(EditorAction::Save);
-            }
-            if ui.button("Load").clicked() {
-                *action = Some(EditorAction::Load);
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut state.save_path)
-                    .desired_width(140.0)
-                    .hint_text("scene.ron"),
-            );
-
-            let recents = state.settings.recent_scenes.clone();
-            ui.menu_button("⏷", |ui| {
-                if recents.is_empty() {
-                    ui.label(egui::RichText::new("no recent scenes").weak().italics());
-                } else {
-                    for p in &recents {
-                        if ui.button(p).clicked() {
-                            *action = Some(EditorAction::LoadPath(p.clone()));
-                            ui.close();
+                        let play_icon = if state.play.active { "⏹" } else { "▶" };
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(play_icon).size(18.0))
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            *action = Some(EditorAction::TogglePlay);
                         }
-                    }
+
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("⏸").size(18.0))
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            *action = Some(EditorAction::PausePlay);
+                        }
+                    },
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("v0.3.0 (dev)");
+                    ui.label(
+                        egui::RichText::new(format!("{:.0} FPS", stats.fps))
+                            .color(egui::Color32::GREEN),
+                    );
+                    ui.label("Vulkan");
                     ui.separator();
-                    if ui.button("Clear list").clicked() {
-                        state.settings.recent_scenes.clear();
-                        ui.close();
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Recent scenes");
-
-            ui.separator();
-            if ui
-                .button("FBX All")
-                .on_hover_text("Экспорт всей сцены в .fbx")
-                .clicked()
-            {
-                *action = Some(EditorAction::ExportFbxAll);
-            }
-            if ui
-                .add_enabled(
-                    !state.selected.is_empty(),
-                    egui::Button::new("FBX Sel"),
-                )
-                .on_hover_text("Экспорт выделения в .fbx")
-                .clicked()
-            {
-                *action = Some(EditorAction::ExportFbxSelected);
-            }
-            if ui
-                .button("FBX Import")
-                .on_hover_text("Импорт ASCII или binary FBX")
-                .clicked()
-            {
-                *action = Some(EditorAction::ImportFbx);
-            }
-            ui.separator();
-            ui.label(format!("FPS: {:.1}", stats.fps));
-            ui.separator();
-            ui.label(format!("Entities: {}", stats.entities));
-
-            if state.play.active {
-                ui.separator();
-                if state.play.paused {
-                    ui.label(
-                        egui::RichText::new("⏸ PAUSED")
-                            .strong()
-                            .color(egui::Color32::from_rgb(230, 200, 130)),
-                    );
-                } else {
-                    ui.label(
-                        egui::RichText::new("● PLAY")
-                            .strong()
-                            .color(egui::Color32::from_rgb(230, 90, 90)),
-                    );
-                }
-            } else if state.flying {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("✦ FLY")
-                        .strong()
-                        .color(egui::Color32::from_rgb(90, 180, 230)),
-                );
-            } else if state.terrain.active {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("🏔 TERRAIN")
-                        .strong()
-                        .color(egui::Color32::from_rgb(220, 160, 90)),
-                );
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let clicked = ui
-                    .toggle_value(&mut state.show_validation_panel, "🔍")
-                    .on_hover_text("Scene Validation")
-                    .clicked();
-                if clicked && state.show_validation_panel {
-                    *action = Some(EditorAction::ValidateScene);
-                }
-                ui.toggle_value(&mut state.layout.show_renderer_panel, "Renderer");
-                ui.toggle_value(&mut state.layout.show_inspector_panel, "Inspector");
-                ui.toggle_value(&mut state.layout.show_hierarchy_panel, "Hierarchy");
-                ui.toggle_value(&mut state.layout.show_stats_panel, "Stats");
-                ui.toggle_value(&mut state.layout.show_bookmarks_panel, "📷");
-                ui.toggle_value(&mut state.layout.show_audio_panel, "🔊");
-                ui.toggle_value(&mut state.layout.show_content_browser, "📁")
-                    .on_hover_text("Content Browser");
-                ui.toggle_value(&mut state.layout.show_script_panel, "📜")
-                    .on_hover_text("Scripts");
+                    ui.label(if state.play.active { "Playing" } else { "Ready" });
+                });
             });
         });
-    });
 }

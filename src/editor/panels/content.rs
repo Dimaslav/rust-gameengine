@@ -409,3 +409,107 @@ pub fn draw_assets_section(
             }
         });
 }
+
+// ============================================================
+// Project Panel (для нижней панели)
+// ============================================================
+
+pub fn draw_project_panel(
+    ui: &mut egui::Ui,
+    _state: &mut EditorState,
+    db: &mut AssetDatabase,
+) {
+    ui.horizontal(|ui| {
+        ui.heading("Project");
+        ui.separator();
+        ui.label("Assets > Models");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Search").clicked() {}
+        });
+    });
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        // Левая колонка: дерево папок
+        ui.allocate_ui_with_layout(
+            egui::vec2(150.0, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label("Favorites");
+                    ui.label("  All Materials");
+                    ui.label("  All Models");
+                    ui.label("  All Prefabs");
+                    ui.separator();
+                    ui.label("Assets");
+                    ui.label("  Animations");
+                    ui.label("  Materials");
+                    ui.label("  Models");
+                    ui.label("  Prefabs");
+                    ui.label("  Scenes");
+                    ui.label("  Scripts");
+                    ui.label("  Textures");
+                    ui.separator();
+                    ui.label("Packages");
+                });
+            },
+        );
+        ui.separator();
+
+        // Правая колонка: сетка ассетов
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                // Итерируемся по БД и рисуем карточки
+                for meta in db.iter() {
+                    // Показываем только меши, текстуры и сцены для примера
+                    if !matches!(
+                        meta.kind,
+                        AssetKind::Mesh | AssetKind::Texture | AssetKind::Scene
+                    ) {
+                        continue;
+                    }
+
+                    let stem = meta.stem();
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(80.0, 100.0), egui::Sense::click());
+
+                    let bg = if response.hovered() {
+                        egui::Color32::from_rgb(60, 65, 80)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    ui.painter().rect_filled(rect, 4.0, bg);
+
+                    let icon_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(10.0, 10.0),
+                        egui::vec2(60.0, 60.0),
+                    );
+                    ui.painter()
+                        .rect_filled(icon_rect, 4.0, egui::Color32::from_rgb(40, 40, 40));
+
+                    let icon = match meta.kind {
+                        AssetKind::Mesh => "🧊",
+                        AssetKind::Texture => "🖼",
+                        AssetKind::Scene => "🎬",
+                        _ => "📦",
+                    };
+                    ui.painter().text(
+                        icon_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon,
+                        egui::FontId::proportional(30.0),
+                        egui::Color32::WHITE,
+                    );
+
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.max.y - 15.0),
+                        egui::Align2::CENTER_CENTER,
+                        stem,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::LIGHT_GRAY,
+                    );
+                }
+            });
+        });
+    });
+}

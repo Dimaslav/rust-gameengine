@@ -2627,6 +2627,47 @@ impl<G: Game> App<G> {
                     self.editor.state.hud_hint("Quick Saved!");
                 }
             }
+
+            EditorAction::GenerateWorld { biome, seed } => {
+                // 1. Очищаем мир.
+                self.world = World::new();
+                self.editor.state.selected.clear();
+                self.editor.state.undo.clear();
+                self.navmesh = None;
+                self.collider_cache = None;
+                self.pickable = None;
+
+                // 2. Генерируем.
+                use crate::game::world_gen::{WorldGen, WorldGenConfig};
+                let config = WorldGenConfig {
+                    seed,
+                    biome,
+                    size: 300.0,
+                    prop_density: 0.6,
+                    enemy_count: 8,
+                    loot_count: 6,
+                };
+                
+                // Сохраняем конфиг в состоянии редактора (для меню).
+                self.editor.state.last_gen_config = config.clone();
+
+                let result = WorldGen::generate(&mut self.world, &mut self.renderer, &config);
+                
+                // 3. Ставим камеру и спавн игрока.
+                self.game.camera_mut().focus_on(result.player_spawn, 20.0);
+                self.editor.state.play.saved_position = result.player_spawn;
+
+                self.editor.state.hud_hint(format!(
+                    "Generated {} in {} ms", 
+                    biome.label(), 
+                    result.elapsed_ms
+                ));
+                log::info!(
+                    "World generated: {} biome, seed={}, {} entities, {} ms",
+                    biome.label(), seed, result.entity_count, result.elapsed_ms,
+                );
+            }
+
             EditorAction::PausePlay => {
                 if self.editor.state.play.active && !self.editor.state.play.paused {
                     self.editor.state.play.paused = true;
@@ -4037,10 +4078,8 @@ impl<G: Game> ApplicationHandler for AppHandler<G> {
 }
 
 pub fn run<G: Game>(game: G) {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("rust_engine=info,warn"),
-    )
-    .init();
+    crate::engine::logger::init();
+
     let event_loop = EventLoop::new().expect("failed to create EventLoop");
     let mut handler = AppHandler::<G> {
         app: None,

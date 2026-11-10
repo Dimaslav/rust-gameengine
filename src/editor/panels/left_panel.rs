@@ -1,5 +1,3 @@
-//! Левая панель: Stats + Grid + Outliner + Prefabs + Assets.
-
 use crate::ecs::World;
 use crate::editor::panels::{content, outliner, stats, Stats, UiAssets};
 use crate::editor::{EditorAction, EditorState};
@@ -16,11 +14,34 @@ pub fn draw(
         return;
     }
 
-    let panel_response = egui::containers::panel::Panel::left("left_panel")
+    let panel_response = egui::Panel::left("left_panel")
         .default_size(state.layout.left_panel_width)
         .resizable(true)
         .show(ui, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.heading("Hierarchy");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙").clicked() {
+                        // Меню настроек
+                    }
+                });
+            });
+            ui.separator();
+
+            // Поиск
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.search_filter)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Search..."),
+                );
+            });
+            ui.add_space(4.0);
+
             egui::ScrollArea::vertical()
+                .id_salt("left_panel_scroll")
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     // === БЛОК СЕТКИ И ПРИВЯЗКИ ===

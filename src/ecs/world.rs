@@ -1,7 +1,7 @@
 //! World — контейнер сущностей и компонентов.
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use super::component::{AnyStorage, ComponentStorage};
@@ -122,12 +122,51 @@ impl World {
             && self.entity_pos.contains_key(&entity.index)
     }
 
+    /// Синхронизировать внутренние счётчики после загрузки сцены.
+    ///
+    /// ИЗМЕНЕНО (fix): раньше функция только наращивала `next_index`
+    /// и `generations`, но **не восстанавливала `free_indices`**. Это
+    /// приводило к двум багам:
+    ///
+    /// 1. **Утечка generations**: после load `free_indices = []`, все
+    ///    spawn используют `next_index`, он растёт монотонно. При
+    ///    цикле save/load индексы уезжают в сотни/тысячи, `Vec<u32>`
+    ///    generations раздувается.
+    /// 2. **Потеря сущностей**: если в сцене была entity с
+    ///    `generation = 5`, но `generations[idx]` остался `0`,
+    ///    `is_alive({idx, 5})` возвращал `false` → сущность
+    ///    «мертва» после загрузки, `get::<T>` не работает.
+    ///
+    /// Теперь:
+    ///   * `generations[idx]` синхронизируется из живых entity
+    ///     (`max` — защита от рассинхрона);
+    ///   * `free_indices` пересобирается: все слоты `< next_index`,
+    ///     для которых нет живой entity, идут в free-list.
     pub fn sync_next_id(&mut self) {
         let max_idx = self.entities.iter().map(|e| e.index).max().unwrap_or(0);
         self.next_index = self.next_index.max(max_idx.saturating_add(1));
-        let need_len = (self.next_index as usize).max(max_idx as usize + 1);
+        let need_len = self.next_index as usize;
         if need_len > self.generations.len() {
             self.generations.resize(need_len, 0);
+        }
+
+        // Sync generation counters for live entities.
+        // `max` — на случай, если snapshot пришёл с generation выше,
+        // чем в generations (например, load из старой версии сейва).
+        for e in &self.entities {
+            let idx = e.index as usize;
+            if idx < self.generations.len() {
+                self.generations[idx] = self.generations[idx].max(e.generation);
+            }
+        }
+
+        // Rebuild free list.
+        let live: HashSet<u32> = self.entities.iter().map(|e| e.index).collect();
+        self.free_indices.clear();
+        for i in 0..self.next_index {
+            if !live.contains(&i) {
+                self.free_indices.push(i);
+            }
         }
     }
 
@@ -453,6 +492,77 @@ mod tests {
         w.sync_next_id();
         let new = w.spawn();
         assert!(new.index > 100);
+    }
+
+    // ==== FIX: sync_next_id восстанавливает free-list ====
+
+    #[test]
+    fn sync_next_id_rebuilds_free_list() {
+        let mut w = World::new();
+        // Симулируем: entities {0, 2} (1 был despawned), generations [0,1,0].
+        w.entities.push(Entity::from_raw(0, 0));
+        w.entities.push(Entity::from_raw(2, 0));
+        w.entity_pos.insert(0, 0);
+        w.entity_pos.insert(2, 1);
+        w.generations = vec![0, 1, 0];
+        w.sync_next_id();
+
+        // free_indices должен содержать [1] (слот 1 был использован и освобождён).
+        // Слот 0 и 2 — живые.
+        // Слотов «не было» — нет (next_index = 3).
+        assert_eq!(w.free_indices, vec![1]);
+
+        // Spawn должен переиспользовать индекс 1.
+        let e = w.spawn();
+        assert_eq!(e.index, 1);
+        assert_eq!(e.generation, 1); // был despawned один раз
+    }
+
+    #[test]
+    fn sync_next_id_handles_empty_world() {
+        let mut w = World::new();
+        w.sync_next_id();
+        assert!(w.free_indices.is_empty());
+        assert_eq!(w.next_index, 0);
+    }
+
+    #[test]
+    fn sync_next_id_high_generation_is_alive() {
+        let mut w = World::new();
+        // Entity с generation 5 «пришла» из загруженной сцены.
+        w.entities.push(Entity::from_raw(7, 5));
+        w.entity_pos.insert(7, 0);
+        w.sync_next_id();
+
+        let e = Entity::from_raw(7, 5);
+        assert!(w.is_alive(e), "entity at generation 5 must be alive after sync");
+        // generations[7] должен быть >= 5, чтобы следующая реинкарнация
+        // была generation 6.
+        assert!(w.generations[7] >= 5);
+    }
+
+    #[test]
+    fn save_load_cycle_keeps_indices_bounded() {
+        // Симуляция: spawn 5, despawn 2, sync (как после load), spawn ещё.
+        // С free-list индекс не должен уехать за пределы исходных 5+.
+        let mut w = World::new();
+        let e0 = w.spawn();
+        let e1 = w.spawn();
+        let _ = w.spawn();
+        let e3 = w.spawn();
+        let _ = w.spawn();
+        w.despawn(e1);
+        w.despawn(e3);
+        assert_eq!(w.free_indices.len(), 2);
+
+        w.sync_next_id();
+        assert_eq!(w.free_indices.len(), 2);
+
+        // Spawn 2 раза — должны переиспользовать 2 свободных слота.
+        let _a = w.spawn();
+        let _b = w.spawn();
+        assert_eq!(w.next_index, 5, "next_index не должен вырасти");
+        let _ = e0;
     }
 
     #[test]
