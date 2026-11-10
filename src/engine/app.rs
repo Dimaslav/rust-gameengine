@@ -829,15 +829,6 @@ impl<G: Game> App<G> {
             log::info!("Player camera mode: {:?}", next);
         }
 
-        // === Step 10.2: колесо — зум TPS spring arm ===
-        if self.editor.state.play.camera_mode == CameraMode::ThirdPerson
-            && self.input.scroll_delta.abs() > 0.01
-        {
-            let play = &mut self.editor.state.play;
-            play.tps_distance =
-                (play.tps_distance - self.input.scroll_delta * 0.5).clamp(1.0, 12.0);
-        }
-
         if ctrl.crouch_toggle {
             if self.input.key_pressed(KeyCode::ControlLeft)
                 || self.input.key_pressed(KeyCode::ControlRight)
@@ -1058,20 +1049,13 @@ impl<G: Game> App<G> {
 
             match play_mode {
                 CameraMode::ThirdPerson => {
-                    // Вход в TPS: если камера была в другом режиме —
-                    // переинициализировать. Если уже TPS — параметры
-                    // обновятся ниже без сброса текущей дистанции.
                     if !cam.is_third_person() {
                         cam.enter_tps(new_eye, tps_distance, tps_pivot_h);
                     }
-                    cam.tps_distance = tps_distance;
                     cam.tps_shoulder_offset = tps_shoulder;
                     cam.tps_pivot_height = tps_pivot_h;
                     cam.first_person_pos = new_eye;
 
-                    // Разрешение коллизии spring arm.
-                    // Луч: pivot → target_pos (позади pivot'а, со сдвигом
-                    // плеча). Если что-то между — подтягиваем камеру.
                     if let Some((origin, dir)) = cam.tps_collision_ray() {
                         let max_d = (tps_distance + 1.0).max(2.0);
                         let hit = self.physics.raycast(

@@ -33,6 +33,7 @@ use rust_engine::render::{
     skinning::AnimationClip, AlphaMode, Camera3D, DebugView, GpuLight, GpuPointLight,
     InstanceData, LineBatch, LineVertex, Material, Mesh, MeshDraw, PostFx, Renderer, Skeleton,
 };
+use rust_engine::render::camera::CameraMode;
 use rust_engine::ui::Hud;
 use rust_engine::ui::inventory_ui::{
     self, InvDragState, InvLocation, InventoryAction,
@@ -270,10 +271,9 @@ pub struct FortressDemo {
     crafting_registry: CraftingRegistry,
     crafting_session: Option<CraftingSession>,
     rmb_pressed_this_frame: bool,
-
-    /// Игра просит App снять паузу (кнопка Resume в собственном меню).
     pending_unpause: bool,
-
+    tps_hip_distance: f32,
+    player_body_entity: Option<Entity>,
     last_play_mode: bool,
     hud: Hud,
     campaign: CampaignState,
@@ -370,6 +370,8 @@ impl FortressDemo {
             crafting_registry: CraftingRegistry::empty(),
             crafting_session: None,
             pending_unpause: false,
+            tps_hip_distance: 4.0,
+            player_body_entity: None,
 
             last_play_mode: false,
             hud: Hud::new(),
@@ -811,6 +813,7 @@ impl FortressDemo {
         self.build_bridges(world);
         self.build_global_lighting(world);
         self.build_ai_target(world);
+        self.build_player_body(world);
         self.build_decorations(world);
         self.bell_entity = Some(self.build_bell(world));
 
@@ -1265,6 +1268,20 @@ impl FortressDemo {
         world.insert(e, MaterialHandle("arena_marker".into()));
         self.ai_target_entity = Some(e);
         self.last_target_hp = self.demo_health_max;
+    }
+
+    fn build_player_body(&mut self, world: &mut World) {
+        let e = world.spawn();
+        world.insert(e, Name("PlayerBody".into()));
+        world.insert(
+            e,
+            Transform::at(ACT1_CENTER + Vec3::Y * 0.9)
+                .with_scale_xyz(0.7, 1.8, 0.7),
+        );
+        world.insert(e, MeshHandle("capsule".into()));
+        world.insert(e, MaterialHandle("player_body".into()));
+        world.insert(e, Visible(false));
+        self.player_body_entity = Some(e);
     }
 
     fn build_bell(&mut self, world: &mut World) -> Entity {
@@ -1950,6 +1967,28 @@ impl Game for FortressDemo {
             self.camera.fov_y = self.base_fov * fov_mult;
         }
 
+        // === Step 10.3: TPS камера — зум + ADS pull-in ===
+        if self.camera.is_third_person()
+            && in_play
+            && !self.demo_paused
+            && !self.show_inventory
+            && !self.show_character_sheet
+            && self.dialog_session.is_none()
+            && self.campaign.stage != Stage::Victory
+        {
+            // Колесо — зум spring arm (без ADS).
+            if input.scroll_delta.abs() > 0.01 {
+                self.tps_hip_distance = (self.tps_hip_distance
+                    - input.scroll_delta * 0.5)
+                    .clamp(1.0, 12.0);
+            }
+            let ads_target = 1.5_f32;
+            self.camera.tps_distance = self.tps_hip_distance
+                * (1.0 - self.ads_blend)
+                + ads_target * self.ads_blend;
+            self.camera.tps_distance = self.camera.tps_distance.clamp(0.5, 12.0);
+        }
+
         let (rt_reloading, rt_reload_timer, rt_fire_cd) = self
             .current_runtime()
             .map(|rt| (rt.reloading, rt.reload_timer, rt.fire_cooldown))
@@ -2005,7 +2044,7 @@ impl Game for FortressDemo {
                         } else {
                             w.spread_hip
                         };
-                        let origin = self.camera.position();
+                        let origin = self.camera.first_person_pos;
                         let base_dir = self.camera.forward();
 
                         let total = self.total_attributes();
@@ -2069,14 +2108,26 @@ impl Game for FortressDemo {
 
         if input.play_mode {
             if let Some(t) = self.ai_target_entity {
-                let p = self.camera.position();
+                let eye = self.camera.first_person_pos;
                 if let Some(tr) = world.get_mut::<Transform>(t) {
-                    tr.position = Vec3::new(p.x, p.y - 0.8, p.z);
+                    tr.position = Vec3::new(eye.x, eye.y - 0.8, eye.z);
                 }
                 world.insert(t, Visible(false));
             }
         } else if let Some(t) = self.ai_target_entity {
             world.insert(t, Visible(true));
+        }
+
+        if let Some(body_e) = self.player_body_entity
+            && world.is_alive(body_e)
+        {
+            let eye = self.camera.first_person_pos;
+            if let Some(tr) = world.get_mut::<Transform>(body_e) {
+                tr.position = Vec3::new(eye.x, eye.y - 0.8, eye.z);
+                tr.rotation = glam::Quat::from_rotation_y(self.camera.yaw);
+            }
+            let visible = input.play_mode && self.camera.is_third_person();
+            world.insert(body_e, Visible(visible));
         }
 
         if let Some(t) = self.ai_target_entity
@@ -2264,8 +2315,6 @@ impl Game for FortressDemo {
 
     fn on_world_replaced(&mut self, world: &mut World) {
         log::info!("FortressDemo: on_world_replaced, world has {} entities", world.len());
-
-        // 1. Сбросить кэшированные Entity-хэндлы.
         self.bell_entity = None;
         self.ai_target_entity = None;
         self.boss_entity = None;
@@ -2274,22 +2323,15 @@ impl Game for FortressDemo {
         self.gate_4 = None;
         self.gate_boss = None;
         self.navmesh_bake_requested = true;
-
-        // 2. Сбросить runtime-UI-сессии.
         self.dialog_session = None;
         self.vendor_session = None;
         self.crafting_session = None;
         self.show_inventory = false;
         self.show_character_sheet = false;
         self.inv_drag.cancel();
-
-        // 3. Сбросить «уже сработавшие» триггеры — Entity-хэндлы протухли.
         self.campaign.processed.clear();
-
-        // 4. Попытаться найти кэшированные сущности заново по имени.
-        //    Если мир — это свежий World::new() (New Game / Undo),
-        //    хэндлов не будет, и мы пересоберём кампанию.
         self.ai_target_entity = Self::find_by_name(world, "Player");
+        self.player_body_entity = Self::find_by_name(world, "PlayerBody");
         self.bell_entity = Self::find_by_name(world, "Bell");
         self.boss_entity = Self::find_by_name(world, "Boss_Dungeon");
         self.gate_1 = Self::find_by_name(world, "gate_east_1");
@@ -2710,7 +2752,16 @@ impl Game for FortressDemo {
 
                 let local_mat =
                     Mat4::from_scale_rotation_translation(Vec3::splat(w.scale), rot, pos);
-                let inv_view = self.camera.view_matrix().inverse();
+
+                let eye = self.camera.first_person_pos;
+                let fwd = self.camera.forward();
+                let up = if fwd.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+                let eye_view = rust_engine::render::camera::look_at_rh(
+                    eye,
+                    eye + fwd,
+                    up,
+                );
+                let inv_view = eye_view.inverse();
                 let final_mat = inv_view * local_mat;
 
                 result.push(MeshDraw {
@@ -2979,6 +3030,26 @@ impl Game for FortressDemo {
                 ui.rect(sw - kww - 40.0, y - 6.0, kww + 24.0, size + 12.0,
                     [0.0, 0.0, 0.0, 0.55]);
                 ui.text(sw - kww - 28.0, y, k, size, [1.0, 0.4, 0.4, 1.0]);
+                y += size + 10.0;
+            }
+
+            // === Step 10.4: индикатор режима камеры ===
+            let cam_badge: Option<(String, [f32; 4])> = match self.camera.mode {
+                CameraMode::ThirdPerson => Some((
+                    format!("CAM  TPS · {:.1}m", self.camera.tps_current_distance),
+                    [0.6, 0.85, 1.0, 1.0],
+                )),
+                CameraMode::FirstPerson => Some((
+                    "CAM  FPS".to_string(),
+                    [0.6, 1.0, 0.6, 1.0],
+                )),
+                _ => None,
+            };
+            if let Some((label, color)) = cam_badge {
+                let w = ui.text_width(&label, size);
+                ui.rect(sw - w - 40.0, y - 6.0, w + 24.0, size + 12.0,
+                    [0.0, 0.0, 0.0, 0.55]);
+                ui.text(sw - w - 28.0, y, &label, size, color);
             }
         }
 
@@ -3118,7 +3189,7 @@ impl Game for FortressDemo {
                 "S = Save · L = Load · X = Delete",
                 11.0, [0.6, 0.65, 0.75, 0.8]);
         } else if !is_victory {
-            let text = "Esc — pause · LMB — fire · RMB — aim · E — talk · 1/2/3/4 — weapon · R — reload · Tab — stats · I — inventory";
+            let text = "Esc — pause · LMB — fire · RMB — aim · V — camera · E — talk · 1..8 — weapon · R — reload · Tab — stats · I — inventory";
             ui.text_centered(ui.screen_w() * 0.5, ui.screen_h() - 24.0,
                 text, 12.0, [1.0, 1.0, 1.0, 0.5]);
         }
@@ -3539,4 +3610,6 @@ fn add_materials(renderer: &mut Renderer) {
         Material::new([0.30, 0.20, 0.12, 1.0]).with_metallic_roughness(0.0, 0.9));
     renderer.add_material("ground",
         Material::new([0.35, 0.38, 0.30, 1.0]).with_metallic_roughness(0.0, 0.95));
+    renderer.add_material("player_body",
+        Material::new([0.25, 0.45, 0.75, 1.0]).with_metallic_roughness(0.1, 0.6));
 }
