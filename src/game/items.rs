@@ -1,34 +1,8 @@
-//! Item framework: data-driven предметы из RON.
-//!
-//! # Формат
-//!
-//! Каждый предмет — `.ron` файл в `assets/items/`. Загружается в
-//! `ItemRegistry` при старте.
-//!
-//! # Категории
-//!
-//! * `Weapon` — оружие, ссылается на `weapon_id` из WeaponRegistry.
-//! * `Armor` — броня, даёт бонусы к атрибутам.
-//! * `Trinket` — аксессуар, даёт бонусы.
-//! * `Consumable` — расходник (heal potion, ammo box).
-//! * `Key` — квестовый ключ.
-//! * `Misc` — прочее (золото, ресурсы).
-//!
-//! # Инвентарь
-//!
-//! `Inventory` — плоский `Vec<Option<ItemStack>>` длины `capacity`.
-//! `Equipment` — три слота: weapon, armor, trinket. Их бонусы
-//! складываются с бонусами от атрибутов игрока.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::stats::Attributes;
-
-// ============================================================
-// ItemKind
-// ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ItemKind {
@@ -37,6 +11,7 @@ pub enum ItemKind {
     Trinket,
     Consumable,
     Key,
+    Currency,
     Misc,
 }
 
@@ -48,6 +23,7 @@ impl ItemKind {
             Self::Trinket => "Trinket",
             Self::Consumable => "Consumable",
             Self::Key => "Key",
+            Self::Currency => "Currency",
             Self::Misc => "Misc",
         }
     }
@@ -58,11 +34,11 @@ impl ItemKind {
             Self::Trinket => "💍",
             Self::Consumable => "🧪",
             Self::Key => "🔑",
+            Self::Currency => "💰",
             Self::Misc => "📦",
         }
     }
 
-    /// Приоритет для сортировки по типу. Меньше = выше в списке.
     pub fn sort_priority(self) -> u8 {
         match self {
             Self::Weapon => 0,
@@ -70,7 +46,8 @@ impl ItemKind {
             Self::Trinket => 2,
             Self::Consumable => 3,
             Self::Key => 4,
-            Self::Misc => 5,
+            Self::Currency => 5,
+            Self::Misc => 6,
         }
     }
 }
@@ -283,7 +260,7 @@ impl ItemRegistry {
                 Item {
                     id: "gold_coin".into(),
                     name: "Gold Coin".into(),
-                    kind: ItemKind::Misc,
+                    kind: ItemKind::Currency,
                     rarity: Rarity::Common,
                     description: "Universal currency".into(),
                     weapon_id: None,
@@ -669,10 +646,6 @@ impl Inventory {
     }
 }
 
-// ============================================================
-// Equipment
-// ============================================================
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Equipment {
     pub weapon_id: Option<String>,
@@ -681,25 +654,31 @@ pub struct Equipment {
 }
 
 impl Equipment {
-    /// Суммарные бонусы от экипировки. Складываются с базовыми
-    /// атрибутами игрока.
-    pub fn bonus_attributes(&self, registry: &ItemRegistry) -> Attributes {
-        let mut attrs = Attributes {
-            strength: 0, dexterity: 0, intelligence: 0, vitality: 0, luck: 0,
-        };
+    pub fn bonus_attributes_signed(&self, registry: &ItemRegistry) -> [i32; 5] {
+        let mut b = [0i32; 5];
         for id_opt in [&self.weapon_id, &self.armor_id, &self.trinket_id] {
             let Some(id) = id_opt else { continue };
             let Some(item) = registry.get_by_id(id) else { continue };
-            attrs.strength = attrs.strength.saturating_add_signed(item.bonus_strength);
-            attrs.dexterity = attrs.dexterity.saturating_add_signed(item.bonus_dexterity);
-            attrs.intelligence = attrs.intelligence.saturating_add_signed(item.bonus_intelligence);
-            attrs.vitality = attrs.vitality.saturating_add_signed(item.bonus_vitality);
-            attrs.luck = attrs.luck.saturating_add_signed(item.bonus_luck);
+            b[0] += item.bonus_strength;
+            b[1] += item.bonus_dexterity;
+            b[2] += item.bonus_intelligence;
+            b[3] += item.bonus_vitality;
+            b[4] += item.bonus_luck;
         }
-        attrs
+        b
     }
 
-    /// Взять предмет из указанного слота экипировки (вернуть в инвентарь).
+    pub fn bonus_attributes(&self, registry: &ItemRegistry) -> Attributes {
+        let b = self.bonus_attributes_signed(registry);
+        Attributes {
+            strength: b[0].max(0) as u32,
+            dexterity: b[1].max(0) as u32,
+            intelligence: b[2].max(0) as u32,
+            vitality: b[3].max(0) as u32,
+            luck: b[4].max(0) as u32,
+        }
+    }
+
     pub fn take_slot(&mut self, slot: EquipSlot) -> Option<String> {
         match slot {
             EquipSlot::Weapon => self.weapon_id.take(),

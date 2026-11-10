@@ -1,21 +1,35 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
+  # ============================================================
+  # Основной job: check / clippy / test / fmt на всех ОС.
+  # ============================================================
   build:
+    name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-          
+          components: clippy, rustfmt
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -32,15 +46,97 @@ jobs:
             libxinerama-dev \
             libvulkan-dev \
             pkg-config
-            
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Разные кэши для разных ОС, чтобы не пересекались.
+          key: ${{ matrix.os }}
 
-      - name: Check
-        run: cargo check --all-targets
+      # ----------------------------------------------------------
+      # 1. Format (быстро, один раз — на Linux, чтобы не дублировать).
+      # ----------------------------------------------------------
+      - name: Rustfmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -W clippy::all
+      # ----------------------------------------------------------
+      # 2. Check (весь workspace: движок + samples/*).
+      #    `projects/*` исключены из workspace через exclude
+      #    в Cargo.toml — они собираются отдельно.
+      # ----------------------------------------------------------
+      - name: Cargo check (workspace)
+        run: cargo check --workspace --all-targets
 
-      - name: Test
-        run: cargo test
+      # ----------------------------------------------------------
+      # 3. Clippy (весь workspace).
+      #    -W clippy::all — как раньше.
+      #    Не ставим -D warnings, пока не почистим warnings
+      #    (dead_code в samples/fallen-citadel/src/demo/primitives.rs
+      #    и physics/world.rs::state_as_aabb).
+      # ----------------------------------------------------------
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -W clippy::all
+
+      # ----------------------------------------------------------
+      # 4. Test (весь workspace).
+      # ----------------------------------------------------------
+      - name: Cargo test (workspace)
+        run: cargo test --workspace
+
+  # ============================================================
+  # Отдельный job: smoke-test `engine-cli new` + сборка проекта.
+  # ============================================================
+  projects_smoke_test:
+    name: Projects smoke test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxinerama-dev libvulkan-dev pkg-config
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-smoke
+
+      - name: Build engine-cli
+        run: cargo build --bin engine-cli
+
+      - name: Create sample project
+        run: cargo run --bin engine-cli -- new ci_smoke_test
+
+      - name: Verify project structure
+        shell: bash
+        run: |
+          test -f projects/ci_smoke_test/project.ron
+          test -f projects/ci_smoke_test/scene.ron
+          test -f projects/ci_smoke_test/Cargo.toml
+          test -f projects/ci_smoke_test/src/main.rs
+          test -d projects/ci_smoke_test/assets
+          test -d projects/ci_smoke_test/assets/items
+          test -d projects/ci_smoke_test/assets/quests
+          echo "✓ Project structure OK"
+
+      - name: Build new project
+        working-directory: projects/ci_smoke_test
+        run: cargo build
+
+      - name: List projects
+        run: cargo run --bin engine-cli -- list

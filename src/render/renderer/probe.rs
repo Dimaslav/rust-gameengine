@@ -74,8 +74,6 @@ impl ProbeCubemap {
     }
 }
 
-/// 6 view-матриц для рендера cubemap из позиции probe'а.
-/// Стандартный порядок wgpu: +X, -X, +Y, -Y, +Z, -Z.
 pub fn cube_face_view_projs(pos: Vec3, near: f32, far: f32) -> [Mat4; 6] {
     let proj = crate::render::camera::perspective_rh(
         std::f32::consts::FRAC_PI_2,
@@ -98,13 +96,6 @@ pub fn cube_face_view_projs(pos: Vec3, near: f32, far: f32) -> [Mat4; 6] {
     })
 }
 
-/// Uniform, общий на все probe. Меняется per-probe через dynamic offset.
-///
-/// Layout (144 байт):
-///   view_proj: [[f32;4];4]   — cube face view-proj
-///   probe_pos: [f32;4]       — xyz = position, w = unused
-///   box_min:   [f32;4]       — xyz = min corner
-///   box_max:   [f32;4]       — xyz = max corner
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ProbeBakeUniform {
@@ -114,21 +105,6 @@ pub struct ProbeBakeUniform {
     pub box_max: [f32; 4],
 }
 
-/// Bake: рендерит probe в cubemap.
-///
-/// Использует существующие `draws` (обычно — из основного кадра).
-/// Пайплайн: forward PBR с ambient + directional lights (без shadows —
-/// это первая версия, shadow-pass в probe добавится позже).
-///
-/// # FIX (probe_bake_pipeline: 2 target'а, 2 attachment'а)
-///
-/// `probe_bake_pipeline` собран из `forward_transparent.wgsl::fs_main`,
-/// у которого два выхода: `@location(0) color: vec4<f32>` и
-/// `@location(1) motion: vec2<f32>`. Pipeline обязан объявить два
-/// target'а (HDR_FORMAT + MOTION_FORMAT), а render pass — два
-/// color attachment'а. Motion для probe не нужен (write_mask: empty
-/// в pipeline, StoreOp::Discard в pass), но валидатор wgpu требует
-/// соответствия один-в-один.
 #[allow(clippy::too_many_arguments)]
 pub fn bake_probe(
     r: &mut Renderer,
@@ -140,7 +116,22 @@ pub fn bake_probe(
 ) {
     if probe_idx >= r.probes.len() { return; }
 
-    // Обновляем AABB в slot.
+    let total_instances: u64 = draws.iter().map(|d| d.instances.len() as u64).sum();
+    if total_instances > 0 {
+        r.ensure_instance_capacity(total_instances);
+        let stride = std::mem::size_of::<InstanceData>() as u64;
+        let mut offset_bytes: u64 = 0;
+        for d in draws {
+            if d.instances.is_empty() { continue; }
+            r.queue.write_buffer(
+                &r.instance_buffer,
+                offset_bytes,
+                bytemuck::cast_slice(&d.instances),
+            );
+            offset_bytes += d.instances.len() as u64 * stride;
+        }
+    }
+
     {
         let probe = &mut r.probes[probe_idx];
         probe.box_min = box_min;
@@ -150,7 +141,6 @@ pub fn bake_probe(
     let face_vps = cube_face_view_projs(probe_pos, 0.1, 100.0);
 
     for face in 0..6 {
-        // Обновляем uniform для этой грани.
         let u = ProbeBakeUniform {
             view_proj: face_vps[face].to_cols_array_2d(),
             probe_pos: [probe_pos.x, probe_pos.y, probe_pos.z, 0.0],
@@ -159,8 +149,6 @@ pub fn bake_probe(
         };
         r.queue.write_buffer(&r.probe_bake_uniform, 0, bytemuck::bytes_of(&u));
 
-        // Camera uniform тоже нужен — probe shader читает view_proj
-        // и camera_pos оттуда.
         let cam_uniform = CameraUniform {
             view_proj: face_vps[face].to_cols_array_2d(),
             inv_view_proj: face_vps[face].inverse().to_cols_array_2d(),

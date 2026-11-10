@@ -1,0 +1,13 @@
+(
+    id: "forge_chain_mail",
+    title: "Chain Mail",
+    category: "Armor",
+    inputs: [
+        (item_id: "leather_armor", count: 1),
+        (item_id: "ruby_gem", count: 2),
+    ],
+    outputs: [
+        (item_id: "chain_mail", count: 1),
+    ],
+    gold_cost: 100,
+)

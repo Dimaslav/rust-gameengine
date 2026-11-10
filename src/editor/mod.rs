@@ -169,7 +169,8 @@ pub enum EditorAction {
     SelectEntity(Entity), ValidateScene, SelectEntities(Vec<Entity>), DeleteEntities(Vec<Entity>),
     RemoveParent(Vec<Entity>), ReplaceMissingMesh(Vec<Entity>, String), ReplaceMissingMaterial(Vec<Entity>, String),
     CopyComponent(Entity, ComponentKind), PasteComponent(Entity),
-    GenerateWorld { biome: crate::game::world_gen::Biome, seed: u64 }, // <-- НОВОЕ ДЕЙСТВИЕ
+    GenerateWorld { biome: crate::game::world_gen::Biome, seed: u64 },
+    ResumePlay,
 }
 
 impl EditorState {

@@ -1,29 +1,7 @@
-//! Data-driven квесты.
-//!
-//! ## Инварианты
-//!
-//! 1. **`kills_by_prefix`** — счётчик убийств по префиксу имени.
-//!    Пишется в `on_enemy_killed` **до** фильтрации по `active`,
-//!    поэтому `start_quest` может retroactively закрыть квест, если
-//!    игрок убил нужных врагов до получения задания.
-//!
-//! 2. **`objectives_done`** — квесты, чьи цели выполнены, но награда
-//!    ещё не получена. Для `auto_complete: false` — единственный путь
-//!    к награде (через диалог). Для `auto_complete: true` —
-//!    транзитное состояние, сразу переходящее в `completed`.
-//!
-//! 3. **`active`** — запущенные квесты. `u32` — суммарные убийства
-//!    по всем Kill-целям (кэш для UI/логов). Источник правды —
-//!    `kills_by_prefix`.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-// ============================================================
-// Определения
-// ============================================================
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QuestDef {
@@ -32,8 +10,6 @@ pub struct QuestDef {
     pub description: String,
     pub objectives: Vec<Objective>,
     pub rewards: Vec<Reward>,
-    /// `true` — награда выдаётся автоматически при выполнении.
-    /// `false` — игрок должен прийти к NPC и сдать квест через диалог.
     #[serde(default = "default_auto_complete")]
     pub auto_complete: bool,
 }
@@ -53,17 +29,11 @@ pub enum Reward {
     Item { id: String, count: u32 },
 }
 
-// ============================================================
-// QuestManager
-// ============================================================
-
 pub struct QuestManager {
     pub registry: HashMap<String, QuestDef>,
     pub active: HashMap<String, u32>,
     pub objectives_done: HashSet<String>,
     pub completed: HashSet<String>,
-    /// Убийства по `target_prefix`, независимо от активных квестов.
-    /// Нужен для retroactive completion.
     kills_by_prefix: HashMap<String, u32>,
 }
 
@@ -78,13 +48,6 @@ impl QuestManager {
         }
     }
 
-    /// Загрузка всех `.ron` из папки.
-    ///
-    /// Файлы, которые не парсятся как `QuestDef`, **пропускаются** с
-    /// `log::warn`.
-    ///
-    /// FIX (P1.3): дубликаты id логируются и пропускаются (раньше
-    /// `HashMap::insert` молча перезаписывал).
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut manager = Self::new();
@@ -137,8 +100,6 @@ impl QuestManager {
         Ok(manager)
     }
 
-    /// Запустить квест. Возвращает награды, если квест `auto_complete`
-    /// и его цели уже были выполнены **до** старта (retroactive).
     pub fn start_quest(&mut self, id: &str) -> Vec<Reward> {
         if self.completed.contains(id) || self.active.contains_key(id) {
             return Vec::new();
@@ -196,12 +157,7 @@ impl QuestManager {
         Vec::new()
     }
 
-    /// Обработать убийство. Возвращает награды **только для
-    /// auto-complete квестов**; для `auto_complete: false` пустой
-    /// Vec, квест уходит в `objectives_done`.
     pub fn on_enemy_killed(&mut self, target_name: &str) -> Vec<Reward> {
-        // 1. Залогировать килл по всем подходящим префиксам,
-        //    дедуплицированно.
         let mut matching: HashSet<String> = HashSet::new();
         for def in self.registry.values() {
             for obj in &def.objectives {
@@ -216,7 +172,6 @@ impl QuestManager {
             *self.kills_by_prefix.entry(prefix).or_insert(0) += 1;
         }
 
-        // 2. Обновить активные квесты и найти завершённые.
         struct Update {
             qid: String,
             total: u32,
@@ -291,8 +246,6 @@ impl QuestManager {
         rewards
     }
 
-    /// Сдать квест. Возвращает награды, если квест был готов
-    /// (находится в `objectives_done`).
     pub fn complete_quest(&mut self, id: &str) -> Vec<Reward> {
         if !self.objectives_done.contains(id) {
             log::warn!("complete_quest: '{}' not ready for turn-in", id);
@@ -307,10 +260,6 @@ impl QuestManager {
         }
         Vec::new()
     }
-
-    // ============================================================
-    // Запросы
-    // ============================================================
 
     pub fn is_objectives_done(&self, id: &str) -> bool {
         self.objectives_done.contains(id)
@@ -328,7 +277,6 @@ impl QuestManager {
         self.kills_by_prefix.get(prefix).copied().unwrap_or(0)
     }
 
-    /// Снимок прогресса активных квестов: `(id, progress, required)`.
     pub fn progress_snapshot(&self) -> Vec<(String, u32, u32)> {
         let mut out = Vec::with_capacity(self.active.len());
         for (id, progress) in &self.active {
@@ -358,9 +306,35 @@ impl Default for QuestManager {
     }
 }
 
-// ============================================================
-// Тесты
-// ============================================================
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuestManagerState {
+    #[serde(default)]
+    pub active: HashMap<String, u32>,
+    #[serde(default)]
+    pub objectives_done: HashSet<String>,
+    #[serde(default)]
+    pub completed: HashSet<String>,
+    #[serde(default)]
+    pub kills_by_prefix: HashMap<String, u32>,
+}
+
+impl QuestManager {
+    pub fn snapshot(&self) -> QuestManagerState {
+        QuestManagerState {
+            active: self.active.clone(),
+            objectives_done: self.objectives_done.clone(),
+            completed: self.completed.clone(),
+            kills_by_prefix: self.kills_by_prefix.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, state: QuestManagerState) {
+        self.active = state.active;
+        self.objectives_done = state.objectives_done;
+        self.completed = state.completed;
+        self.kills_by_prefix = state.kills_by_prefix;
+    }
+}
 
 #[cfg(test)]
 mod tests {

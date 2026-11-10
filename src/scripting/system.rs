@@ -1,11 +1,3 @@
-//! ScriptSystem — тик всех entity со ScriptComponent.
-//!
-//! Порядок в кадре (вызывать из `App::redraw` после physics и ai):
-//!   1. Собрать список entity со ScriptComponent (один проход по World).
-//!   2. Для каждого запустить on_start (один раз) и on_update.
-//!   3. Для каждого `ScriptEvent`, отправленного в этом кадре, вызвать `on_event`.
-//!   4. Собрать команды (sound, log, event) и вернуть их наружу.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -20,9 +12,8 @@ use super::host::{LogLevel, ScriptCommand, ScriptHost, SharedHost};
 pub struct ScriptSystem {
     pub engine: ScriptEngine,
     reload_timer: f32,
-    /// Кэш «какие скрипты уже загружены» — чтобы не дёргать
-    /// `ensure_loaded` каждый кадр.
     known: std::collections::HashSet<String>,
+    pending_events: Vec<ScriptEvent>,
 }
 
 const RELOAD_INTERVAL: f32 = 0.5;
@@ -36,11 +27,10 @@ impl ScriptSystem {
             engine,
             reload_timer: 0.0,
             known,
+            pending_events: Vec::new(),
         })
     }
 
-    /// Тик. Все команды (`play_sound`, `log`) собираются и возвращаются.
-    /// App применит их после — там, где доступны AudioSystem и т.д.
     pub fn update(
         &mut self,
         world: &mut World,
@@ -72,7 +62,6 @@ impl ScriptSystem {
             }
         }
 
-        // --- Lazy-load скриптов, которые появились в компонентах ---
         let scripts_in_use: Vec<String> = world
             .query::<ScriptComponent>()
             .map(|(_, c)| c.script.clone())
@@ -83,11 +72,12 @@ impl ScriptSystem {
             }
         }
 
-        // --- Собрать события, отправленные в этом кадре ---
-        let events: Vec<ScriptEvent> = world
-            .read_events_current::<ScriptEvent>()
-            .cloned()
-            .collect();
+        let mut events: Vec<ScriptEvent> = self.pending_events.drain(..).collect();
+        events.extend(
+            world
+                .read_events_current::<ScriptEvent>()
+                .cloned(),
+        );
 
         // --- Собрать список entity со скриптами ---
         let scripted: Vec<(Entity, String, bool)> = world
@@ -103,9 +93,6 @@ impl ScriptSystem {
                 continue;
             }
 
-            // on_start — один раз. `world as *mut World` создаёт raw
-            // указатель; borrow освобождается сразу после каста,
-            // поэтому следующий `world.get_mut(...)` не конфликтует.
             if !started {
                 {
                     let host = unsafe {
@@ -131,7 +118,6 @@ impl ScriptSystem {
                 }
             }
 
-            // on_update — каждый кадр.
             {
                 let host = unsafe {
                     ScriptHost::new(
@@ -152,7 +138,6 @@ impl ScriptSystem {
                 );
             }
 
-            // on_event — для каждого события, отправленного в этом кадре.
             for ev in &events {
                 let host = unsafe {
                     ScriptHost::new(
@@ -176,12 +161,19 @@ impl ScriptSystem {
             }
         }
 
-        all_commands
+        let mut external_commands: Vec<ScriptCommand> = Vec::new();
+        for c in all_commands {
+            match c {
+                ScriptCommand::SendEvent { name } => {
+                    self.pending_events.push(ScriptEvent::new(name));
+                }
+                _ => external_commands.push(c),
+            }
+        }
+        external_commands
     }
 }
 
-/// Слить `ScriptCommand` из `shared.commands` в общий Vec. Log'и сразу
-/// пишутся в `log::*`, остальные (`PlaySound`, `SendEvent`) — в `all`.
 fn drain_commands(
     shared: &SharedHost,
     script_name: &str,

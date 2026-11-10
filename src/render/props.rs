@@ -1,19 +1,7 @@
-//! Процедурные детализированные модели-пропсы: ящики с досками,
-//! бочки с обручами, рифлёные колонны, деревья, скалы, надгробия,
-//! стойки для оружия и т.д.
-//!
-//! Все генераторы — чистые функции `(&Device, params...) -> Mesh`.
-//! Юнит-размер: где это важно — пропс вписан в box [-0.5, +0.5],
-//! чтобы demo мог масштабировать через `Transform.scale`.
-
 use glam::Vec3;
 use std::f32::consts::TAU;
 
 use crate::render::mesh::{Mesh, Vertex3D};
-
-// ============================================================
-// Builder
-// ============================================================
 
 struct Builder {
     verts: Vec<Vertex3D>,
@@ -92,15 +80,26 @@ impl Builder {
         );
     }
 
-    /// Кольцо вокруг оси Y.
     fn ring_y(&mut self, y: f32, r: f32, seg: u32, uv_y: f32) -> Vec<u32> {
+        self.ring_y_with_slope(y, r, seg, uv_y, 0.0)
+    }
+
+    fn ring_y_with_slope(
+        &mut self,
+        y: f32,
+        r: f32,
+        seg: u32,
+        uv_y: f32,
+        slope: f32,
+    ) -> Vec<u32> {
         let mut v = Vec::with_capacity(seg as usize);
         for i in 0..seg {
             let a = i as f32 / seg as f32 * TAU;
             let (s, c) = a.sin_cos();
+            let n = Vec3::new(c, slope, s).normalize_or(Vec3::Y);
             v.push(self.push_vertex(
                 Vec3::new(c * r, y, s * r),
-                Vec3::Y,
+                n,
                 [i as f32 / seg as f32, uv_y],
             ));
         }
@@ -116,7 +115,9 @@ impl Builder {
     }
 
     fn cone(&mut self, base_y: f32, base_r: f32, apex_y: f32, seg: u32) {
-        let ring = self.ring_y(base_y, base_r, seg, 0.0);
+        let dy = apex_y - base_y;
+        let slope = if dy.abs() > 1e-6 { base_r / dy } else { 0.0 };
+        let ring = self.ring_y_with_slope(base_y, base_r, seg, 0.0, slope);
         let apex = self.push_vertex(Vec3::new(0.0, apex_y, 0.0), Vec3::Y, [0.5, 1.0]);
         let cap = self.push_vertex(Vec3::new(0.0, base_y, 0.0), Vec3::NEG_Y, [0.5, 0.0]);
         let n = seg as usize;
@@ -253,8 +254,22 @@ pub fn barrel_detail(device: &wgpu::Device) -> Mesh {
         (h2, r * 0.72),
     ];
     let mut rings: Vec<Vec<u32>> = Vec::new();
-    for (y, rr) in profile.iter() {
-        rings.push(b.ring_y(*y, *rr, seg, (*y + h2) / 1.0));
+    let n_prof = profile.len();
+    for (i, (y, rr)) in profile.iter().enumerate() {
+        // slope = -dr/dy. Для крайних профилей — односторонняя разность,
+        // для средних — центральная (плавное сужение бочки).
+        let slope = if i == 0 {
+            let (yn, rn) = profile[i + 1];
+            -((rn - rr) / (yn - y))
+        } else if i == n_prof - 1 {
+            let (yp, rp) = profile[i - 1];
+            -((rr - rp) / (y - yp))
+        } else {
+            let (yp, rp) = profile[i - 1];
+            let (yn, rn) = profile[i + 1];
+            -((rn - rp) / (yn - yp))
+        };
+        rings.push(b.ring_y_with_slope(*y, *rr, seg, (*y + h2) / 1.0, slope));
     }
     for i in 0..rings.len() - 1 {
         b.bridge(&rings[i], &rings[i + 1]);
@@ -309,8 +324,18 @@ pub fn column_fluted(device: &wgpu::Device) -> Mesh {
         profile.push((y, rr));
     }
     let mut rings: Vec<Vec<u32>> = vec![base_ring.clone()];
-    for (y, rr) in profile.iter().skip(1) {
-        rings.push(b.ring_y(*y, *rr, seg, (y + h2) * 1.0));
+    let n_prof = profile.len();
+    for k in 1..n_prof {
+        let (y, rr) = profile[k];
+        let slope = if k + 1 < n_prof {
+            let (yp, rp) = profile[k - 1];
+            let (yn, rn) = profile[k + 1];
+            -((rn - rp) / (yn - yp))
+        } else {
+            let (yp, rp) = profile[k - 1];
+            -((rr - rp) / (y - yp))
+        };
+        rings.push(b.ring_y_with_slope(y, rr, seg, (y + h2) * 1.0, slope));
     }
     for i in 0..rings.len() - 1 {
         b.bridge(&rings[i], &rings[i + 1]);
@@ -351,9 +376,10 @@ pub fn pillar_ruined(device: &wgpu::Device, seed: u32) -> Mesh {
         let jitter = ((s >> 8) & 0xFFFF) as f32 / 65535.0;
         let y = h2 * (0.4 + jitter * 0.5);
         let (sa, ca) = a.sin_cos();
+        let n = Vec3::new(ca, 0.0, sa).normalize_or(Vec3::Y);
         top_ring.push(b.push_vertex(
             Vec3::new(ca * r * 0.95, y, sa * r * 0.95),
-            Vec3::Y, [i as f32 / seg as f32, 0.8],
+            n, [i as f32 / seg as f32, 0.8],
         ));
     }
     b.bridge(&bot_ring, &top_ring);
@@ -365,10 +391,6 @@ pub fn pillar_ruined(device: &wgpu::Device, seed: u32) -> Mesh {
     }
     b.build(device, "pillar_ruined")
 }
-
-// ============================================================
-// Chest — сундук с крышкой и металлическими полосами
-// ============================================================
 
 pub fn chest_detail(device: &wgpu::Device) -> Mesh {
     let mut b = Builder::new();
@@ -408,18 +430,22 @@ pub fn torch_stand(device: &wgpu::Device) -> Mesh {
     let ring_a = b.ring_y(pole_h - 0.08, pole_r + 0.02, seg, 0.0);
     let ring_b = b.ring_y(pole_h - 0.04, pole_r + 0.02, seg, 0.0);
     b.bridge(&ring_a, &ring_b);
-    // чаша
-    let cup_bot = b.ring_y(pole_h, 0.06, seg, 0.0);
-    let cup_mid = b.ring_y(pole_h + 0.06, 0.11, seg, 0.5);
-    let cup_top = b.ring_y(pole_h + 0.16, 0.13, seg, 1.0);
+    let cup_bot = b.ring_y_with_slope(
+        pole_h, 0.06, seg, 0.0,
+        -((0.11 - 0.06) / 0.06),
+    );
+    let cup_mid = b.ring_y_with_slope(
+        pole_h + 0.06, 0.11, seg, 0.5,
+        -((0.13 - 0.06) / 0.16),
+    );
+    let cup_top = b.ring_y_with_slope(
+        pole_h + 0.16, 0.13, seg, 1.0,
+        -((0.13 - 0.11) / 0.10),
+    );
     b.bridge(&cup_bot, &cup_mid);
     b.bridge(&cup_mid, &cup_top);
     b.build(device, "torch_stand")
 }
-
-// ============================================================
-// Brazier — жаровня с ножками
-// ============================================================
 
 pub fn brazier_detail(device: &wgpu::Device) -> Mesh {
     let mut b = Builder::new();
@@ -435,14 +461,26 @@ pub fn brazier_detail(device: &wgpu::Device) -> Mesh {
     }
     // чаша (3 уровня сужения)
     let seg = 16u32;
-    let bowl_bot = b.ring_y(0.44, 0.10, seg, 0.0);
-    let bowl_mid = b.ring_y(0.55, 0.28, seg, 0.5);
-    let bowl_top = b.ring_y(0.60, 0.32, seg, 1.0);
+    let bowl_bot = b.ring_y_with_slope(
+        0.44, 0.10, seg, 0.0,
+        -((0.28 - 0.10) / (0.55 - 0.44)),
+    );
+    let bowl_mid = b.ring_y_with_slope(
+        0.55, 0.28, seg, 0.5,
+        -((0.32 - 0.10) / (0.60 - 0.44)),
+    );
+    let bowl_top = b.ring_y_with_slope(
+        0.60, 0.32, seg, 1.0,
+        -((0.32 - 0.28) / (0.60 - 0.55)),
+    );
     b.bridge(&bowl_bot, &bowl_mid);
     b.bridge(&bowl_mid, &bowl_top);
     // верхнее кольцо (утолщение)
-    let rim_a = b.ring_y(0.62, 0.33, seg, 0.0);
-    let rim_b = b.ring_y(0.64, 0.32, seg, 0.0);
+    let rim_a = b.ring_y_with_slope(0.62, 0.33, seg, 0.0, 0.0);
+    let rim_b = b.ring_y_with_slope(
+        0.64, 0.32, seg, 0.0,
+        -((0.32 - 0.33) / (0.64 - 0.62)),
+    );
     b.bridge(&bowl_top, &rim_a);
     b.bridge(&rim_a, &rim_b);
     b.build(device, "brazier_detail")
@@ -457,9 +495,10 @@ pub fn tree_pine(device: &wgpu::Device, height: f32) -> Mesh {
     let trunk_r = height * 0.035;
     let trunk_h = height * 0.30;
     let seg = 8u32;
-    // ствол
-    let bot = b.ring_y(0.0, trunk_r, seg, 0.0);
-    let top = b.ring_y(trunk_h, trunk_r * 0.55, seg, 1.0);
+    // ствол: сужение вверх (r → 0.55r) → slope > 0 → нормаль вверх-наружу
+    let trunk_slope = -((trunk_r * 0.55 - trunk_r) / trunk_h.max(1e-4));
+    let bot = b.ring_y_with_slope(0.0, trunk_r, seg, 0.0, trunk_slope);
+    let top = b.ring_y_with_slope(trunk_h, trunk_r * 0.55, seg, 1.0, trunk_slope);
     b.bridge(&bot, &top);
     // 4 слоя ёлки
     let layers = 4;
@@ -478,8 +517,10 @@ pub fn tree_oak(device: &wgpu::Device, height: f32, seed: u32) -> Mesh {
     let trunk_r = height * 0.05;
     let trunk_h = height * 0.55;
     let seg = 10u32;
-    let bot = b.ring_y(0.0, trunk_r * 1.2, seg, 0.0);
-    let top = b.ring_y(trunk_h, trunk_r * 0.5, seg, 1.0);
+    // ствол: сильное сужение вверх (1.2r → 0.5r)
+    let trunk_slope = -((trunk_r * 0.5 - trunk_r * 1.2) / trunk_h.max(1e-4));
+    let bot = b.ring_y_with_slope(0.0, trunk_r * 1.2, seg, 0.0, trunk_slope);
+    let top = b.ring_y_with_slope(trunk_h, trunk_r * 0.5, seg, 1.0, trunk_slope);
     b.bridge(&bot, &top);
     // ветки
     let mut s = seed;

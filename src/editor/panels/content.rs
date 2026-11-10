@@ -464,7 +464,24 @@ pub fn draw_project_panel(
                     // Показываем только меши, текстуры и сцены для примера
                     if !matches!(
                         meta.kind,
-                        AssetKind::Mesh | AssetKind::Texture | AssetKind::Scene
+                        AssetKind::Mesh
+                            | AssetKind::Texture
+                            | AssetKind::Scene
+                            | AssetKind::Prefab
+                            | AssetKind::Material
+                            | AssetKind::Animation
+                            | AssetKind::Script
+                            | AssetKind::Audio
+                            | AssetKind::Shader
+                            | AssetKind::Item
+                            | AssetKind::Weapon
+                            | AssetKind::Quest
+                            | AssetKind::Dialog
+                            | AssetKind::Vendor
+                            | AssetKind::Recipe
+                            | AssetKind::Loot
+                            | AssetKind::Locale
+                            | AssetKind::Data
                     ) {
                         continue;
                     }
@@ -487,12 +504,7 @@ pub fn draw_project_panel(
                     ui.painter()
                         .rect_filled(icon_rect, 4.0, egui::Color32::from_rgb(40, 40, 40));
 
-                    let icon = match meta.kind {
-                        AssetKind::Mesh => "🧊",
-                        AssetKind::Texture => "🖼",
-                        AssetKind::Scene => "🎬",
-                        _ => "📦",
-                    };
+                    let icon = meta.kind.icon();
                     ui.painter().text(
                         icon_rect.center(),
                         egui::Align2::CENTER_CENTER,

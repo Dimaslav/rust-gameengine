@@ -28,6 +28,7 @@ pub use components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
+    HealthPickup, AmmoPickup,
 };
 pub use crafting::{
     CraftingRegistry, CraftingSession, RecipeDef, RecipeInput, RecipeOutput,

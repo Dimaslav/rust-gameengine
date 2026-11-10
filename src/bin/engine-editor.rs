@@ -1,12 +1,9 @@
-//! `engine-editor` — full engine editor with egui panels.
-
 use rust_engine::engine::crash::install_crash_handler;
 use rust_engine::engine::run;
 use rust_engine::engine::{Game, Input};
 use rust_engine::render::{
     Camera3D, PostFx, Renderer, MeshDraw, GpuLight, GpuPointLight, InstanceData, Mesh, Material, LineVertex,
 };
-use rust_engine::project::ProjectManifest;
 use rust_engine::ecs::{World, Entity};
 use rust_engine::game::components::{Transform, MeshHandle, MaterialHandle, Tint, Name};
 use rust_engine::game::lights::{DirectionalLight, PointLight};
@@ -131,20 +128,5 @@ impl Game for EditorBaseScene {
 
 fn main() {
     install_crash_handler();
-    let args: Vec<String> = std::env::args().collect();
-    let mut project_path = None;
-    for i in 0..args.len() {
-        if args[i] == "--project" && i + 1 < args.len() { project_path = Some(args[i + 1].clone()); }
-    }
-
-    if let Some(project_dir) = project_path {
-        let path = Path::new(&project_dir);
-        let manifest_path = path.join("project.ron");
-        if !manifest_path.exists() { std::process::exit(1); }
-        if let Ok(manifest) = ProjectManifest::load(&manifest_path) {
-            log::info!("Loading project: {}", manifest.name);
-            let _ = std::env::set_current_dir(path);
-        }
-    }
     run(EditorBaseScene::new());
 }

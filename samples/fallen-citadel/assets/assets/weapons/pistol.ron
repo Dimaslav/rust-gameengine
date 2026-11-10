@@ -1,0 +1,34 @@
+(
+    id: "pistol",
+    name: "Pistol",
+    kind: Pistol,
+    damage: 25.0,
+    fire_rate: 6.0,
+    mag_size: 12,
+    start_reserve: 48,
+    reload_time: 1.2,
+    auto: false,
+    spread_hip: 1.5,
+    spread_ads: 0.3,
+    ads_fov_mult: 0.85,
+    recoil_up: 0.010,
+    recoil_side: 0.002,
+    pellets: 1,
+    range: 100.0,
+    ammo_pickup: 24,
+
+    // === VIEWMODEL ===
+    mesh: Some("weapon_pistol"),
+    material: Some("weapon_gunmetal"),
+    scale: 1.0,
+    // Позиция в camera-space: x — вправо, y — вверх, z — вперёд.
+    hip_pos: (0.22, -0.20, -0.45),
+    ads_pos: (0.0, -0.10, -0.30),
+    // Угол наклона ствола (радианы).
+    hip_rot: (0.0, 0.0, 0.0),
+    ads_rot: (0.0, 0.0, 0.0),
+    // Точка вылета пули в camera-space.
+    muzzle_pos: (0.0, 0.0, -0.55),
+    // Смещение отдачи при выстреле (по z — назад).
+    kick_back: 0.04,
+)

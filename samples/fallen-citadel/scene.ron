@@ -1,0 +1,45 @@
+(
+    entities: [
+        // Солнце
+        (
+            name: Some("Sun"),
+            transform: Some((
+                position: (0.0, 20.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0)
+            )),
+            dir_light: Some((
+                direction: (0.5, 1.0, 0.3),
+                color: (1.0, 1.0, 1.0),
+                intensity: 1.2
+            ))
+        ),
+        // Пол
+        (
+            name: Some("Floor"),
+            transform: Some((
+                position: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (20.0, 1.0, 20.0)
+            )),
+            mesh: Some("cube"),
+            material: Some("arena_floor")
+        ),
+        // Куб
+        (
+            name: Some("Box"),
+            transform: Some((
+                position: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0)
+            )),
+            mesh: Some("cube"),
+            material: Some("gold")
+        )
+    ],
+    player_spawn: Some((0.0, 2.0, 5.0)),
+    materials: {},
+    texture_paths: {},
+    game_state_ron: None,
+    terrain: None,
+)

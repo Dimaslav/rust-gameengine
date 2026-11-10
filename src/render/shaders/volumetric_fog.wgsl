@@ -1,15 +1,3 @@
-// Froxel-based volumetric fog (compute).
-//
-// Сетка 160×90×64. XY = screen space, Z = экспоненциальные depth-срезы.
-// Для каждого froxel'я raymarch вдоль view-ray этого пикселя в этом
-// depth-диапазоне, на каждом шаге:
-//   1. Sample CSM shadow → light visibility
-//   2. Накопить scattering = phase * sun_color * shadow * density * dt
-//   3. Накопить extinction = density * dt
-//
-// Результат пишем в storage-texture 3D: rgb = scattering, a = extinction.
-// Composite-pass потом применяет `hdr * exp(-ext) + scattering` к HDR.
-
 struct Camera {
     view_proj:      mat4x4<f32>,
     inv_view_proj:  mat4x4<f32>,
@@ -50,7 +38,7 @@ struct Volumetric {
 @group(0) @binding(4) var s_csm: sampler_comparison;
 @group(0) @binding(5) var t_fog_out: texture_storage_3d<rgba16float, write>;
 
-const FROXEL_Z: u32 = 64u;
+const FROXEL_Z: u32 = 32u;
 const MARCH_STEPS: u32 = 32u;
 const PI: f32 = 3.14159265359;
 

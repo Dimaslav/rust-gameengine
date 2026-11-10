@@ -50,7 +50,7 @@ fn vs_main(
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let t = textureSample(t_atlas, s_atlas, in.uv);
-    let c = in.color * t;
+    let c = vec4<f32>(in.color.rgb, in.color.a * t.a);
     if (c.a < 0.001) { discard; }
     return c;
 }

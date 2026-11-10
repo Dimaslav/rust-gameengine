@@ -33,7 +33,7 @@ struct Volumetric {
 
 @group(0) @binding(8) var<uniform> camera: Camera;
 
-const FROXEL_Z: f32 = 64.0;
+const FROXEL_Z: f32 = 32.0; 
 
 struct VOut {
     @builtin(position) frag_coord: vec4<f32>,

@@ -388,7 +388,17 @@ pub fn build_size_dependent(
         create_color_target(device, "gbuffer_emissive", w, h, GBUFFER_FORMAT, 1, true);
     let gbuffer_depth_view = create_depth_view(device, w, h, 1);
 
-    // Contact shadow bind group (depth + sampler + camera + params)
+    // Contact shadows: depth → NonFiltering sampler.
+    let contact_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("contact_shadow_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
     let contact_shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("contact_shadow_bg"),
         layout: contact_shadow_layout,
@@ -399,7 +409,7 @@ pub fn build_size_dependent(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                resource: wgpu::BindingResource::Sampler(&contact_shadow_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 2,

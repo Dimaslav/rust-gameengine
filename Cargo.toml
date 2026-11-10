@@ -1,7 +1,7 @@
 [workspace]
-# Теперь у нас есть движок (корень ".") и игра-пример (samples/fallen-citadel)
 members = [".", "samples/fallen-citadel"]
 default-members = ["."]
+exclude = ["projects"]
 resolver = "2"
 
 [workspace.package]
@@ -101,14 +101,15 @@ incremental = false
 
 [profile.dev.package."*"]
 opt-level = "s"
+debug-assertions = false
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = false
+codegen-units = 16
 strip = true
 
 [profile.fast-release]
 inherits = "release"
-lto = "thin"
+lto = false
 codegen-units = 16

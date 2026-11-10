@@ -239,7 +239,40 @@ impl AudioSystem {
 
         let alive: std::collections::HashSet<Entity> =
             sources.iter().map(|(e, _, _)| *e).collect();
-        self.active.retain(|e, a| alive.contains(e) && !a.sink.empty());
+
+        // === Step 6: сначала обработать завершённые sinks ===
+        //
+        // Раньше `retain` удалял пустые sinks, а затем основной цикл
+        // создавал для них новые Sink'и и запускал звук заново —
+        // non-looping звук играл бесконечно.
+        //
+        // Теперь: если sink пуст, но src.playing == true и src.looping == false
+        // — это доигранный non-looping звук. Помечаем playing = false
+        // ДО основного цикла, чтобы он не создавал новый sink.
+        let mut to_remove: Vec<Entity> = Vec::new();
+        let mut finished: Vec<Entity> = Vec::new();
+        for (e, active) in self.active.iter() {
+            if active.sink.empty() {
+                to_remove.push(*e);
+                if alive.contains(e)
+                    && let Some(src) = world.get::<AudioSource>(*e)
+                    && src.playing
+                    && !src.looping
+                {
+                    finished.push(*e);
+                }
+            } else if !alive.contains(e) {
+                to_remove.push(*e);
+            }
+        }
+        for e in to_remove {
+            self.active.remove(&e);
+        }
+        for e in finished {
+            if let Some(src) = world.get_mut::<AudioSource>(e) {
+                src.playing = false;
+            }
+        }
 
         for (e, src, pos) in sources {
             if !src.playing {
@@ -270,14 +303,19 @@ impl AudioSystem {
                 continue;
             }
 
-            let occl_target = if src.occlusion {
+            // Step 6: occlusion только если источник spatial.
+            // Non-spatial (max_distance <= min_distance) — не raycast.
+            let is_spatial = src.max_distance > src.min_distance;
+            let occl_target = if src.occlusion && is_spatial {
                 let blocked = !crate::physics::navmesh::segment_clear(
                     world,
                     listener_pos + Vec3::Y * 0.5,
                     pos + Vec3::Y * 0.5,
                 );
                 if blocked { src.occlusion_volume } else { 1.0 }
-            } else { 1.0 };
+            } else {
+                1.0
+            };
 
             let bus_vol = self.bus_volume_effective(src.bus);
             let Some(active) = self.active.get_mut(&e) else { continue };
@@ -302,16 +340,6 @@ impl AudioSystem {
                 active.sink.set_speed(src.pitch.max(0.01));
                 active.last_pitch = src.pitch;
             }
-        }
-
-        let mut finished: Vec<Entity> = Vec::new();
-        for (e, src) in world.query::<AudioSource>() {
-            if !src.looping && src.playing && !self.active.contains_key(&e) {
-                finished.push(e);
-            }
-        }
-        for e in finished {
-            if let Some(src) = world.get_mut::<AudioSource>(e) { src.playing = false; }
         }
     }
 

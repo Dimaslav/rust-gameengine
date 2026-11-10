@@ -80,92 +80,97 @@ pub fn draw_all(
     audio: &AudioSnapshot,
     asset_db: &mut AssetDatabase,
     scripts: &ScriptSystem,
+    has_pause_menu: bool,
 ) -> (Option<EditorAction>, egui::Rect) {
     let mut action: Option<EditorAction> = None;
+    let in_play = state.play.active;
 
-    // 1. Верхнее меню (File, Edit, Assets, GameObject -> Generate World...)
+    // 1. Верхнее меню — всегда.
     top_bar::draw_menu(ui, state, &mut action);
 
-    // 2. Тулбар (Play/Pause, инструменты, статус)
+    // 2. Тулбар — всегда.
     top_bar::draw_toolbar(ui, state, stats, &mut action);
 
-    // 3. Нижняя панель (Project / Assets + Console)
-    let bottom_height = 260.0;
-    egui::Panel::bottom("bottom_panel")
-        .resizable(true)
-        .default_size(bottom_height)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let half_width = ui.available_width() * 0.6;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(half_width, ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        content::draw_project_panel(ui, state, asset_db);
-                    },
-                );
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        console::draw(ui, state);
-                    },
-                );
+    // 3. Панели редактора — только вне Play.
+    if !in_play {
+        let bottom_height = 260.0;
+        egui::Panel::bottom("bottom_panel")
+            .resizable(true)
+            .default_size(bottom_height)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let half_width = ui.available_width() * 0.6;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(half_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            content::draw_project_panel(ui, state, asset_db);
+                        },
+                    );
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            console::draw(ui, state);
+                        },
+                    );
+                });
             });
-        });
 
-    // 4. Левая панель (Hierarchy + Stats)
-    left_panel::draw(ui, state, world, assets, stats, &mut action);
+        left_panel::draw(ui, state, world, assets, stats, &mut action);
+        right_panel::draw(ui, state, world, assets, postfx, &mut action);
+    }
 
-    // 5. Правая панель (Inspector + Renderer)
-    right_panel::draw(ui, state, world, assets, postfx, &mut action);
-
-    // 6. Центральная панель (Viewport)
+    // 4. Центральная панель (Viewport) — всегда.
     let central = egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
-            viewport_toolbar::draw(ui, state);
+            if !in_play {
+                viewport_toolbar::draw(ui, state);
+            }
         });
     let viewport_rect = central.response.rect;
 
-    // --- Оверлеи и модальные окна ---
-    overlays::draw_box_select_overlay(ui.ctx(), state);
-    overlays::draw_context_menu(ui.ctx(), state, world, &mut action);
+    // 5. Оверлеи редактора — только вне Play.
+    if !in_play {
+        overlays::draw_box_select_overlay(ui.ctx(), state);
+        overlays::draw_context_menu(ui.ctx(), state, world, &mut action);
 
-    if state.command_palette_open {
-        command_palette::draw(ui.ctx(), state, &mut action);
-    }
+        if state.command_palette_open {
+            command_palette::draw(ui.ctx(), state, &mut action);
+        }
 
-    if !state.play.active {
         bookmarks::draw(ui.ctx(), state, &mut action);
         audio::draw(ui.ctx(), state, audio, &mut action);
+
+        inspector_audio::draw_window(ui.ctx(), state, world, audio, &mut action);
+
+        let show_content = &mut state.layout.show_content_browser;
+        let thumbnails = &mut state.thumbnails;
+        content::draw_window(ui.ctx(), show_content, asset_db, thumbnails);
+
+        let mut show_scripts = state.layout.show_script_panel;
+        scripts::draw_window(
+            ui.ctx(),
+            &mut show_scripts,
+            state,
+            &*world,
+            scripts,
+            &mut action,
+        );
+        state.layout.show_script_panel = show_scripts;
+
+        settings_panel::draw_window(ui.ctx(), state, stats);
+        scene_validation::draw_window(ui.ctx(), state, world, &mut action);
     }
 
-    inspector_audio::draw_window(ui.ctx(), state, world, audio, &mut action);
-
-    let show_content = &mut state.layout.show_content_browser;
-    let thumbnails = &mut state.thumbnails;
-    content::draw_window(ui.ctx(), show_content, asset_db, thumbnails);
-
-    let mut show_scripts = state.layout.show_script_panel;
-    scripts::draw_window(
-        ui.ctx(),
-        &mut show_scripts,
-        state,
-        &*world,
-        scripts,
-        &mut action,
-    );
-    state.layout.show_script_panel = show_scripts;
-
-    settings_panel::draw_window(ui.ctx(), state, stats);
-    scene_validation::draw_window(ui.ctx(), state, world, &mut action);
-
-    if state.play.active && state.play.paused {
+    // 6. Pause-overlay редактора — только если у игры нет своего.
+    if in_play && state.play.paused && !has_pause_menu {
         overlays::draw_pause_overlay(ui.ctx(), state, &mut action);
     }
 
+    // 7. Hint.
     if let Some((text, ttl)) = &state.hint {
         let alpha = ttl.clamp(0.0, 1.0);
         egui::Area::new(egui::Id::unique("editor_hint"))

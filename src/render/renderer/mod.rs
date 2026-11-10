@@ -415,7 +415,7 @@ impl Renderer {
             label: Some("contact_shadow_layout"),
             entries: &[
                 bgl_depth_2d(0),
-                bgl_sampler_frag(1),
+                bgl_sampler_nonfiltering_frag(1),
                 bgl_uniform_frag(2),
                 bgl_uniform_frag(3),
             ],
@@ -514,7 +514,7 @@ impl Renderer {
         });
         let debug_depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("debug_depth_layout"),
-            entries: &[bgl_depth_2darray(0), bgl_sampler_frag(1)],
+            entries: &[bgl_depth_2darray(0), bgl_sampler_nonfiltering_frag(1)],
         });
         let skybox_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("skybox_layout"),
@@ -1235,12 +1235,21 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&sd.gbuffer_depth_view),
             }],
         });
+        let debug_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("debug_depth_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         let csm_debug_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("csm_debug_bg"),
             layout: &debug_depth_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&csm_array_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sd.linear_sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&debug_depth_sampler) },
             ],
         });
 
@@ -1254,7 +1263,7 @@ impl Renderer {
 
         let fallback_texture = Texture::white(&device, &queue, &texture_layout).unwrap();
         let fallback_emissive = Texture::from_solid(&device, &queue, &texture_layout, [0, 0, 0, 255], "fallback_emissive").unwrap();
-        let fallback_mr = Texture::from_solid_linear(&device, &queue, &texture_layout, [255, 255, 0, 255], "fallback_mr").unwrap();
+        let fallback_mr = Texture::from_solid_linear(&device, &queue, &texture_layout, [255, 255, 255, 255], "fallback_mr").unwrap();
         let fallback_normal = Texture::from_solid_linear(&device, &queue, &texture_layout, [128, 128, 255, 255], "fallback_normal").unwrap();
 
         let default_material = Material::default();
@@ -1534,10 +1543,15 @@ impl Renderer {
                         }),
                         primitive: wgpu::PrimitiveState::default(),
                         depth_stencil: Some(wgpu::DepthStencilState {
-                            format: DEPTH_FORMAT, 
-                            depth_write_enabled: Some(false), // Не записываем в буфер глубины
-                            depth_compare: Some(wgpu::CompareFunction::Always), // ВСЕГДА рисуем поверх объектов
-                            stencil: wgpu::StencilState::default(), 
+                            format: DEPTH_FORMAT,
+                            // Небо не пишет в depth — иначе перекроет всё
+                            // (fullscreen triangle, fragment.z = 0).
+                            depth_write_enabled: Some(false),
+                            // Должно совпадать с Renderer::new (LessEqual).
+                            // Раньше было `Always` → после F12 небо рисовалось
+                            // поверх всей сцены.
+                            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                            stencil: wgpu::StencilState::default(),
                             bias: wgpu::DepthBiasState::default(),
                         }),
                         multisample: wgpu::MultisampleState::default(),
@@ -1906,12 +1920,21 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&self.sd.gbuffer_depth_view),
             }],
         });
+        let debug_depth_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("debug_depth_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         self.csm_debug_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("csm_debug_bg"),
             layout: &self.debug_depth_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.csm_array_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sd.linear_sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&debug_depth_sampler) },
             ],
         });
         self.taa_reset_frames = 2;
@@ -1956,7 +1979,7 @@ impl Renderer {
         }
     }
 
-    fn ensure_instance_capacity(&mut self, needed: u64) {
+    pub(crate) fn ensure_instance_capacity(&mut self, needed: u64) {
         if needed <= self.instance_capacity { return; }
         let new_cap = (self.instance_capacity * 2).max(needed);
         self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2371,7 +2394,14 @@ impl Renderer {
 
         if self.atmosphere_settings.enabled {
             let cam_h = camera.position().y.max(1.0).min(5000.0);
-            let atmo_params = AtmosphereParams::from_settings(&self.atmosphere_settings, cam_h);
+            let mut atmo_params =
+                AtmosphereParams::from_settings(&self.atmosphere_settings, cam_h);
+            if dir_light_dir.length_squared() > 1e-6 {
+                let n = dir_light_dir.normalize();
+                atmo_params.sun[0] = n.x;
+                atmo_params.sun[1] = n.y;
+                atmo_params.sun[2] = n.z;
+            }
             self.queue.write_buffer(&self.atmosphere_uniform, 0, bytemuck::bytes_of(&atmo_params));
             passes::encode_atmosphere_pass(self, &mut encoder);
         } else {
@@ -2544,6 +2574,15 @@ fn bgl_sampler_frag(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding, visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+fn bgl_sampler_nonfiltering_frag(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
         count: None,
     }
 }

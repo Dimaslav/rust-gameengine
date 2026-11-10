@@ -1,0 +1,12 @@
+(
+    id: "chain_mail",
+    name: "Chain Mail",
+    kind: Armor,
+    rarity: Uncommon,
+    description: "+5 Vitality, +2 Dexterity",
+    bonus_dexterity: 2,
+    bonus_vitality: 5,
+    sell_price: 100,
+    max_stack: 1,
+    equippable: true,
+)

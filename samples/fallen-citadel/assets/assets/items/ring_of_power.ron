@@ -1,0 +1,11 @@
+(
+    id: "ring_of_power",
+    name: "Ring of Power",
+    kind: Trinket,
+    rarity: Rare,
+    description: "+5 Strength",
+    bonus_strength: 5,
+    sell_price: 250,
+    max_stack: 1,
+    equippable: true,
+)

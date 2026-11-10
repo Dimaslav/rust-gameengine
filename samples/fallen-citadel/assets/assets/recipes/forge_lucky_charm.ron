@@ -1,0 +1,13 @@
+(
+    id: "forge_lucky_charm",
+    title: "Lucky Charm",
+    category: "Trinkets",
+    inputs: [
+        (item_id: "ruby_gem", count: 1),
+        (item_id: "map_fragment", count: 2),
+    ],
+    outputs: [
+        (item_id: "lucky_charm", count: 1),
+    ],
+    gold_cost: 100,
+)

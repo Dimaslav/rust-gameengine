@@ -21,3 +21,4 @@ pub mod ui;
 pub use app_state::{AppMode, AppSettings};
 pub use ecs::{Entity, World};
 pub use engine::{crash, run, Game, Input, WorldLoadRequest};
+pub use project::{Project, ProjectManifest};

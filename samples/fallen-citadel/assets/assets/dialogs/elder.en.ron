@@ -1,0 +1,155 @@
+(
+    id: "elder",
+    speaker_name: "Elder",
+    start: "root",
+    nodes: {
+        "root": (
+            speaker: "Elder",
+            text: "Greetings, traveler. I am the elder of this village. How can I help?",
+            options: [
+                (text: "I killed the guards. The courtyard is clear.",
+                    next: Some("turn_in_wolves"),
+                    condition: Some("quest_objectives_done:hunt_wolves"),
+                    effect: [CompleteQuest("hunt_wolves")]),
+                (text: "The Lord is dead. His heart is mine.",
+                    next: Some("turn_in_lord"),
+                    condition: Some("quest_objectives_done:slay_lord"),
+                    effect: [CompleteQuest("slay_lord")]),
+
+                (text: "I'm still working on the guards.",
+                    next: Some("progress_wolves"),
+                    condition: Some("quest_active:hunt_wolves"), effect: []),
+                (text: "I'm looking for the Lord.",
+                    next: Some("progress_lord"),
+                    condition: Some("quest_active:slay_lord"), effect: []),
+
+                (text: "Tell me about the village.", next: Some("lore_village"), effect: []),
+                (text: "Got any work?", next: Some("quest_hub"), effect: []),
+                (text: "What do you know about the Citadel?", next: Some("lore_citadel"), effect: []),
+                (text: "I must go.", next: None, effect: []),
+            ],
+        ),
+
+        "progress_wolves": (
+            speaker: "Elder",
+            text: "The guards are in the courtyard, to the east. Be careful.",
+            options: [(text: "Understood.", next: Some("root"), effect: [])],
+        ),
+        "progress_lord": (
+            speaker: "Elder",
+            text: "The Citadel is to the east. The key is in the treasury, or there's a portal by the blacksmith.",
+            options: [(text: "Understood.", next: Some("root"), effect: [])],
+        ),
+
+        "turn_in_wolves": (
+            speaker: "Elder",
+            text: "You did it! The courtyard is clear. Take your reward — you've earned it.",
+            options: [(text: "Glad to help.", next: Some("root"), effect: [])],
+        ),
+        "turn_in_lord": (
+            speaker: "Elder",
+            text: "The Lord has fallen. Darkness retreats. You are a hero. Accept my gratitude.",
+            options: [(text: "It was an honor.", next: None, effect: [])],
+        ),
+
+        "lore_village": (
+            speaker: "Elder",
+            text: "It used to be a flourishing village. Now it's but a shadow of the past. Wolves and undead plague our lands.",
+            options: [
+                (text: "Who's to blame?", next: Some("lore_blame"), effect: []),
+                (text: "How can I help?", next: Some("quest_hub"), effect: []),
+                (text: "I see.", next: Some("root"), effect: []),
+            ],
+        ),
+        "lore_blame": (
+            speaker: "Elder",
+            text: "The Lord of the Citadel. He awakened three moons ago.",
+            options: [
+                (text: "How do I defeat him?", next: Some("lore_citadel"), effect: []),
+                (text: "I'll help.", next: Some("quest_hub"), effect: []),
+            ],
+        ),
+        "lore_citadel": (
+            speaker: "Elder",
+            text: "The Citadel is to the east. In its dungeons — the Lord. His heart is a crystal of pure darkness.",
+            options: [
+                (text: "How do I get there?", next: Some("lore_path"), effect: []),
+                (text: "What should I take?", next: Some("lore_gear"), effect: []),
+                (text: "I'll come back later.", next: Some("root"), effect: []),
+            ],
+        ),
+        "lore_path": (
+            speaker: "Elder",
+            text: "Through the forest — to the gates. The key is on the boss or there's a portal by the blacksmith.",
+            options: [
+                (text: "Understood.", next: Some("root"), effect: []),
+                (text: "Who is the blacksmith?", next: Some("lore_smith"), effect: []),
+            ],
+        ),
+        "lore_smith": (
+            speaker: "Elder",
+            text: "The blacksmith is an old friend. He forged weapons for many heroes.",
+            options: [
+                (text: "I'll visit him.", next: Some("root"), effect: []),
+            ],
+        ),
+        "lore_gear": (
+            speaker: "Elder",
+            text: "Take potions, ammo, and luck. Here's some gold to start.",
+            options: [
+                (text: "Thank you!",
+                    next: Some("root"),
+                    condition: Some("gold <= 50"),
+                    effect: [GiveGold(50), GiveItem(id: "health_potion", count: 2)]),
+                (text: "I already have everything.",
+                    next: Some("root"),
+                    condition: Some("gold >= 51"),
+                    effect: []),
+            ],
+        ),
+
+        "quest_hub": (
+            speaker: "Elder",
+            text: "Two tasks: wolves in the forest, and the Lord in the Citadel.",
+            options: [
+                (text: "Give me the guard job.",
+                    next: Some("quest_wolves_confirm"),
+                    condition: Some("quest_not_started:hunt_wolves"),
+                    effect: []),
+                (text: "Tell me about the Citadel.",
+                    next: Some("quest_citadel_confirm"),
+                    condition: Some("quest_not_started:slay_lord"),
+                    effect: []),
+                (text: "I'll think about it.", next: Some("root"), effect: []),
+            ],
+        ),
+        "quest_wolves_confirm": (
+            speaker: "Elder",
+            text: "Kill two guards in the courtyard. Bring me news of victory.",
+            options: [
+                (text: "Deal.", next: Some("quest_wolves_started"),
+                    effect: [StartQuest("hunt_wolves")]),
+                (text: "Something else first.", next: Some("quest_hub"), effect: []),
+            ],
+        ),
+        "quest_wolves_started": (
+            speaker: "Elder",
+            text: "Excellent. Return victorious!",
+            options: [(text: "On my way.", next: None, effect: [])],
+        ),
+        "quest_citadel_confirm": (
+            speaker: "Elder",
+            text: "Find the key or take the portal. Kill the Lord.",
+            options: [
+                (text: "I'll manage.", next: Some("quest_citadel_started"),
+                    effect: [StartQuest("slay_lord")]),
+                (text: "I need to get stronger first.", next: Some("quest_hub"), effect: []),
+            ],
+        ),
+        "quest_citadel_started": (
+            speaker: "Elder",
+            text: "May luck be with you.",
+            options: [(text: "I promise.", next: None, effect: [])],
+        ),
+    },
+)

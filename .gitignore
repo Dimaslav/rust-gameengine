@@ -1,47 +1,51 @@
-# Rust
+# ============================================================
+# RUST ENGINE 3D — .gitignore
+# ============================================================
+#
+# Принципы:
+#   * Конфиги проектов (project.ron, scene.ron, settings.ron,
+#     input.ron, editor.ron) — это исходники, они КОММИТЯТСЯ.
+#   * `assets/**` и `assets/**/*.meta` — КОММИТЯТСЯ (в т.ч. .meta,
+#     потому что AssetId должен быть стабильным между машинами).
+#   * Артефакты сборки (`target/`, `dist/`, `*.pak`) — игнорируются.
+#   * Пользовательские данные (`saves/`, `crash.log`) — игнорируются.
+
+# --- Rust build artifacts ---
 /target/
+**/target/
 **/*.rs.bk
 *.pdb
 
-# Game binaries (release artifacts)
+# --- Game distribution artifacts ---
 /dist/
 *.pak
 
-# Saves и настройки (пользовательские, не коммитим)
+# --- Пользовательские данные ---
+# Корень движка.
 /saves/
-settings.ron
-editor.ron
-input.ron
-crash.log
-build-release.log
-build.log
-scene.ron
+# Проекты (шаблон создаёт свой .gitignore в projects/<name>/, но
+# на случай, если проект создан вручную).
+projects/*/saves/
+# Сэмплы.
+samples/*/saves/
 
-# Локальные отчёты линтера/тестов (не артефакты, а скретч)
+# Логи.
+crash.log
+build.log
+build-release.log
+
+# --- Локальные отчёты линтера/тестов (скретч, не артефакты) ---
 clippy_baseline.txt
 tests_baseline.txt
 clippy_after_fix.txt
 tests_after.txt
 
-# IDE
+# --- IDE ---
 .vscode/
 .idea/
 *.iml
 .claude/
 
-# OS
+# --- OS ---
 Thumbs.db
 .DS_Store
-
-# ============================================================
-# ВАЖНО: assets/**/*.meta НЕ игнорируются.
-#
-# .meta хранит stable AssetId (128-bit GUID) и import_settings
-# (sRGB vs linear). Если .meta не в репозитории:
-#   * каждый разработчик получает свой AssetId → ссылки в
-#     .scene.ron / .prefab.ron ломаются при merge;
-#   * sRGB/linear настройки текстур не синхронизируются;
-#   * packaging не может построить dependency graph.
-#
-# Это стандарт для Unity/Unreal/Godot — .meta коммитятся.
-# ============================================================

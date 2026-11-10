@@ -265,13 +265,14 @@ pub struct FortressDemo {
     // === Vendor ===
     vendor_registry: VendorRegistry,
     vendor_session: Option<VendorSession>,
-    vendor_esc_pressed: bool,
 
     // === Crafting ===
     crafting_registry: CraftingRegistry,
     crafting_session: Option<CraftingSession>,
-    crafting_esc_pressed: bool,
     rmb_pressed_this_frame: bool,
+
+    /// Игра просит App снять паузу (кнопка Resume в собственном меню).
+    pending_unpause: bool,
 
     last_play_mode: bool,
     hud: Hud,
@@ -304,14 +305,9 @@ pub struct FortressDemo {
 
 impl FortressDemo {
     pub fn new() -> Self {
-        let mut quest_manager = QuestManager::new();
-        if let Ok(qm) = QuestManager::load_from_dir("assets/quests") {
-            quest_manager = qm;
-        }
-
-        let initial_lang = rust_engine::game::locale::current_id().unwrap_or_else(|| "ru".to_string());
-        let dialogs = DialogGraph::load_from_dir("assets/dialogs", &initial_lang).unwrap_or_default();
-        log::info!("dialogs: {} graphs loaded [{}]", dialogs.len(), initial_lang);
+        let quest_manager = QuestManager::new();
+        let initial_lang = rust_engine::game::locale::current_id()
+            .unwrap_or_else(|| "en".to_string());
 
         Self {
             camera: Camera3D::new(16.0 / 9.0),
@@ -343,7 +339,7 @@ impl FortressDemo {
             demo_health: 100.0,
             demo_health_max: 100.0,
             demo_paused: false,
-            demo_show_debug: true,
+            demo_show_debug: false,
             last_target_hp: 100.0,
 
             weapons: WeaponRegistry::empty(),
@@ -370,18 +366,17 @@ impl FortressDemo {
 
             vendor_registry: VendorRegistry::empty(),
             vendor_session: None,
-            vendor_esc_pressed: false,
 
             crafting_registry: CraftingRegistry::empty(),
             crafting_session: None,
-            crafting_esc_pressed: false,
+            pending_unpause: false,
 
             last_play_mode: false,
             hud: Hud::new(),
             campaign: CampaignState::new(),
             quest_manager,
 
-            dialogs,
+            dialogs: HashMap::new(),
             current_dialog_lang: initial_lang,
             dialog_session: None,
 
@@ -537,24 +532,21 @@ impl FortressDemo {
         self.demo_health = (self.demo_health + amount).min(self.demo_health_max);
     }
 
-    // ============================================================
-    // RPG helpers
-    // ============================================================
-
     fn total_attributes(&self) -> rust_engine::game::stats::Attributes {
-        let mut a = self.player_stats.attributes;
-        let bonus = self.equipment.bonus_attributes(&self.item_registry);
-        a.strength = a.strength.saturating_add(bonus.strength);
-        a.dexterity = a.dexterity.saturating_add(bonus.dexterity);
-        a.intelligence = a.intelligence.saturating_add(bonus.intelligence);
-        a.vitality = a.vitality.saturating_add(bonus.vitality);
-        a.luck = a.luck.saturating_add(bonus.luck);
-        a
+        let base = self.player_stats.attributes;
+        let b = self.equipment.bonus_attributes_signed(&self.item_registry);
+        rust_engine::game::stats::Attributes {
+            strength: ((base.strength as i32) + b[0]).max(0) as u32,
+            dexterity: ((base.dexterity as i32) + b[1]).max(0) as u32,
+            intelligence: ((base.intelligence as i32) + b[2]).max(0) as u32,
+            vitality: ((base.vitality as i32) + b[3]).max(0) as u32,
+            luck: ((base.luck as i32) + b[4]).max(0) as u32,
+        }
     }
 
     fn try_pickup(&mut self, item_id: &str, count: u32) {
         if let Some(item) = self.item_registry.get_by_id(item_id).cloned()
-            && item.kind == ItemKind::Misc
+            && item.kind == ItemKind::Currency
             && item.gold_value > 0
         {
             let total = item.gold_value.saturating_mul(count);
@@ -1416,28 +1408,41 @@ impl FortressDemo {
             return;
         }
 
-        if name.starts_with("health_") {
-            let amount = world
-                .get::<Tint>(e)
-                .map(|t| (t.0[0] * 100.0).max(10.0))
-                .unwrap_or(30.0);
-            self.heal(amount);
-            self.hud.push(format!("+{:.0} HP", amount));
+        if let Some(hp) = world
+            .get::<rust_engine::game::components::HealthPickup>(e)
+            .copied()
+        {
+            self.heal(hp.amount);
+            self.hud.push(format!("+{:.0} HP", hp.amount));
             if let Some(t) = world.get_mut::<Transform>(e) {
                 t.position.y = -500.0;
             }
             return;
         }
 
-        if name.starts_with("ammo_") {
-            let mult = world
-                .get::<Tint>(e)
-                .map(|t| (t.0[0] * 4.0).max(1.0))
-                .unwrap_or(2.0);
+        if let Some(ap) = world
+            .get::<rust_engine::game::components::AmmoPickup>(e)
+            .copied()
+        {
+            let mult = (ap.amount as f32 / 20.0).clamp(1.0, 8.0);
             let added = self.give_ammo_all(mult);
             self.hud.push(format!("+{} ammo (all weapons)", added));
             if let Some(t) = world.get_mut::<Transform>(e) {
                 t.position.y = -500.0;
+            }
+            return;
+        }
+
+        // === Step 8.4: Chests ===
+        if let Some(mut chest_data) = world.get::<crate::game::rpg::Chest>(e).copied() {
+            if !chest_data.opened {
+                chest_data.opened = true;
+                self.campaign.gold = self.campaign.gold.saturating_add(chest_data.gold);
+                self.hud.push(format!("💰 +{} gold from chest", chest_data.gold));
+                if let Some(t) = world.get_mut::<Transform>(e) {
+                    t.position.y = -500.0;
+                }
+                world.insert(e, chest_data);
             }
             return;
         }
@@ -1573,13 +1578,6 @@ impl FortressDemo {
     }
 }
 
-// ============================================================
-// Default PostFx
-// ============================================================
-//
-// FIX: туман 0.006 → 0.0006 (сцена не вымывается), shadow_bias
-// увеличен вдвое (убирает черные зубцы на стенах Act1_*).
-
 fn default_postfx() -> PostFx {
     PostFx {
         bloom_threshold: 1.5,
@@ -1614,10 +1612,6 @@ fn default_postfx() -> PostFx {
     }
 }
 
-// ============================================================
-// Game impl
-// ============================================================
-
 impl Game for FortressDemo {
     fn init_with_assets(
         &mut self,
@@ -1626,6 +1620,25 @@ impl Game for FortressDemo {
         assets: &rust_engine::assets::AssetDatabase,
     ) {
         log::info!("FortressDemo: AssetDatabase {} assets", assets.len());
+
+        self.quest_manager = QuestManager::load_from_dir("assets/quests")
+            .unwrap_or_else(|e| {
+                log::warn!("FortressDemo: quests load failed: {:#}", e);
+                QuestManager::new()
+            });
+        self.current_dialog_lang = rust_engine::game::locale::current_id()
+            .unwrap_or_else(|| "en".to_string());
+        self.dialogs = DialogGraph::load_from_dir(
+            "assets/dialogs",
+            &self.current_dialog_lang,
+        )
+        .unwrap_or_default();
+        log::info!(
+            "FortressDemo: {} quests, {} dialogs [{}]",
+            self.quest_manager.registry.len(),
+            self.dialogs.len(),
+            self.current_dialog_lang,
+        );
 
         renderer.add_mesh("cube", Mesh::cube(&renderer.device, 1.0));
         renderer.add_mesh("sphere", Mesh::sphere(&renderer.device, 0.5, 16, 24));
@@ -1802,10 +1815,6 @@ impl Game for FortressDemo {
         self.last_play_mode = in_play;
 
         self.rmb_pressed_this_frame = input.mouse_pressed(MouseButton::Right);
-        self.vendor_esc_pressed = input.key_pressed(KeyCode::Escape)
-            && self.vendor_session.is_some();
-        self.crafting_esc_pressed = input.key_pressed(KeyCode::Escape)
-            && self.crafting_session.is_some();
 
         let total_attrs = self.total_attributes();
         let max_hp = 100.0 + total_attrs.vitality as f32 * 10.0;
@@ -1980,9 +1989,7 @@ impl Game for FortressDemo {
                 && !self.demo_paused
                 && self.campaign.stage != Stage::Victory
                 && self.weapon_raise_timer <= 0.0
-                && !self.show_character_sheet
-                && !self.show_inventory
-                && self.dialog_session.is_none();
+                && !self.has_blocking_modal();
 
             if can_shoot && trigger {
                 let rt_opt = self.current_runtime().cloned();
@@ -2148,10 +2155,40 @@ impl Game for FortressDemo {
     }
 
     fn on_play_enter(&mut self, _world: &World) -> Option<Box<dyn Any>> {
-        Some(Box::new(()))
+        match self.save_game_state() {
+            Some(ron) => {
+                log::info!(
+                    "Play-in-Editor: game state snapshot saved ({} bytes)",
+                    ron.len()
+                );
+                Some(Box::new(ron))
+            }
+            None => {
+                log::warn!(
+                    "Play-in-Editor: save_game_state() returned None — \
+                     game state will NOT be restored on exit"
+                );
+                None
+            }
+        }
     }
 
-    fn on_play_exit(&mut self, _state: Box<dyn Any>) {}
+    fn on_play_exit(&mut self, state: Box<dyn Any>) {
+        match state.downcast::<String>() {
+            Ok(ron) => {
+                log::info!(
+                    "Play-in-Editor: restoring game state ({} bytes)",
+                    ron.len()
+                );
+                self.load_game_state(&ron);
+            }
+            Err(_) => {
+                log::warn!(
+                    "Play-in-Editor: on_play_exit received unexpected payload type"
+                );
+            }
+        }
+    }
 
     fn on_pause_changed(&mut self, paused: bool) {
         if self.demo_paused != paused {
@@ -2161,6 +2198,128 @@ impl Game for FortressDemo {
                 self.inv_drag.cancel();
             }
         }
+    }
+
+    // ============================================================
+    // Step 1: Esc / pause / cursor
+    // ============================================================
+
+    fn has_blocking_modal(&self) -> bool {
+        self.dialog_session.is_some()
+            || self.vendor_session.is_some()
+            || self.crafting_session.is_some()
+            || self.show_inventory
+            || self.show_character_sheet
+    }
+
+    fn has_pause_menu(&self) -> bool {
+        true
+    }
+
+    fn on_escape_pressed(&mut self, _world: &mut World) -> bool {
+        // Порядок: сверху вниз. Диалог обычно перекрывает всё остальное;
+        // инвентарь/лист — ниже.
+        if self.dialog_session.is_some() {
+            self.dialog_session = None;
+            return true;
+        }
+        if self.vendor_session.is_some() {
+            self.vendor_session = None;
+            return true;
+        }
+        if self.crafting_session.is_some() {
+            self.crafting_session = None;
+            return true;
+        }
+        if self.show_character_sheet {
+            self.show_character_sheet = false;
+            return true;
+        }
+        if self.show_inventory {
+            self.show_inventory = false;
+            self.inv_drag.cancel();
+            return true;
+        }
+        false
+    }
+
+    fn take_unpause_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_unpause)
+    }
+
+    fn update_paused(&mut self, world: &mut World, renderer: &mut Renderer) {
+        // На паузе выполняем только meta-действия, которые не зависят от dt.
+        if self.pending_autosave {
+            self.pending_autosave = false;
+            self.save_slot(0, world, renderer);
+        }
+        if let Some(slot) = self.pending_save_slot.take() {
+            self.save_slot(slot, world, renderer);
+        }
+    }
+
+    // ============================================================
+    // Step 2: on_world_replaced — remap Entity-хэндлов
+    // ============================================================
+
+    fn on_world_replaced(&mut self, world: &mut World) {
+        log::info!("FortressDemo: on_world_replaced, world has {} entities", world.len());
+
+        // 1. Сбросить кэшированные Entity-хэндлы.
+        self.bell_entity = None;
+        self.ai_target_entity = None;
+        self.boss_entity = None;
+        self.gate_1 = None;
+        self.gate_2 = None;
+        self.gate_4 = None;
+        self.gate_boss = None;
+        self.navmesh_bake_requested = true;
+
+        // 2. Сбросить runtime-UI-сессии.
+        self.dialog_session = None;
+        self.vendor_session = None;
+        self.crafting_session = None;
+        self.show_inventory = false;
+        self.show_character_sheet = false;
+        self.inv_drag.cancel();
+
+        // 3. Сбросить «уже сработавшие» триггеры — Entity-хэндлы протухли.
+        self.campaign.processed.clear();
+
+        // 4. Попытаться найти кэшированные сущности заново по имени.
+        //    Если мир — это свежий World::new() (New Game / Undo),
+        //    хэндлов не будет, и мы пересоберём кампанию.
+        self.ai_target_entity = Self::find_by_name(world, "Player");
+        self.bell_entity = Self::find_by_name(world, "Bell");
+        self.boss_entity = Self::find_by_name(world, "Boss_Dungeon");
+        self.gate_1 = Self::find_by_name(world, "gate_east_1");
+        self.gate_2 = Self::find_by_name(world, "gate_east_2");
+        self.gate_4 = Self::find_by_name(world, "gate_north_4");
+        self.gate_boss = Self::find_by_name(world, "gate_boss");
+
+        // 5. Если кампании нет — пересобрать при следующем update.
+        let has_campaign = world
+            .query::<Name>()
+            .any(|(_, n)| n.0 == "Player");
+        if !has_campaign {
+            self.built = false;
+            log::info!("FortressDemo: no campaign in new world → will rebuild");
+        } else {
+            log::info!(
+                "FortressDemo: campaign found in new world \
+                 (player={:?}, gates={:?}/{:?}/{:?}/{:?}, boss={:?})",
+                self.ai_target_entity,
+                self.gate_1,
+                self.gate_2,
+                self.gate_4,
+                self.gate_boss,
+                self.boss_entity,
+            );
+        }
+
+        self.animation_runtime.clear();
+        self.pending_unpause = true;
+        self.probe_baked_this_session = false;
     }
 
     fn save_game_state(&self) -> Option<String> {
@@ -2178,8 +2337,10 @@ impl Game for FortressDemo {
             player_stats: &'a PlayerStats,
             inventory: &'a Inventory,
             equipment: &'a Equipment,
+            quest_manager_state: &'a rust_engine::game::quests::QuestManagerState,
         }
 
+        let quest_manager_state = self.quest_manager.snapshot();
         let snap = StateSnapshot {
             campaign: &self.campaign,
             camera_pos: self.camera.first_person_pos.to_array(),
@@ -2193,6 +2354,7 @@ impl Game for FortressDemo {
             player_stats: &self.player_stats,
             inventory: &self.inventory,
             equipment: &self.equipment,
+            quest_manager_state: &quest_manager_state,
         };
         ron::ser::to_string(&snap).ok()
     }
@@ -2212,6 +2374,7 @@ impl Game for FortressDemo {
             #[serde(default)] player_stats: PlayerStats,
             #[serde(default)] inventory: Option<Inventory>,
             #[serde(default)] equipment: Equipment,
+            #[serde(default)] quest_manager_state: Option<rust_engine::game::quests::QuestManagerState>,
         }
 
         match ron::from_str::<StateSnapshot>(ron) {
@@ -2249,6 +2412,19 @@ impl Game for FortressDemo {
                 self.equipment = snap.equipment;
                 self.demo_health_max = self.total_attributes().vitality as f32 * 10.0 + 100.0;
                 self.demo_health = self.demo_health.min(self.demo_health_max);
+
+                // === Step 2: восстановить квесты ===
+                if let Some(qs) = snap.quest_manager_state {
+                    self.quest_manager.restore(qs);
+                    log::info!(
+                        "QuestManager restored: {} active, {} completed, {} objectives-done",
+                        self.quest_manager.active.len(),
+                        self.quest_manager.completed.len(),
+                        self.quest_manager.objectives_done.len(),
+                    );
+                }
+
+                self.demo_paused = false;
 
                 self.inv_drag.cancel();
                 self.hud.push("📂 Game loaded");
@@ -2561,6 +2737,10 @@ impl Game for FortressDemo {
         renderer: &Renderer,
         selected: &[Entity],
     ) -> Vec<LineVertex> {
+        if self.last_play_mode && !self.demo_show_debug {
+            return Vec::new();
+        }
+
         let mut batch = LineBatch::new();
 
         if self.show_grid {
@@ -2627,7 +2807,7 @@ impl Game for FortressDemo {
                 position: [t.position.x, t.position.y, t.position.z, l.range],
                 color: [l.color[0], l.color[1], l.color[2], l.intensity],
             })
-        }).take(16).collect()
+        }).take(256).collect()
     }
 
     fn ambient(&self) -> [f32; 3] { [0.05, 0.06, 0.09] }
@@ -2643,14 +2823,6 @@ impl Game for FortressDemo {
     ) {
         self.hud.tick(self.last_dt);
         if !self.last_play_mode { return; }
-        if self.vendor_session.is_some() && self.vendor_esc_pressed {
-            self.vendor_session = None;
-            self.vendor_esc_pressed = false;
-        }
-        if self.crafting_session.is_some() && self.crafting_esc_pressed {
-            self.crafting_session = None;
-            self.crafting_esc_pressed = false;
-        }
 
         let is_victory = self.campaign.stage == Stage::Victory;
 
@@ -2867,7 +3039,7 @@ impl Game for FortressDemo {
             let bx = sw * 0.5 - bw * 0.5;
 
             if ui.button(bx, py + 82.0, bw, bh, "Resume") {
-                self.demo_paused = false;
+                self.pending_unpause = true;
             }
             if ui.button(bx, py + 122.0, bw, bh, "Heal +25") {
                 self.heal(25.0);
@@ -2889,7 +3061,7 @@ impl Game for FortressDemo {
             }
             if ui.button(bx, py + 202.0, bw, bh, "🏠 Quit to Main Menu") {
                 self.pending_quit_to_menu = true;
-                self.demo_paused = false;
+                self.pending_unpause = true;
             }
 
             ui.text_centered(sw * 0.5, py + 258.0, "SAVE / LOAD", 16.0,
@@ -2933,7 +3105,10 @@ impl Game for FortressDemo {
             if let Some((slot, kind)) = action {
                 match kind {
                     "save" => self.pending_save_slot = Some(slot),
-                    "load" => self.load_slot(slot),
+                    "load" => {
+                        self.load_slot(slot);
+                        self.pending_unpause = true;
+                    }
                     "delete" => self.delete_slot(slot),
                     _ => {}
                 }
@@ -3052,8 +3227,6 @@ impl Game for FortressDemo {
                     }
                 }
             }
-        } else {
-            self.vendor_esc_pressed = false;
         }
 
         if let Some(mut session) = self.crafting_session.take() {

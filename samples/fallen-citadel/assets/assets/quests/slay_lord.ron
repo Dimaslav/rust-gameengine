@@ -1,0 +1,13 @@
+(
+    id: "slay_lord",
+    title: "Владыка Цитадели",
+    description: "Убей Владыку в подземелье и принеси весть Elder'у.",
+    objectives: [
+        (Kill: (target_prefix: "Boss_Dungeon", count: 1)),
+    ],
+    rewards: [
+        Xp(500),
+        Gold(1000),
+    ],
+    auto_complete: false,
+)

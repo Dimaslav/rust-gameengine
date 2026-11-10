@@ -2,6 +2,10 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::ecs::Entity;
 
+// ============================================================
+// Transform
+// ============================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vec3,
@@ -41,6 +45,10 @@ impl Transform {
     }
 }
 
+// ============================================================
+// Basic components
+// ============================================================
+
 /// Ссылка на родителя. **Изменилось с u32 на Entity** — теперь
 /// Parent, указывающий на despawn'нутую сущность, детектируется
 /// через `world.is_alive(parent.0)`.
@@ -70,6 +78,10 @@ pub struct Tint(pub [f32; 4]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Visible(pub bool);
 
+// ============================================================
+// TextureTiling
+// ============================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct TextureTiling {
     pub size: f32,
@@ -86,6 +98,10 @@ impl TextureTiling {
         Self { size: size.max(0.001) }
     }
 }
+
+// ============================================================
+// Animation
+// ============================================================
 
 #[derive(Debug, Clone)]
 pub struct AnimationPlayer {
@@ -105,6 +121,10 @@ impl AnimationPlayer {
         }
     }
 }
+
+// ============================================================
+// Motion
+// ============================================================
 
 #[derive(Debug, Clone, Copy)]
 pub struct Spinner {
@@ -152,6 +172,10 @@ impl Chase {
         Self { speed, stop_distance }
     }
 }
+
+// ============================================================
+// Triggers
+// ============================================================
 
 #[derive(Debug, Clone)]
 pub struct Trigger {
@@ -312,6 +336,10 @@ impl Elevator {
     }
 }
 
+// ============================================================
+// SlidingDoor
+// ============================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingDoor {
     pub open_amount: f32,
@@ -333,4 +361,14 @@ impl SlidingDoor {
             closed_position,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HealthPickup {
+    pub amount: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AmmoPickup {
+    pub amount: u32,
 }

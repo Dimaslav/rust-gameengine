@@ -17,6 +17,27 @@ pub enum AssetKind {
     Animation,
     Shader,
     Script,
+
+    // === Data-driven gameplay (.ron) ===
+    /// Предмет (`assets/items/*.ron`).
+    Item,
+    /// Оружие (`assets/weapons/*.ron`).
+    Weapon,
+    /// Квест (`assets/quests/*.ron`).
+    Quest,
+    /// Диалоговый граф (`assets/dialogs/*.ron`).
+    Dialog,
+    /// Вендор (`assets/vendors/*.ron`).
+    Vendor,
+    /// Крафт-рецепт (`assets/recipes/*.ron`).
+    Recipe,
+    /// Лут-таблица (`assets/loot/*.ron`).
+    Loot,
+    /// Локализация (`assets/locale/*.ron`).
+    Locale,
+    /// Общий `.ron` вне известных папок (generic).
+    Data,
+
     /// Что-то, что мы не умеем импортировать, но хотим видеть в браузере.
     Other,
 }
@@ -33,6 +54,15 @@ impl AssetKind {
             AssetKind::Animation => "🎞",
             AssetKind::Shader => "✨",
             AssetKind::Script => "📜",
+            AssetKind::Item => "🎒",
+            AssetKind::Weapon => "🔫",
+            AssetKind::Quest => "📋",
+            AssetKind::Dialog => "💬",
+            AssetKind::Vendor => "🏪",
+            AssetKind::Recipe => "🔨",
+            AssetKind::Loot => "🎲",
+            AssetKind::Locale => "🌐",
+            AssetKind::Data => "📊",
             AssetKind::Other => "📄",
         }
     }
@@ -48,6 +78,15 @@ impl AssetKind {
             AssetKind::Animation => "Animation",
             AssetKind::Shader => "Shader",
             AssetKind::Script => "Script",
+            AssetKind::Item => "Item",
+            AssetKind::Weapon => "Weapon",
+            AssetKind::Quest => "Quest",
+            AssetKind::Dialog => "Dialog",
+            AssetKind::Vendor => "Vendor",
+            AssetKind::Recipe => "Recipe",
+            AssetKind::Loot => "Loot",
+            AssetKind::Locale => "Locale",
+            AssetKind::Data => "Data",
             AssetKind::Other => "Other",
         }
     }

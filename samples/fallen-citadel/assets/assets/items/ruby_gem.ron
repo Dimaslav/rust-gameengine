@@ -1,0 +1,10 @@
+(
+    id: "ruby_gem",
+    name: "Ruby Gem",
+    kind: Misc,
+    rarity: Rare,
+    description: "A precious gem. Can be sold.",
+    gold_value: 100,
+    sell_price: 150,
+    max_stack: 20,
+)

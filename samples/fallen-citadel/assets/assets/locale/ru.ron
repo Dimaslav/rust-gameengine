@@ -1,0 +1,12 @@
+(
+    id: "ru",
+    entries: {
+        "menu.title": "RUST ENGINE 3D",
+        "menu.new_game": "Новая игра",
+        "menu.continue": "Продолжить",
+        "menu.settings": "Настройки",
+        "menu.quit": "Выход",
+        "hud.health": "ЗДОРОВЬЕ",
+        "hud.ammo": "ПАТРОНЫ",
+    },
+)

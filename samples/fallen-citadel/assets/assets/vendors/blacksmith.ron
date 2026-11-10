@@ -1,0 +1,12 @@
+(
+    id: "blacksmith",
+    title: "Blacksmith",
+    items: [
+        (item_id: "health_potion", price: 25, stock: -1),
+        (item_id: "antidote",      price: 40, stock: -1),
+        (item_id: "elixir_of_speed", price: 60, stock: 5),
+        (item_id: "leather_armor", price: 100, stock: 3),
+        (item_id: "steel_sword",   price: 150, stock: 1),
+        (item_id: "chain_mail",    price: 220, stock: 1),
+    ],
+)

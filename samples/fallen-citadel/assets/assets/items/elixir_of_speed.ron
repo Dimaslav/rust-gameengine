@@ -1,0 +1,10 @@
+(
+    id: "elixir_of_speed",
+    name: "Elixir of Speed",
+    kind: Consumable,
+    rarity: Uncommon,
+    description: "Restores 20 HP quickly",
+    heal_amount: 20.0,
+    sell_price: 40,
+    max_stack: 5,
+)

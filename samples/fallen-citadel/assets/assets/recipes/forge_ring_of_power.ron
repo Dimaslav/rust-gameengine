@@ -1,0 +1,12 @@
+(
+    id: "forge_ring_of_power",
+    title: "Ring of Power",
+    category: "Trinkets",
+    inputs: [
+        (item_id: "ruby_gem", count: 3),
+    ],
+    outputs: [
+        (item_id: "ring_of_power", count: 1),
+    ],
+    gold_cost: 150,
+)

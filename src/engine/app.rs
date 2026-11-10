@@ -136,6 +136,25 @@ pub trait Game: 'static {
     fn gizmo_snap_size(&self) -> Option<f32> {
         None
     }
+
+    fn has_blocking_modal(&self) -> bool {
+        false
+    }
+
+    fn has_pause_menu(&self) -> bool {
+        false
+    }
+
+    fn on_escape_pressed(&mut self, _world: &mut World) -> bool {
+        false
+    }
+
+    fn take_unpause_request(&mut self) -> bool {
+        false
+    }
+
+    fn update_paused(&mut self, _world: &mut World, _renderer: &mut Renderer) {}
+    fn on_world_replaced(&mut self, _world: &mut World) {}
 }
 
 pub struct WorldLoadRequest {
@@ -203,26 +222,23 @@ pub struct App<G: Game> {
     play_snapshot: Option<PlaySnapshot>,
     elevator_prev_state: HashMap<Entity, ElevatorState>,
     was_paused: bool,
-
     pickable: Option<PickableSet>,
     collider_cache: Option<ColliderCache>,
-
     navmesh: Option<Navmesh>,
     ai_system: AiSystem,
-
     scripts: ScriptSystem,
-
     footstep_timer: f32,
     pub asset_db: crate::assets::AssetDatabase,
     hot_reload: crate::assets::HotReload,
-
     pub mode: AppMode,
     pub settings: AppSettings,
-
     last_collect_ms: f32,
     last_render_ms: f32,
     last_egui_ms: f32,
     last_total_cpu_ms: f32,
+    cursor_visible: bool,
+    cursor_grabbed: bool,
+    pub project: crate::project::Project,
 }
 
 impl<G: Game> Drop for App<G> {
@@ -252,6 +268,10 @@ impl<G: Game> Drop for App<G> {
 }
 
 impl<G: Game> App<G> {
+    pub fn project(&self) -> &crate::project::Project {
+        &self.project
+    }
+
     fn new(elwt: &ActiveEventLoop, mut game: G) -> Self {
         let window = Arc::new(
             elwt.create_window(
@@ -261,13 +281,43 @@ impl<G: Game> App<G> {
             )
             .expect("create window failed"),
         );
+        window.set_cursor_visible(true);
+        let _ = window.set_cursor_grab(CursorGrabMode::None);
+
+        // === Step 4.1: открыть проект и перейти в его корень ===
+        let project = crate::project::Project::find_or_default()
+            .unwrap_or_else(|e| {
+                log::error!(
+                    "Project::find_or_default failed: {:#}. Falling back to CWD.",
+                    e
+                );
+                crate::project::Project::from_cwd()
+            });
+        if let Err(e) = project.chdir() {
+            log::error!(
+                "Project::chdir failed: {:#}. \
+                 Paths will be resolved from CWD, not from project root.",
+                e
+            );
+        }
+        log::info!(
+            "Project: name='{}' root={} assets_root='{}' entry_scene={:?}",
+            project.manifest.name,
+            project.root.display(),
+            project.manifest.assets_root,
+            project.manifest.entry_scene,
+        );
+
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         let mut world = World::new();
         game.camera_mut()
             .set_viewport(renderer.size.width, renderer.size.height);
 
-        let asset_db = crate::assets::AssetDatabase::open("assets")
-            .expect("failed to open assets directory");
+        // assets_root — относителен CWD, а CWD = project root (после chdir).
+        let asset_db = crate::assets::AssetDatabase::open(
+            project.manifest.assets_root.as_str(),
+        )
+        .expect("failed to open assets directory");
         game.init_with_assets(&mut world, &mut renderer, &asset_db);
 
         let input = {
@@ -334,6 +384,9 @@ impl<G: Game> App<G> {
             last_render_ms: 0.0,
             last_egui_ms: 0.0,
             last_total_cpu_ms: 0.0,
+            cursor_visible: true,
+            cursor_grabbed: false,
+            project,
         };
         let initial_postfx = app.editor.state.settings.postfx;
         app.game.apply_postfx(initial_postfx);
@@ -359,6 +412,88 @@ impl<G: Game> App<G> {
         // FIX #9: postfx не перезаписываем из `settings.ron` при старте.
         app.apply_settings_to_game(false);
         app
+    }
+
+    // ============================================================
+    // Cursor state (Step 1)
+    // ============================================================
+
+    /// Привести реальное состояние курсора к желаемому.
+    /// Учитывает то, что уже установлено, чтобы не дёргать winit.
+    fn set_cursor_state(&mut self, grabbed: bool) {
+        let visible = !grabbed;
+        if self.cursor_visible != visible {
+            self.window.set_cursor_visible(visible);
+            self.cursor_visible = visible;
+        }
+        if self.cursor_grabbed != grabbed {
+            let mode = if grabbed {
+                CursorGrabMode::Locked
+            } else {
+                CursorGrabMode::None
+            };
+            if self.window.set_cursor_grab(mode).is_ok() {
+                self.cursor_grabbed = grabbed;
+                if grabbed {
+                    self.input.on_cursor_enter();
+                    self.input.mouse_motion = (0.0, 0.0);
+                    self.input.skip_motion_frames = 4;
+                }
+            } else {
+                log::warn!(
+                    "set_cursor_grab({:?}) failed; cursor state may be inconsistent",
+                    mode
+                );
+                self.cursor_grabbed = false;
+            }
+        }
+    }
+
+    /// Пересчитать желаемое состояние курсора из текущего режима.
+    fn sync_cursor(&mut self) {
+        let want_grab = if self.editor.state.play.active {
+            !self.editor.state.play.paused && !self.game.has_blocking_modal()
+        } else if self.editor.state.flying {
+            true
+        } else {
+            false
+        };
+        self.set_cursor_state(want_grab);
+    }
+
+    /// Выйти из Play, восстановив snapshot и сбросив runtime-состояние.
+    fn exit_play(&mut self) {
+        if !self.editor.state.play.active {
+            return;
+        }
+        self.game.camera_mut().exit_fps();
+        if let Some(snap) = self.play_snapshot.take() {
+            self.restore_play_snapshot(snap);
+        }
+        let play = &mut self.editor.state.play;
+        play.active = false;
+        play.paused = false;
+        self.time.paused = false;
+        self.input.play_mode = false;
+        play.vertical_velocity = 0.0;
+        play.on_ground = true;
+        play.bob_distance = 0.0;
+        play.bob_current = 0.0;
+        play.health = play.max_health;
+        play.ammo = play.max_ammo;
+        play.fire_cooldown = 0.0;
+        play.interact_cooldown = 0.0;
+        play.highlight = None;
+        play.crouching = false;
+        play.sprint_toggled = false;
+        play.current_eye_height = play.eye_height;
+        play.horizontal_velocity = Vec3::ZERO;
+        play.coyote_timer = 0.0;
+        play.jump_buffer_timer = 0.0;
+        self.particles.clear();
+        self.projectiles.clear();
+        self.footstep_timer = 0.0;
+        self.sync_cursor();
     }
 
     fn apply_settings_to_window(&mut self, window: Arc<Window>) {
@@ -494,6 +629,7 @@ impl<G: Game> App<G> {
             Ok((mut new_world, _spawn, _embedded_gs, id_map)) => {
                 new_world.sync_next_id();
                 self.world = new_world;
+                self.game.on_world_replaced(&mut self.world);
                 self.editor.state.selected = snap
                     .selection
                     .iter()
@@ -1310,10 +1446,6 @@ impl<G: Game> App<G> {
                         audio.play(&sound);
                     }
                 }
-                ScriptCommand::SendEvent { name } => {
-                    self.world.send(ScriptEvent::new(name.clone()));
-                    log::trace!("[script emit] {}", name);
-                }
                 ScriptCommand::Log { .. } => {}
             }
         }
@@ -1337,26 +1469,28 @@ impl<G: Game> App<G> {
         let esc_pressed = self.input.key_pressed(KeyCode::Escape);
         let esc_free =
             esc_pressed && !egui_wants_keyboard && !self.editor.state.command_palette_open;
+
         if esc_free {
             if self.editor.state.play.active {
-                if self.editor.state.play.paused {
+                // 1) Сначала игре — она может закрыть модалку (инвентарь,
+                //    диалог, вендор, крафт, character sheet).
+                if self.game.on_escape_pressed(&mut self.world) {
+                    // Игра поглотила Esc.
+                } else if self.editor.state.play.paused {
+                    // 2) Иначе, если на паузе — снять паузу.
                     self.editor.state.play.paused = false;
                     self.time.paused = false;
-                    log::info!("Resumed play");
+                    log::info!("Resumed play (Esc)");
                     self.editor.state.play.coyote_timer =
                         self.editor.state.play.coyote_time;
                     self.editor.state.play.jump_buffer_timer = 0.0;
-                    let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
-                    self.window.set_cursor_visible(false);
-                    self.input.on_cursor_enter();
-                    self.input.mouse_motion = (0.0, 0.0);
-                    self.input.skip_motion_frames = 4;
+                    self.sync_cursor();
                 } else {
+                    // 3) Иначе — поставить на паузу.
                     self.editor.state.play.paused = true;
                     self.time.paused = true;
-                    log::info!("Paused play");
-                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                    self.window.set_cursor_visible(true);
+                    log::info!("Paused play (Esc)");
+                    self.sync_cursor();
                 }
             } else if !self.editor.state.flying {
                 let mut consumed = false;
@@ -1562,6 +1696,7 @@ impl<G: Game> App<G> {
         if paused != self.was_paused {
             self.was_paused = paused;
             self.game.on_pause_changed(paused);
+            self.sync_cursor();
         }
 
         let rmb = self.input.mouse_down(MouseButton::Right);
@@ -1571,18 +1706,12 @@ impl<G: Game> App<G> {
             if want_fly {
                 let cur_pos = self.game.camera().position();
                 self.game.camera_mut().enter_fly(cur_pos);
-                let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
-                self.window.set_cursor_visible(false);
-                self.input.on_cursor_enter();
-                self.input.mouse_motion = (0.0, 0.0);
-                self.input.skip_motion_frames = 4;
             } else {
                 self.game.camera_mut().exit_fly();
-                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                self.window.set_cursor_visible(true);
             }
             self.editor.state.flying = want_fly;
             self.input.editor_flying = want_fly;
+            self.sync_cursor();
         }
 
         if !paused && !in_menu {
@@ -1595,6 +1724,8 @@ impl<G: Game> App<G> {
                 elwt.exit();
                 return;
             }
+            // После update курсор мог измениться (открылась/закрылась модалка).
+            self.sync_cursor();
             if let Some((duration, scale)) = self.game.take_hit_stop() {
                 self.time.add_hit_stop(duration, scale);
             }
@@ -1616,6 +1747,7 @@ impl<G: Game> App<G> {
                     Ok((mut new_world, _spawn, _embedded_gs)) => {
                         new_world.sync_next_id();
                         self.world = new_world;
+                        self.game.on_world_replaced(&mut self.world);
                         self.navmesh = None;
                         self.collider_cache = None;
                         self.pickable = None;
@@ -1647,9 +1779,13 @@ impl<G: Game> App<G> {
             self.physics
                 .step(&mut self.world, self.renderer.terrain.as_ref(), dt);
             physics_ms = t_physics.elapsed().as_secs_f32() * 1000.0;
-
-            // FIX #6: двигаем лифты после физики.
             self.update_elevators(dt);
+            if self.editor.state.play.active {
+                let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
+                cache.build(&self.world);
+                self.input.editor_captured = false;
+                self.update_player(dt);
+            }
 
             let t_ai = Instant::now();
             self.ai_system
@@ -1663,26 +1799,24 @@ impl<G: Game> App<G> {
             self.apply_script_commands(script_commands);
             scripts_ms = t_scripts.elapsed().as_secs_f32() * 1000.0;
 
-            // FIX (P0.2): ColliderCache строится ПОСЛЕ physics/elevators/AI/scripts,
-            // чтобы update_player видел актуальные позиции движущихся тел.
-            // Раньше кэш строился до physics — игрок «проваливался» в конце кадра.
-            if self.editor.state.play.active {
-                let cache = self.collider_cache.get_or_insert_with(ColliderCache::new);
-                cache.build(&self.world);
-                self.input.editor_captured = false;
-                self.update_player(dt);
-            } else if self.editor.state.flying {
-                self.input.editor_captured = true;
-                self.update_fly(dt);
-            } else {
-                let (mx, my) = self.input.mouse_pos;
-                self.input.editor_captured = self.editor.state.gizmo.drag.is_some()
-                    || !self.in_viewport(mx, my);
+            if !self.editor.state.play.active {
+                if self.editor.state.flying {
+                    self.input.editor_captured = true;
+                    self.update_fly(dt);
+                } else {
+                    let (mx, my) = self.input.mouse_pos;
+                    self.input.editor_captured = self.editor.state.gizmo.drag.is_some()
+                        || !self.in_viewport(mx, my);
+                }
             }
 
             self.update_particles(dt);
             self.update_projectiles(dt);
         } else if !in_menu {
+            // Пауза: gameplay не идёт, но meta-действия (save/delete slot)
+            // должны работать.
+            self.game.update_paused(&mut self.world, &mut self.renderer);
+            self.sync_cursor();
             self.input.editor_captured = false;
             self.editor.state.flying = false;
             self.input.editor_flying = false;
@@ -1849,6 +1983,7 @@ impl<G: Game> App<G> {
         let mut menu_actions = game_menu::MenuActions::default();
         let mut viewport_rect_from_ui: egui::Rect = egui::Rect::NOTHING;
 
+        let has_pause_menu = self.game.has_pause_menu();
         let mut full_output = egui_ctx.run_ui(raw_input, |ui| {
             if in_menu_for_ui {
                 menu_actions = game_menu::draw(ui.ctx(), mode_ref, settings_ref, has_save);
@@ -1863,6 +1998,7 @@ impl<G: Game> App<G> {
                     &audio_snapshot,
                     asset_db,
                     scripts_ref,
+                    has_pause_menu,
                 );
                 viewport_rect_from_ui = vp;
                 if let Some(a) = action {
@@ -1912,13 +2048,11 @@ impl<G: Game> App<G> {
         }
 
         if self.game.take_quit_to_menu() {
+            self.exit_play();
             self.mode = AppMode::MainMenu;
             log::info!("Returning to main menu");
         }
 
-        // FIX #11: правильный viewport_rect. Раньше `content_rect()` =
-        // весь экран, потому что `CentralPanel` был внутри `Area`.
-        // Теперь `draw_all` возвращает `CentralPanel::show().response.rect`.
         {
             let ppp = egui_ctx.pixels_per_point();
             if !in_menu_for_ui && !viewport_rect_from_ui.is_negative() {
@@ -2212,6 +2346,22 @@ impl<G: Game> App<G> {
             game.collect_ui(world, renderer, &mut ui_layer);
         }
         let ui_quads = ui_layer.into_quads();
+
+        // Игра может запросить снятие паузы из собственного меню (Resume).
+        if !in_menu && self.game.take_unpause_request() {
+            if self.editor.state.play.active && self.editor.state.play.paused {
+                self.editor.state.play.paused = false;
+                self.time.paused = false;
+                self.editor.state.play.coyote_timer =
+                    self.editor.state.play.coyote_time;
+                self.editor.state.play.jump_buffer_timer = 0.0;
+                log::info!("Unpause requested by game");
+            }
+        }
+        // Синхронизировать курсор с учётом только что открытых/закрытых модалок.
+        if !in_menu {
+            self.sync_cursor();
+        }
 
         let collect_ms: f32 = t_collect.elapsed().as_secs_f32() * 1000.0;
 
@@ -2629,15 +2779,13 @@ impl<G: Game> App<G> {
             }
 
             EditorAction::GenerateWorld { biome, seed } => {
-                // 1. Очищаем мир.
                 self.world = World::new();
                 self.editor.state.selected.clear();
                 self.editor.state.undo.clear();
                 self.navmesh = None;
                 self.collider_cache = None;
                 self.pickable = None;
-
-                // 2. Генерируем.
+                self.game.on_world_replaced(&mut self.world);
                 use crate::game::world_gen::{WorldGen, WorldGenConfig};
                 let config = WorldGenConfig {
                     seed,
@@ -2648,12 +2796,8 @@ impl<G: Game> App<G> {
                     loot_count: 6,
                 };
                 
-                // Сохраняем конфиг в состоянии редактора (для меню).
                 self.editor.state.last_gen_config = config.clone();
-
                 let result = WorldGen::generate(&mut self.world, &mut self.renderer, &config);
-                
-                // 3. Ставим камеру и спавн игрока.
                 self.game.camera_mut().focus_on(result.player_spawn, 20.0);
                 self.editor.state.play.saved_position = result.player_spawn;
 
@@ -2673,8 +2817,7 @@ impl<G: Game> App<G> {
                     self.editor.state.play.paused = true;
                     self.time.paused = true;
                     log::info!("Paused play (from UI)");
-                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                    self.window.set_cursor_visible(true);
+                    self.sync_cursor();
                 }
             }
             EditorAction::TogglePlay => {
@@ -2702,8 +2845,6 @@ impl<G: Game> App<G> {
                     play.coyote_timer = play.coyote_time;
                     play.jump_buffer_timer = 0.0;
                     play.ground_normal = Vec3::Y;
-                    // FIX (build): ACT1_CENTER — приватная константа
-                    // из demo::fortress. Используем локальный fallback.
                     let safe_pos = DEFAULT_PLAY_SPAWN;
                     let mut spawn = play.saved_position;
                     if !spawn.is_finite()
@@ -2725,45 +2866,24 @@ impl<G: Game> App<G> {
                     self.game.camera_mut().yaw = std::f32::consts::FRAC_PI_2;
                     self.game.camera_mut().pitch = 0.0;
                     play.saved_position = spawn;
-                    let _ = self.window.set_cursor_grab(CursorGrabMode::Locked);
-                    self.window.set_cursor_visible(false);
-                    self.input.on_cursor_enter();
-                    self.input.mouse_motion = (0.0, 0.0);
-                    self.input.skip_motion_frames = 4;
                     self.particles.clear();
                     self.projectiles.clear();
                     self.footstep_timer = 0.0;
                     self.collider_cache = None;
+                    self.sync_cursor();
                 } else {
-                    self.game.camera_mut().exit_fps();
-                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                    self.window.set_cursor_visible(true);
-                    if let Some(snap) = self.play_snapshot.take() {
-                        self.restore_play_snapshot(snap);
-                    }
-                    let play = &mut self.editor.state.play;
-                    play.active = false;
-                    play.paused = false;
+                    self.exit_play();
+                }
+            }
+            EditorAction::ResumePlay => {
+                if self.editor.state.play.active && self.editor.state.play.paused {
+                    self.editor.state.play.paused = false;
                     self.time.paused = false;
-                    self.input.play_mode = false;
-                    play.vertical_velocity = 0.0;
-                    play.on_ground = true;
-                    play.bob_distance = 0.0;
-                    play.bob_current = 0.0;
-                    play.health = play.max_health;
-                    play.ammo = play.max_ammo;
-                    play.fire_cooldown = 0.0;
-                    play.interact_cooldown = 0.0;
-                    play.highlight = None;
-                    play.crouching = false;
-                    play.sprint_toggled = false;
-                    play.current_eye_height = play.eye_height;
-                    play.horizontal_velocity = Vec3::ZERO;
-                    play.coyote_timer = 0.0;
-                    play.jump_buffer_timer = 0.0;
-                    self.particles.clear();
-                    self.projectiles.clear();
-                    self.footstep_timer = 0.0;
+                    self.editor.state.play.coyote_timer =
+                        self.editor.state.play.coyote_time;
+                    self.editor.state.play.jump_buffer_timer = 0.0;
+                    log::info!("Resumed play (from UI)");
+                    self.sync_cursor();
                 }
             }
             EditorAction::SpawnPlayerHere => {
@@ -2878,6 +2998,7 @@ impl<G: Game> App<G> {
                         .undo(&self.world, &mut self.renderer, gs)
                 {
                     self.world = new_world;
+                    self.game.on_world_replaced(&mut self.world);
                     self.editor.state.prune_selection(&self.world);
                     if let Some(ron) = game_state_ron {
                         self.game.load_game_state(&ron);
@@ -2895,6 +3016,7 @@ impl<G: Game> App<G> {
                         .redo(&self.world, &mut self.renderer, gs)
                 {
                     self.world = new_world;
+                    self.game.on_world_replaced(&mut self.world);
                     self.editor.state.prune_selection(&self.world);
                     if let Some(ron) = game_state_ron {
                         self.game.load_game_state(&ron);
@@ -2933,6 +3055,7 @@ impl<G: Game> App<G> {
                     Ok((mut new_world, spawn, game_state_ron)) => {
                         new_world.sync_next_id();
                         self.world = new_world;
+                        self.game.on_world_replaced(&mut self.world);
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         self.navmesh = None;
@@ -2963,6 +3086,7 @@ impl<G: Game> App<G> {
                     Ok((mut new_world, spawn, game_state_ron)) => {
                         new_world.sync_next_id();
                         self.world = new_world;
+                        self.game.on_world_replaced(&mut self.world);
                         self.editor.state.selected.clear();
                         self.editor.state.undo.clear();
                         self.navmesh = None;
@@ -3638,8 +3762,7 @@ impl<G: Game> App<G> {
                         self.game.camera_mut().exit_fly();
                         self.editor.state.flying = false;
                         self.input.editor_flying = false;
-                        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                        self.window.set_cursor_visible(true);
+                        self.sync_cursor();
                     }
                 }
             }
@@ -3654,9 +3777,8 @@ impl<G: Game> App<G> {
                     
                     let (mx, my) = self.input.mouse_pos;
                     let in_vp = self.in_viewport(mx, my);
-                    
-                    // FIX: Разрешаем движку перехватывать мышь во вьюпорте
-                    let allow = !consumed || in_active_drag || in_vp;
+                    let _ = in_vp;
+                    let allow = !consumed || in_active_drag;
 
                     if allow && button == MouseButton::Left && in_vp {
                         match state {

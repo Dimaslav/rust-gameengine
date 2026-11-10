@@ -1,0 +1,11 @@
+(
+    id: "steel_sword",
+    name: "Steel Sword",
+    kind: Weapon,
+    rarity: Uncommon,
+    description: "A sturdy blade. +2 Strength.",
+    bonus_strength: 2,
+    sell_price: 80,
+    max_stack: 1,
+    equippable: true,
+)

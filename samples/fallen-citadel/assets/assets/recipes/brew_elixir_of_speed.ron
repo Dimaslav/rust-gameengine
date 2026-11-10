@@ -1,0 +1,13 @@
+(
+    id: "brew_elixir_of_speed",
+    title: "Elixirs of Speed",
+    category: "Potions",
+    inputs: [
+        (item_id: "health_potion", count: 2),
+        (item_id: "ruby_gem", count: 1),
+    ],
+    outputs: [
+        (item_id: "elixir_of_speed", count: 2),
+    ],
+    gold_cost: 30,
+)

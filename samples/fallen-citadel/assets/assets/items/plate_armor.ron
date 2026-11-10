@@ -1,0 +1,12 @@
+(
+    id: "plate_armor",
+    name: "Plate Armor",
+    kind: Armor,
+    rarity: Rare,
+    description: "Heavy plate. +10 Vitality, -1 Dexterity",
+    bonus_dexterity: -1,
+    bonus_vitality: 10,
+    sell_price: 300,
+    max_stack: 1,
+    equippable: true,
+)

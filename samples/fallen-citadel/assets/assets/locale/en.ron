@@ -1,0 +1,12 @@
+(
+    id: "en",
+    entries: {
+        "menu.title": "RUST ENGINE 3D",
+        "menu.new_game": "New Game",
+        "menu.continue": "Continue",
+        "menu.settings": "Settings",
+        "menu.quit": "Quit",
+        "hud.health": "HP",
+        "hud.ammo": "AMMO",
+    },
+)

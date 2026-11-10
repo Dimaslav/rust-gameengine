@@ -1,0 +1,11 @@
+(
+    id: "lucky_charm",
+    name: "Lucky Charm",
+    kind: Trinket,
+    rarity: Rare,
+    description: "+5 Luck — higher crit chance",
+    bonus_luck: 5,
+    sell_price: 150,
+    max_stack: 1,
+    equippable: true,
+)

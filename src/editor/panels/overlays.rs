@@ -51,7 +51,7 @@ pub fn draw_pause_overlay(
                         ui.label(egui::RichText::new("Esc — resume · F10 — stop").small().weak());
                         ui.add_space(16.0);
                         if ui.button("▶ Resume (Esc)").clicked() {
-                            *action = Some(EditorAction::TogglePlay);
+                            *action = Some(EditorAction::ResumePlay);
                         }
                         ui.add_space(6.0);
                         if ui.button("■ Stop (F10)").clicked() {

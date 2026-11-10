@@ -22,9 +22,15 @@ pub const WHITE_BLOCK_X: u32 = 120;
 pub const WHITE_BLOCK_Y: u32 = 56;
 pub const WHITE_BLOCK_SIZE: u32 = 4;
 
-/// Атлас — RGBA8. Вызывается один раз при старте Renderer.
 pub fn generate_atlas() -> Vec<u8> {
     let mut data = vec![0u8; (ATLAS_W * ATLAS_H * 4) as usize];
+
+    for pixel in data.chunks_exact_mut(4) {
+        pixel[0] = 255;
+        pixel[1] = 255;
+        pixel[2] = 255;
+        pixel[3] = 0;
+    }
 
     for (i, glyph) in FONT_GLYPHS.iter().enumerate() {
         let col = (i as u32) % ATLAS_COLS;
@@ -39,16 +45,14 @@ pub fn generate_atlas() -> Vec<u8> {
                     let px = x0 + gx;
                     let py = y0 + gy;
                     let idx = ((py * ATLAS_W + px) * 4) as usize;
-                    data[idx] = 255;
-                    data[idx + 1] = 255;
-                    data[idx + 2] = 255;
+                    // RGB уже 255 (из init), выставляем только alpha.
                     data[idx + 3] = 255;
                 }
             }
         }
     }
 
-    // Белый блок для solid-квадов.
+    // Белый блок для solid-квадов (RGB=255, alpha=255).
     for y in WHITE_BLOCK_Y..WHITE_BLOCK_Y + WHITE_BLOCK_SIZE {
         for x in WHITE_BLOCK_X..WHITE_BLOCK_X + WHITE_BLOCK_SIZE {
             let idx = ((y * ATLAS_W + x) * 4) as usize;

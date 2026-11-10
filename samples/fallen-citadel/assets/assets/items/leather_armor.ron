@@ -1,0 +1,12 @@
+(
+    id: "leather_armor",
+    name: "Leather Armor",
+    kind: Armor,
+    rarity: Uncommon,
+    description: "+3 Vitality, +1 Dexterity",
+    bonus_dexterity: 1,
+    bonus_vitality: 3,
+    sell_price: 60,
+    max_stack: 1,
+    equippable: true,
+)

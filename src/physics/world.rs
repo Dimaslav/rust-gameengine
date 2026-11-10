@@ -506,6 +506,7 @@ fn collide(a: &BodyState, b: &BodyState, ia: usize, ib: usize) -> Option<Contact
     }
 }
 
+#[allow(dead_code)]
 fn state_as_aabb(s: &BodyState) -> (Vec3, Vec3) {
     let (mn, mx) = global_aabb(s);
     (s.position, (mx - mn) * 0.5)
@@ -515,13 +516,6 @@ fn closest_point_on_aabb(p: Vec3, center: Vec3, half: Vec3) -> Vec3 {
     p.clamp(center - half, center + half)
 }
 
-// ============================================================
-// Capsule helpers (FIX #2)
-// ============================================================
-
-/// Возвращает `(a1, a2, radius)` — концы оси капсулы (segment) и
-/// **масштабированный** радиус. Для `Collider::Capsule::world_aabb`
-/// используется тот же расчёт — держим в синхроне.
 #[inline]
 fn capsule_endpoints(
     pos: Vec3,
@@ -536,8 +530,6 @@ fn capsule_endpoints(
     (pos - up, pos + up, r)
 }
 
-/// Closest points между двумя сегментами.
-/// Ericson, Real-Time Collision Detection, 5.1.9.
 fn closest_segment_segment(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
     let d1 = q1 - p1;
     let d2 = q2 - p2;

@@ -9,10 +9,6 @@ use rust_engine::game::lights::PointLight;
 use rust_engine::game::timers::Timer;
 use rust_engine::physics::{Collider, PhysicsMaterial, RigidBody};
 
-// ============================================================
-// GateMotion
-// ============================================================
-
 #[derive(Debug, Clone, Copy)]
 pub struct GateMotion {
     pub open_y: f32,
@@ -299,6 +295,14 @@ pub fn chest(world: &mut World, name: impl Into<String>, pos: Vec3, gold: u32) -
         TriggerAction::PlaySound("pickup".into()),
     ));
 
+    world.insert(
+        e,
+        crate::game::rpg::Chest {
+            gold,
+            opened: false,
+        },
+    );
+
     world.insert(e, Tint([
         1.0,
         (gold as f32 / 2000.0).min(1.0),
@@ -361,6 +365,9 @@ pub fn health_pickup(world: &mut World, name: impl Into<String>, pos: Vec3, amou
     world.insert(e, Spinner::new(Vec3::Y, 1.5));
     world.insert(e, Tint([amount / 100.0, 1.0, 0.3, 1.0]));
 
+    // Step 8.5: явный компонент вместо Tint-хака
+    world.insert(e, HealthPickup { amount });
+
     world.insert(e, Trigger::new(
         1.2,
         TriggerAction::PlaySound("pickup".into()),
@@ -377,6 +384,9 @@ pub fn ammo_pickup(world: &mut World, name: impl Into<String>, pos: Vec3, amount
     world.insert(e, MaterialHandle("gold".into()));
     world.insert(e, Spinner::new(Vec3::Y, 1.8));
     world.insert(e, Tint([(amount as f32 / 100.0).min(1.0), 0.8, 0.2, 1.0]));
+
+    // Step 8.5: явный компонент вместо Tint-хака
+    world.insert(e, AmmoPickup { amount });
 
     world.insert(e, Trigger::new(
         1.2,

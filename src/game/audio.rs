@@ -1,43 +1,14 @@
-//! Аудио-компоненты.
-//!
-//! `AudioSource` — звук, привязанный к entity. Позиция берётся из
-//! `Transform` **через `world_position`** (с учётом Parent-цепочки).
-//!
-//! `AudioBus` (Фаза 4.2) — маршрутизация звука на шину. Громкость
-//! шины применяется поверх spatial attenuation, давая пользователю
-//! независимые ползунки «Master / SFX / Music / Voice / UI».
-//!
-//! ИЗМЕНЕНО (audio occlusion): добавлены `occlusion` и
-//! `occlusion_volume`. При включённом флаге `AudioSystem::update`
-//! делает raycast между слушателем и источником, и при блокировке
-//! громкость умножается на `occlusion_volume` (по умолчанию 0.3).
-//!
-//! ИЗМЕНЕНО (bugfix #4): `source_position` теперь корректно
-//! применяет Parent-цепочку. Раньше возвращалась локальная
-//! позиция `Transform.position`, из-за чего звук дочернего
-//! объекта играл не там, где он находится визуально.
-
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-/// Шина микширования.
-///
-/// Каждый звук маршрутизируется ровно на одну шину. Шина `Master`
-/// применяется как глобальный множитель поверх уже применённых шин
-/// (см. `AudioSystem::bus_volume_effective`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[derive(Default)]
 pub enum AudioBus {
-    /// Итоговая громкость — множитель поверх всех остальных.
     Master,
-    /// Игровые эффекты: выстрелы, взрывы, шаги, удары.
     #[default]
     Sfx,
-    /// Фоновая музыка и ambient-циклы.
     Music,
-    /// Диалоги, озвучка NPC.
     Voice,
-    /// Интерфейс: клики, уведомления.
     Ui,
 }
 
@@ -60,7 +31,6 @@ impl AudioBus {
         }
     }
 
-    /// Дефолтная громкость шины при запуске.
     pub fn default_volume(self) -> f32 {
         match self {
             AudioBus::Master => 1.0,
@@ -72,45 +42,17 @@ impl AudioBus {
     }
 }
 
-
-/// Звук, привязанный к entity.
-///
-/// `sound` — имя в кэше `AudioSystem` (процедурный: `"shot"`, `"explosion"`,
-/// `"pickup"`, `"ding"`; либо загруженный из файла через
-/// `AudioSystem::load_sound_from_file`).
-///
-/// Итоговая громкость = `volume * attenuation(distance) * bus_volume(bus)
-/// * bus_volume(Master) * occlusion_factor`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioSource {
     pub sound: String,
-
-    /// Шина (Фаза 4.2).
     pub bus: AudioBus,
-
-    /// Базовая громкость (0.0 — беззвучно, 1.0 — норма, >1.0 — громче).
     pub volume: f32,
-
-    /// Скорость воспроизведения. 1.0 — норма, 2.0 — быстрее и выше.
     pub pitch: f32,
-
-    /// Внутри этого радиуса громкость максимальна (нет затухания).
     pub min_distance: f32,
-
-    /// За этим радиусом звук не слышен. `0.0` — отключить spatial
-    /// (звук играет с постоянной громкостью, как `play()`).
     pub max_distance: f32,
-
     pub looping: bool,
-
-    /// `true` — играть. Управляется игрой. Если `looping == false`
-    /// и звук доиграл до конца, система сбросит флаг в `false`.
     pub playing: bool,
-
-    /// Включить проверку препятствий между источником и слушателем.
     pub occlusion: bool,
-
-    /// Множитель громкости при заблокированном сегменте.
     pub occlusion_volume: f32,
 }
 
@@ -131,7 +73,11 @@ impl AudioSource {
     }
 
     pub fn non_spatial(sound: impl Into<String>) -> Self {
-        Self { max_distance: 0.0, ..Self::new(sound) }
+        Self {
+            max_distance: 0.0,
+            occlusion: false,
+            ..Self::new(sound)
+        }
     }
 
     pub fn looping(sound: impl Into<String>) -> Self {

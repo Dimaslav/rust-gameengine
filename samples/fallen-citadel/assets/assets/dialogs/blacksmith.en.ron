@@ -1,0 +1,35 @@
+(
+    id: "blacksmith",
+    speaker_name: "Blacksmith",
+    start: "intro",
+    nodes: {
+        "intro": (
+            speaker: "Blacksmith",
+            text: "The key to the dungeon is with the boss at the very bottom.",
+            options: [
+                (text: "Show me your wares.", next: None,
+                    effect: [OpenVendor("blacksmith")]),
+                (text: "Let me use the forge.", next: None,
+                    effect: [OpenCrafting("blacksmith")]),
+                (text: "How do I get there?", next: Some("portal_info"), effect: []),
+                (text: "Give me a potion if you have one.", next: Some("give_potion"),
+                    effect: [GiveItem(id: "health_potion", count: 2)]),
+                (text: "Thanks.", next: None, effect: []),
+            ],
+        ),
+        "portal_info": (
+            speaker: "Blacksmith",
+            text: "The portal will take you there quickly. Careful — it's dark and dangerous.",
+            options: [
+                (text: "Understood.", next: None, effect: []),
+            ],
+        ),
+        "give_potion": (
+            speaker: "Blacksmith",
+            text: "Here, you'll need this.",
+            options: [
+                (text: "Much obliged!", next: None, effect: []),
+            ],
+        ),
+    },
+)

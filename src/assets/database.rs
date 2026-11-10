@@ -85,17 +85,51 @@ impl AssetDatabase {
         let ext = path.extension()?.to_str()?.to_lowercase();
         let stem = path.file_stem()?.to_str()?.to_lowercase();
 
+        // Имя родительской папки (например, "items", "quests", "dialogs").
+        let parent_dir = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
         Some(match ext.as_str() {
             "glb" | "gltf" | "fbx" | "obj" | "dae" => AssetKind::Mesh,
             "png" | "jpg" | "jpeg" | "exr" | "hdr" | "tga" | "dds" | "bmp" | "tif" | "tiff"
             | "webp" | "qoi" => AssetKind::Texture,
             "wav" | "ogg" | "mp3" | "flac" => AssetKind::Audio,
             "wgsl" | "glsl" | "vert" | "frag" => AssetKind::Shader,
-            "ron" if stem.ends_with(".prefab") => AssetKind::Prefab,
-            "ron" if stem.ends_with(".scene") => AssetKind::Scene,
-            "ron" if stem.ends_with(".anim_events") => AssetKind::Animation,
-            "ron" => AssetKind::Scene,
             "rs" | "rhai" | "lua" => AssetKind::Script,
+            "ron" => {
+                // Приоритет 1: явный суффикс (foo.scene.ron, foo.prefab.ron, ...).
+                if stem.ends_with(".scene") {
+                    AssetKind::Scene
+                } else if stem.ends_with(".prefab") {
+                    AssetKind::Prefab
+                } else if stem.ends_with(".anim_events") {
+                    AssetKind::Animation
+                } else if stem.ends_with(".material") {
+                    AssetKind::Material
+                } else {
+                    // Приоритет 2: родительская папка.
+                    match parent_dir.as_str() {
+                        "items" => AssetKind::Item,
+                        "weapons" => AssetKind::Weapon,
+                        "quests" => AssetKind::Quest,
+                        "dialogs" => AssetKind::Dialog,
+                        "vendors" => AssetKind::Vendor,
+                        "recipes" => AssetKind::Recipe,
+                        "loot" => AssetKind::Loot,
+                        "locale" => AssetKind::Locale,
+                        "scenes" => AssetKind::Scene,
+                        "prefabs" => AssetKind::Prefab,
+                        "materials" => AssetKind::Material,
+                        "animations" => AssetKind::Animation,
+                        // Fallback: generic `.ron` вне известных папок.
+                        _ => AssetKind::Data,
+                    }
+                }
+            }
             _ => return None,
         })
     }
