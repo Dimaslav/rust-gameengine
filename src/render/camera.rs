@@ -59,6 +59,7 @@ fn shake_noise(t: f32, seed: f32) -> f32 {
 pub enum CameraMode {
     Orbit,
     FirstPerson,
+    ThirdPerson,
     Fly,
 }
 
@@ -73,7 +74,11 @@ pub struct Camera3D {
     pub far: f32,
     pub mode: CameraMode,
     pub first_person_pos: Vec3,
-
+    pub tps_distance: f32,
+    pub tps_current_distance: f32,
+    pub tps_shoulder_offset: f32,
+    pub tps_pivot_height: f32,
+    pub tps_collision_radius: f32,
     pub shake_intensity: f32,
     pub shake_time_left: f32,
     pub shake_duration: f32,
@@ -95,6 +100,14 @@ impl Camera3D {
             far: 5000.0,
             mode: CameraMode::Orbit,
             first_person_pos: Vec3::new(0.0, 1.7, -8.0),
+
+            // ThirdPerson defaults (Step 10.1).
+            tps_distance: 4.0,
+            tps_current_distance: 4.0,
+            tps_shoulder_offset: 0.5,
+            tps_pivot_height: -0.2,
+            tps_collision_radius: 0.2,
+
             shake_intensity: 0.0,
             shake_time_left: 0.0,
             shake_duration: 0.0,
@@ -169,6 +182,7 @@ impl Camera3D {
                 self.target + Vec3::new(self.distance * cp * cy, self.distance * sp, self.distance * cp * sy)
             }
             CameraMode::FirstPerson | CameraMode::Fly => self.first_person_pos,
+            CameraMode::ThirdPerson => self.tps_camera_pos(),
         }
     }
 
@@ -185,6 +199,14 @@ impl Camera3D {
                 let (sy, cy) = base_yaw.sin_cos();
                 let (sp, cp) = base_pitch.sin_cos();
                 pos + Vec3::new(-cp * cy, -sp, -cp * sy)
+            }
+            CameraMode::ThirdPerson => {
+                let base_yaw = self.yaw + yaw_off;
+                let base_pitch = (self.pitch + pitch_off).clamp(-MAX_PITCH, MAX_PITCH);
+                let (sy, cy) = base_yaw.sin_cos();
+                let (sp, cp) = base_pitch.sin_cos();
+                let fwd = Vec3::new(-cp * cy, -sp, -cp * sy);
+                self.tps_pivot() + fwd * 10.0
             }
         };
         look_at_rh(pos, look, Vec3::Y)
@@ -233,7 +255,12 @@ impl Camera3D {
     pub fn is_first_person(&self) -> bool { self.mode == CameraMode::FirstPerson }
 
     pub fn fps_look(&mut self, dx: f32, dy: f32) {
-        if self.mode != CameraMode::FirstPerson { return; }
+        if !matches!(
+            self.mode,
+            CameraMode::FirstPerson | CameraMode::ThirdPerson
+        ) {
+            return;
+        }
         self.yaw += dx;
         self.pitch = (self.pitch + dy).clamp(-MAX_PITCH, MAX_PITCH);
     }
@@ -256,6 +283,107 @@ impl Camera3D {
     }
     pub fn is_flying(&self) -> bool { self.mode == CameraMode::Fly }
 
+    // ============================================================
+    // ThirdPerson (Step 10.1)
+    // ============================================================
+
+    pub fn is_third_person(&self) -> bool { self.mode == CameraMode::ThirdPerson }
+
+    /// Войти в ThirdPerson. `eye_pos` = позиция "плеча"
+    /// (body.feet + current_eye_height) — та же семантика, что
+    /// `first_person_pos` в FPS. Это позволяет переключаться
+    /// FPS↔TPS без пересчёта позиций.
+    pub fn enter_tps(&mut self, eye_pos: Vec3, distance: f32, pivot_height: f32) {
+        self.mode = CameraMode::ThirdPerson;
+        self.first_person_pos = eye_pos;
+        self.tps_distance = distance.clamp(0.5, 20.0);
+        self.tps_current_distance = self.tps_distance;
+        self.tps_pivot_height = pivot_height.clamp(-2.0, 3.0);
+    }
+
+    pub fn exit_tps(&mut self) {
+        if self.mode != CameraMode::ThirdPerson { return; }
+        self.to_orbit();
+    }
+
+    /// Выйти из любого player-режима (FirstPerson/ThirdPerson/Fly)
+    /// в Orbit. Используется при завершении Play.
+    pub fn exit_player(&mut self) {
+        if matches!(
+            self.mode,
+            CameraMode::FirstPerson | CameraMode::ThirdPerson | CameraMode::Fly
+        ) {
+            self.to_orbit();
+        }
+    }
+
+    /// Pivot TPS-камеры: eye + pivot_height. Обычно чуть ниже глаз,
+    /// чтобы камера смотрела на «плечо», а не в затылок.
+    pub fn tps_pivot(&self) -> Vec3 {
+        self.first_person_pos + Vec3::Y * self.tps_pivot_height
+    }
+
+    /// Позиция камеры TPS: pivot - forward * current_distance + right * shoulder.
+    pub fn tps_camera_pos(&self) -> Vec3 {
+        let pivot = self.tps_pivot();
+        let fwd = self.forward();
+        let r = self.right();
+        pivot - fwd * self.tps_current_distance + r * self.tps_shoulder_offset
+    }
+
+    /// Луч для разрешения коллизии: (origin=pivot, dir=normalize(target - pivot)).
+    /// Вызывающий делает raycast в World и передаёт результат в
+    /// `apply_tps_collision_hit`.
+    pub fn tps_collision_ray(&self) -> Option<(Vec3, Vec3)> {
+        if self.mode != CameraMode::ThirdPerson {
+            return None;
+        }
+        let pivot = self.tps_pivot();
+        let target_pos = pivot - self.forward() * self.tps_distance
+            + self.right() * self.tps_shoulder_offset;
+        let to_target = target_pos - pivot;
+        let dist = to_target.length();
+        if dist < 1e-4 {
+            return None;
+        }
+        Some((pivot, to_target / dist))
+    }
+
+    /// Применить результат raycast'а: `hit = Some(t)` — расстояние
+    /// от pivot до первого препятствия; `None` — путь свободен.
+    /// Уменьшает `tps_current_distance`, но не ниже 0.5 м.
+    pub fn apply_tps_collision_hit(&mut self, hit: Option<f32>) {
+        if self.mode != CameraMode::ThirdPerson {
+            return;
+        }
+        let pivot = self.tps_pivot();
+        let target_pos = pivot - self.forward() * self.tps_distance
+            + self.right() * self.tps_shoulder_offset;
+        let target_dist = (target_pos - pivot).length();
+        if target_dist < 1e-4 {
+            self.tps_current_distance = 0.5;
+            return;
+        }
+        match hit {
+            Some(t) if t < target_dist => {
+                let max_d = (t - self.tps_collision_radius).max(0.5);
+                let proj_dist = max_d / target_dist;
+                self.tps_current_distance = (self.tps_distance * proj_dist).max(0.5);
+            }
+            _ => {
+                self.tps_current_distance = self.tps_distance;
+            }
+        }
+    }
+
+    /// Изменить дистанцию spring arm (для zoom колёсиком).
+    pub fn add_tps_distance(&mut self, delta: f32) {
+        if self.mode != CameraMode::ThirdPerson {
+            return;
+        }
+        self.tps_distance = (self.tps_distance + delta).clamp(1.0, 20.0);
+    }
+
     pub fn fly_look(&mut self, dx: f32, dy: f32) {
         if self.mode != CameraMode::Fly { return; }
         self.yaw += dx;
@@ -263,7 +391,9 @@ impl Camera3D {
     }
     pub fn fly_move(&mut self, delta: Vec3) {
         match self.mode {
-            CameraMode::Fly | CameraMode::FirstPerson => self.first_person_pos += delta,
+            CameraMode::Fly | CameraMode::FirstPerson | CameraMode::ThirdPerson => {
+                self.first_person_pos += delta
+            }
             CameraMode::Orbit => self.target += delta,
         }
     }
@@ -274,6 +404,7 @@ impl Camera3D {
         let dir = Vec3::new(cp * cy, sp, cp * sy);
         self.target = self.first_person_pos - dir * self.distance;
         self.mode = CameraMode::Orbit;
+        self.tps_current_distance = self.tps_distance;
     }
 
     pub fn frustum_planes(&self) -> [Vec4; 6] {

@@ -118,12 +118,6 @@ pub fn attenuation(dist: f32, min_dist: f32, max_dist: f32) -> f32 {
     (1.0 - t) * (1.0 - t)
 }
 
-/// Позиция entity в мире для целей audio.
-///
-/// ИЗМЕНЕНО (bugfix #4): теперь учитывает Parent-цепочку через
-/// `world_position`. До этого возвращалась локальная
-/// `Transform.position`, и звук дочерней сущности звучал из
-/// родительского origin-а, а не из фактической позиции.
 pub fn source_position(world: &crate::ecs::World, entity: crate::ecs::Entity) -> Vec3 {
     crate::game::world_position(world, entity).unwrap_or(Vec3::ZERO)
 }

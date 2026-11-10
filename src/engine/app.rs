@@ -37,7 +37,7 @@ use crate::render::{
     camera::CameraMode, Camera3D, EguiFrameData, GpuLight, GpuPointLight, LineBatch, LineVertex,
     MeshDraw, ParticleInstance, PostFx, Renderer,
 };
-use crate::scripting::{ScriptCommand, ScriptEvent, ScriptSystem};
+use crate::scripting::{ScriptCommand, ScriptSystem};
 
 use super::ai_system::AiSystem;
 use super::audio::AudioSystem;
@@ -466,7 +466,7 @@ impl<G: Game> App<G> {
         if !self.editor.state.play.active {
             return;
         }
-        self.game.camera_mut().exit_fps();
+        self.game.camera_mut().exit_player();
         if let Some(snap) = self.play_snapshot.take() {
             self.restore_play_snapshot(snap);
         }
@@ -819,6 +819,25 @@ impl<G: Game> App<G> {
         let mdy = if ctrl.invert_y { -mdy_raw } else { mdy_raw };
         self.game.camera_mut().fps_look(mdx * sens, mdy * sens);
 
+        // === Step 10.2: V — переключение FPS ↔ TPS ===
+        if self.input.key_pressed(KeyCode::KeyV) {
+            let next = match self.editor.state.play.camera_mode {
+                CameraMode::FirstPerson => CameraMode::ThirdPerson,
+                _ => CameraMode::FirstPerson,
+            };
+            self.editor.state.play.camera_mode = next;
+            log::info!("Player camera mode: {:?}", next);
+        }
+
+        // === Step 10.2: колесо — зум TPS spring arm ===
+        if self.editor.state.play.camera_mode == CameraMode::ThirdPerson
+            && self.input.scroll_delta.abs() > 0.01
+        {
+            let play = &mut self.editor.state.play;
+            play.tps_distance =
+                (play.tps_distance - self.input.scroll_delta * 0.5).clamp(1.0, 12.0);
+        }
+
         if ctrl.crouch_toggle {
             if self.input.key_pressed(KeyCode::ControlLeft)
                 || self.input.key_pressed(KeyCode::ControlRight)
@@ -1028,7 +1047,52 @@ impl<G: Game> App<G> {
         };
         bob_cur = bob_cur * 0.85 + bob_target * 0.15;
         let new_eye = new_feet + Vec3::Y * (eye_height + bob_cur);
-        self.game.camera_mut().first_person_pos = new_eye;
+
+        // === Step 10.2: камера (FPS vs TPS) + collision ===
+        {
+            let play_mode = self.editor.state.play.camera_mode;
+            let tps_distance = self.editor.state.play.tps_distance;
+            let tps_shoulder = self.editor.state.play.tps_shoulder_offset;
+            let tps_pivot_h = self.editor.state.play.tps_pivot_height;
+            let cam = self.game.camera_mut();
+
+            match play_mode {
+                CameraMode::ThirdPerson => {
+                    // Вход в TPS: если камера была в другом режиме —
+                    // переинициализировать. Если уже TPS — параметры
+                    // обновятся ниже без сброса текущей дистанции.
+                    if !cam.is_third_person() {
+                        cam.enter_tps(new_eye, tps_distance, tps_pivot_h);
+                    }
+                    cam.tps_distance = tps_distance;
+                    cam.tps_shoulder_offset = tps_shoulder;
+                    cam.tps_pivot_height = tps_pivot_h;
+                    cam.first_person_pos = new_eye;
+
+                    // Разрешение коллизии spring arm.
+                    // Луч: pivot → target_pos (позади pivot'а, со сдвигом
+                    // плеча). Если что-то между — подтягиваем камеру.
+                    if let Some((origin, dir)) = cam.tps_collision_ray() {
+                        let max_d = (tps_distance + 1.0).max(2.0);
+                        let hit = self.physics.raycast(
+                            &self.world,
+                            origin,
+                            dir,
+                            max_d,
+                            crate::physics::QueryFilter::static_only(),
+                        );
+                        cam.apply_tps_collision_hit(hit.map(|h| h.distance));
+                    }
+                }
+                _ => {
+                    if !cam.is_first_person() {
+                        cam.enter_fps(new_eye);
+                    }
+                    cam.first_person_pos = new_eye;
+                }
+            }
+        }
+
         {
             let play = &mut self.editor.state.play;
             play.vertical_velocity = vvel;
@@ -1054,7 +1118,7 @@ impl<G: Game> App<G> {
         } else {
             self.footstep_timer = 0.0;
         }
-        let origin = self.game.camera().position();
+        let origin = self.game.camera().first_person_pos;
         let dir = self.game.camera().forward();
         let aim_hit = {
             let cache = Self::ensure_pickable(&self.world, &self.renderer, &mut self.pickable);
@@ -1434,7 +1498,6 @@ impl<G: Game> App<G> {
     fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) {
         for cmd in commands {
             match cmd {
-                // FIX #7: `position` больше не игнорируется.
                 ScriptCommand::PlaySound { sound, position: Some(pos) } => {
                     if let Some(audio) = self.audio.as_mut() {
                         let listener = self.game.camera().position();
@@ -1445,6 +1508,13 @@ impl<G: Game> App<G> {
                     if let Some(audio) = self.audio.as_mut() {
                         audio.play(&sound);
                     }
+                }
+                ScriptCommand::SendEvent { name } => {
+                    log::warn!(
+                        "ScriptCommand::SendEvent('{}') leaked to App; \
+                         should have been handled by ScriptSystem::pending_events",
+                        name
+                    );
                 }
                 ScriptCommand::Log { .. } => {}
             }
@@ -2862,7 +2932,23 @@ impl<G: Game> App<G> {
                     if spawn.y < play.floor_y + play.eye_height {
                         spawn.y = play.floor_y + play.eye_height;
                     }
-                    self.game.camera_mut().enter_fps(spawn);
+                    let initial_mode = play.camera_mode;
+                    let initial_distance = play.tps_distance;
+                    let initial_pivot_h = play.tps_pivot_height;
+                    let initial_shoulder = play.tps_shoulder_offset;
+                    match initial_mode {
+                        CameraMode::ThirdPerson => {
+                            self.game.camera_mut().enter_tps(
+                                spawn,
+                                initial_distance,
+                                initial_pivot_h,
+                            );
+                            self.game.camera_mut().tps_shoulder_offset = initial_shoulder;
+                        }
+                        _ => {
+                            self.game.camera_mut().enter_fps(spawn);
+                        }
+                    }
                     self.game.camera_mut().yaw = std::f32::consts::FRAC_PI_2;
                     self.game.camera_mut().pitch = 0.0;
                     play.saved_position = spawn;
@@ -4085,17 +4171,22 @@ impl<G: Game> App<G> {
             WindowEvent::CursorLeft { .. } => {
                 self.input.on_cursor_enter();
             }
-            WindowEvent::MouseWheel { delta, .. } if !in_play && !in_menu => {
-                if !consumed {
-                    let (mx, my) = self.input.mouse_pos;
-                    let wants_pointer = self.editor.egui_ctx.egui_wants_pointer_input();
-                    if !wants_pointer && self.in_viewport(mx, my) {
-                        let d = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => y,
-                            MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
-                        };
-                        self.input.on_scroll(d);
-                    }
+            WindowEvent::MouseWheel { delta, .. } if !in_menu => {
+                // Step 10.2: в play mode scroll тоже обрабатываем —
+                // в TPS это зум spring arm (см. update_player).
+                let (mx, my) = self.input.mouse_pos;
+                let wants_pointer = self.editor.egui_ctx.egui_wants_pointer_input();
+                let should_handle = if in_play {
+                    true
+                } else {
+                    !consumed && !wants_pointer && self.in_viewport(mx, my)
+                };
+                if should_handle {
+                    let d = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+                    };
+                    self.input.on_scroll(d);
                 }
             }
             WindowEvent::RedrawRequested => {

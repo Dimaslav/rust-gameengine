@@ -1434,7 +1434,7 @@ impl FortressDemo {
         }
 
         // === Step 8.4: Chests ===
-        if let Some(mut chest_data) = world.get::<crate::game::rpg::Chest>(e).copied() {
+        if let Some(mut chest_data) = world.get::<rust_engine::game::rpg::Chest>(e).cloned() {
             if !chest_data.opened {
                 chest_data.opened = true;
                 self.campaign.gold = self.campaign.gold.saturating_add(chest_data.gold);

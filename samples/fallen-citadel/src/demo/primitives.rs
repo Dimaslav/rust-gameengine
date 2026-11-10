@@ -297,7 +297,7 @@ pub fn chest(world: &mut World, name: impl Into<String>, pos: Vec3, gold: u32) -
 
     world.insert(
         e,
-        crate::game::rpg::Chest {
+        rust_engine::game::rpg::Chest {
             gold,
             opened: false,
         },

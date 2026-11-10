@@ -21,7 +21,7 @@ pub struct GoldValue(pub u32);
 pub struct KeyItem(pub u32);
 
 /// Сундук: сколько золота внутри и открыт ли он.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Chest {
     pub gold: u32,
     pub opened: bool,
