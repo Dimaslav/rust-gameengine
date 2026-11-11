@@ -401,6 +401,76 @@ impl FortressDemo {
         }
     }
 
+    fn find_closest_interactable(world: &World, cam_pos: Vec3, cam_dir: Vec3) -> Option<Entity> {
+        let mut best: Option<(Entity, f32)> = None;
+        let max_dist = 3.5;
+        let max_angle_cos = 0.85; // ~30 градусов вбок
+
+        for &e in world.entities() {
+            // Ищем только то, с чем можно взаимодействовать
+            if !world.has::<Interactable>(e)
+                && !world.has::<SlidingDoor>(e)
+                && !world.has::<DialogNpc>(e)
+            {
+                continue;
+            }
+
+            let Some(t) = world.get::<Transform>(e) else { continue; };
+            let to = t.position - cam_pos;
+            let dist = to.length();
+            if dist > max_dist || dist < 1e-4 { continue; }
+
+            let dot = to.normalize_or_zero().dot(cam_dir);
+            if dot < max_angle_cos { continue; }
+
+            if best.is_none_or(|(_, d)| dist < d) {
+                best = Some((e, dist));
+            }
+        }
+        best.map(|(e, _)| e)
+    }
+
+    fn try_interact(&mut self, world: &mut World) {
+        let cam_pos = self.camera.position();
+        let cam_dir = self.camera.forward();
+
+        if let Some(e) = Self::find_closest_interactable(world, cam_pos, cam_dir) {
+            // 1. Диалог
+            if let Some(npc) = world.get::<DialogNpc>(e).cloned() {
+                if let Some(graph) = self.dialogs.get(&npc.dialog_id).cloned() {
+                    if let Some(session) = DialogSession::new(graph, e) {
+                        self.dialog_session = Some(session);
+                        return;
+                    }
+                }
+            }
+
+            // 2. Раздвижная дверь
+            if let Some(mut door) = world.get::<SlidingDoor>(e).cloned() {
+                door.target = if door.target > 0.5 { 0.0 } else { 1.0 };
+                world.insert(e, door);
+                self.hud.push(if door.target > 0.5 { "Door opening" } else { "Door closing" });
+                return;
+            }
+
+            // 3. Обычное взаимодействие
+            if let Some(int) = world.get::<Interactable>(e).cloned() {
+                match int {
+                    Interactable::Pickup => {
+                        self.hud.push("Picked up!");
+                        world.despawn(e);
+                    }
+                    Interactable::Toggle => {
+                        let vis = world.get::<Visible>(e).map(|v| v.0).unwrap_or(true);
+                        world.insert(e, Visible(!vis));
+                        self.hud.push(if !vis { "Turned On" } else { "Turned Off" });
+                    }
+                    Interactable::Paint(_) => {}
+                }
+            }
+        }
+    }
+
     // ============================================================
     // Save / Load
     // ============================================================
@@ -896,6 +966,17 @@ impl FortressDemo {
     fn build_act1(&mut self, world: &mut World) {
         let c = ACT1_CENTER;
         let h = ACT1_HALF;
+
+        // Тестовая раздвижная дверь (P1)
+        sliding_door(
+            world,
+            "door_test",
+            c + Vec3::new(2.0, 2.0, 6.0), // Позиция
+            Vec3::new(2.0, 4.0, 0.5),     // Размер
+            Vec3::X,                      // Ось сдвига (вправо)
+            2.5,                          // На сколько сдвигается
+            "arena_door",
+        );        
 
         static_box(world, "Act1_Floor", "arena_floor",
             c, Vec3::new(h * 2.0, 0.5, h * 2.0), Vec3::splat(0.5), 2.5);
@@ -2236,20 +2317,25 @@ impl Game for FortressDemo {
 
         if in_play && !self.demo_paused && self.dialog_session.is_none() {
             if input.key_pressed(KeyCode::KeyE) {
-                let cam_pos = self.camera.position();
-                let cam_dir = self.camera.forward();
-                if let Some(npc_e) = rust_engine::game::dialogs::find_npc_in_front(
-                    world, cam_pos, cam_dir, 3.0, 0.85,
-                ) {
-                    if let Some(npc) = world.get::<DialogNpc>(npc_e).cloned() {
-                        if let Some(graph) = self.dialogs.get(&npc.dialog_id).cloned() {
-                            if let Some(session) = DialogSession::new(graph, npc_e) {
-                                log::info!("Dialog started: {} with NPC #{}", npc.dialog_id, npc_e);
-                                self.dialog_session = Some(session);
-                            }
-                        }
-                    }
+                self.try_interact(world);
+            }
+        }
+
+        // === P1: Система раздвижных дверей ===
+        let doors: Vec<Entity> = world.query::<SlidingDoor>().map(|(e, _)| e).collect();
+        for e in doors {
+            let Some(mut door) = world.get::<SlidingDoor>(e).cloned() else { continue; };
+            if (door.open_amount - door.target).abs() > 1e-4 {
+                let step = door.speed * dt;
+                if door.open_amount < door.target {
+                    door.open_amount = (door.open_amount + step).min(door.target);
+                } else {
+                    door.open_amount = (door.open_amount - step).max(door.target);
                 }
+                if let Some(t) = world.get_mut::<Transform>(e) {
+                    t.position = door.closed_position + door.slide_axis * door.slide_distance * door.open_amount;
+                }
+                world.insert(e, door);
             }
         }
 
@@ -3546,14 +3632,12 @@ impl Game for FortressDemo {
         } else if self.last_play_mode && !self.demo_paused {
             let cam_pos = self.camera.position();
             let cam_dir = self.camera.forward();
-            if rust_engine::game::dialogs::find_npc_in_front(
-                world, cam_pos, cam_dir, 3.0, 0.85,
-            ).is_some() {
+            if Self::find_closest_interactable(world, cam_pos, cam_dir).is_some() {
                 let sw = ui.screen_w();
                 let sh = ui.screen_h();
                 ui.text_centered(
                     sw * 0.5, sh * 0.5 + 50.0,
-                    "[E]  Talk", 18.0, [1.0, 0.9, 0.5, 1.0],
+                    "[E]  Interact", 18.0, [1.0, 0.9, 0.5, 1.0],
                 );
             }
         }

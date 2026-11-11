@@ -21,10 +21,6 @@ impl GateMotion {
     }
 }
 
-// ============================================================
-// СТРУКТУРНЫЕ
-// ============================================================
-
 pub fn static_box(
     world: &mut World,
     name: impl Into<String>,
@@ -444,15 +440,6 @@ pub fn dialog_zone(
     e
 }
 
-/// FIX #4: `exit_zone` — точка победы, должна срабатывать **один раз**.
-///
-/// Раньше использовался `Trigger::repeatable`. `update_player` для
-/// repeatable-триггеров **не сохранял** `t.fired = true` в World,
-/// поэтому `process_triggers` (фильтр `t.fired && !processed.contains(e)`)
-/// не видел `exit_zone` → `on_trigger("exit_zone")` не вызывался →
-/// `trigger_victory` был недостижим.
-///
-/// Теперь `once = true` → `t.fired` сохраняется → победа работает.
 pub fn exit_zone(world: &mut World, name: impl Into<String>, pos: Vec3, radius: f32) -> Entity {
     let e = world.spawn();
     world.insert(e, Name(name.into()));
@@ -734,4 +721,34 @@ pub fn elevator(
     world.insert(e, Collider::aabb(Vec3::splat(0.5)));
     world.insert(e, Elevator::new(floors, 3.0));
     e
+}
+
+pub fn sliding_door(
+    world: &mut World,
+    name: impl Into<String>,
+    pos: Vec3,
+    size: Vec3,
+    slide_axis: Vec3,
+    slide_distance: f32,
+    material: &str,
+) -> Entity {
+    let e = world.spawn();
+    world.insert(e, Name(name.into()));
+    world.insert(e, Transform {
+        position: pos,
+        rotation: Quat::IDENTITY,
+        scale: size,
+    });
+    world.insert(e, MeshHandle("cube".into()));
+    world.insert(e, MaterialHandle(material.to_string()));
+    world.insert(e, TextureTiling::new(1.5));
+    // Сама дверь (логика будет в fortress.rs)
+    world.insert(e, SlidingDoor::new(pos, slide_axis, slide_distance));
+    world.insert(e, Interactable::Toggle);
+    
+    // Чтобы игрок не проходил сквозь закрытую дверь
+    world.insert(e, RigidBody::static_body());
+    world.insert(e, Collider::aabb(Vec3::splat(0.5)));
+    
+    e    
 }
