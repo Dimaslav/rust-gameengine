@@ -8,4 +8,8 @@
     sell_price: 80,
     max_stack: 1,
     equippable: true,
+    melee_damage: 35.0,
+    melee_range: 2.5,
+    melee_arc_degrees: 90.0,
+    melee_cooldown: 0.55,
 )

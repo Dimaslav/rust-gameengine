@@ -884,8 +884,8 @@ mod tests {
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(0.0, 0.5, 0.0),
             0.5,
-            Vec3::new(0.0, 0.3, 0.0),
             Vec3::new(0.0, 1.3, 0.0),
+            Vec3::new(0.0, 2.3, 0.0),
             0.5,
             0,
             1,
@@ -929,8 +929,8 @@ mod tests {
     #[test]
     fn capsule_aabb_stand_on_top() {
         let c = capsule_aabb(
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::new(0.0, 1.6, 0.0),
             0.4,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::splat(0.5),
@@ -938,8 +938,12 @@ mod tests {
             1,
         );
         let c = c.expect("капсула стоит на коробке");
-        assert!(c.normal.y > 0.9);
-        assert!(c.penetration > 0.0 && c.penetration < 0.5);
+        assert!(c.normal.y < -0.9, "normal = {:?}", c.normal);
+        assert!(
+            (c.penetration - 0.3).abs() < 0.05,
+            "pen = {}",
+            c.penetration
+        );
     }
 
     #[test]

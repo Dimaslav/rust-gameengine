@@ -8,6 +8,7 @@ pub mod decals;
 pub mod dialogs;
 pub mod items;
 pub mod lights;
+pub mod melee;
 pub mod locale;
 pub mod quests;
 pub mod rpg;
@@ -25,7 +26,9 @@ pub use animation::{
     AnimationRuntime,
 };
 pub use animation_blend::{
-    AnimationBlendPlayer, BlendOutput, BlendSample, BlendTree1D,
+    AnimationBlendPlayer, AnimationLayer, AnimationLayeredPlayer,
+    AnimationStateMachine, BlendOutput, BlendSample, BlendTree1D, BoneMask,
+    Comparison, Condition, StateDef, Transition,
 };
 pub use audio::{attenuation, source_position, AudioBus, AudioSource};
 pub use components::{
@@ -41,6 +44,10 @@ pub use decals::Decal;
 pub use items::{
     roll_loot, Equipment, Inventory, Item, ItemKind, ItemRegistry, ItemStack,
     LootEntry, LootRegistry, LootTable, Rarity,
+};
+pub use melee::{
+    consume_animation_hit, perform_hit, start_attack, tick_timers,
+    MeleeAttackKind, MeleeHitResult, MeleeState, MeleeWeapon, PendingHit,
 };
 pub use lights::{DirectionalLight, PointLight};
 pub use stats::{

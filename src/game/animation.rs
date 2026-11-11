@@ -119,6 +119,14 @@ impl AnimationRuntime {
             .query::<crate::game::animation_blend::AnimationBlendPlayer>()
             .map(|(e, _)| e)
             .collect();
+        let layered_entities: Vec<Entity> = world
+            .query::<crate::game::animation_blend::AnimationLayeredPlayer>()
+            .map(|(e, _)| e)
+            .collect();
+        let state_machine_entities: Vec<Entity> = world
+            .query::<crate::game::animation_blend::AnimationStateMachine>()
+            .map(|(e, _)| e)
+            .collect();
 
         let mut triggered: Vec<AnimationEventTriggered> = Vec::new();
         let mut root_motions: Vec<(Entity, Vec3, Quat)> = Vec::new();
@@ -323,12 +331,6 @@ impl AnimationRuntime {
             {
                 let duration = clip.duration;
                 if duration > 1e-4 {
-                    let from_t = if looping {
-                        (prev_time * 0.0)
-                    } else {
-                        0.0
-                    };
-                    let _ = from_t;
                     let prev_local = if looping {
                         (prev_time * sample.time_scale) % duration
                     } else {
@@ -355,6 +357,362 @@ impl AnimationRuntime {
             self.prev_times.insert(e, new_time);
         }
 
+        for e in &layered_entities {
+            let e = *e;
+
+            let (layers_snapshot, _looping, new_time_base) = {
+                let Some(lp) = world.get_mut::<crate::game::animation_blend::AnimationLayeredPlayer>(e) else {
+                    continue;
+                };
+                if lp.layers.is_empty() {
+                    continue;
+                }
+
+                if let Some(base) = lp.layers.first_mut() {
+                    base.time += dt * base.speed;
+                }
+                for l in lp.layers.iter_mut().skip(1) {
+                    l.time += dt * l.speed;
+                }
+                let snap: Vec<_> = lp
+                    .layers
+                    .iter()
+                    .map(|l| (
+                        l.tree.clone(),
+                        l.axis,
+                        l.time,
+                        l.looping,
+                        l.weight,
+                        l.bone_mask.clone(),
+                    ))
+                    .collect();
+                (snap, lp.looping, lp.layers.first().map(|l| l.time).unwrap_or(0.0))
+            };
+
+            let skel_handle = world.get::<SkeletonHandle>(e).cloned();
+            let Some(handle) = skel_handle else {
+                self.prev_times.insert(e, new_time_base);
+                continue;
+            };
+            let Some(skel) = skeletons.get(&handle.0) else {
+                self.prev_times.insert(e, new_time_base);
+                continue;
+            };
+
+            struct LayerPose {
+                pose: Vec<Mat4>,
+                mask: crate::game::animation_blend::BoneMask,
+                weight: f32,
+            }
+            let mut layer_poses: Vec<LayerPose> = Vec::with_capacity(layers_snapshot.len());
+
+            for (idx, (tree, axis, time, layer_looping, weight, mask)) in
+                layers_snapshot.iter().enumerate()
+            {
+                let effective_weight = if idx == 0 { 1.0 } else { *weight };
+                if effective_weight < 1e-4 {
+                    continue;
+                }
+                if tree.samples.is_empty() {
+                    continue;
+                }
+                let outputs = tree.evaluate(*axis);
+                if outputs.is_empty() {
+                    continue;
+                }
+
+                let mut poses: Vec<(Vec<Mat4>, f32)> = Vec::with_capacity(outputs.len());
+                let mut total = 0.0f32;
+                for out in &outputs {
+                    if out.weight < 1e-4 {
+                        continue;
+                    }
+                    let Some(sample) = tree.samples.get(out.sample_idx) else {
+                        continue;
+                    };
+                    let Some(clip) = clips.get(&sample.clip) else {
+                        continue;
+                    };
+                    let duration = clip.duration;
+                    if duration <= 1e-4 {
+                        continue;
+                    }
+                    let local_time = if *layer_looping {
+                        (time * out.time_scale) % duration
+                    } else {
+                        (time * out.time_scale).min(duration)
+                    };
+                    let pose = clip.local_pose(local_time, &skel.local_bind);
+                    poses.push((pose, out.weight));
+                    total += out.weight;
+                }
+                if poses.is_empty() || total < 1e-4 {
+                    continue;
+                }
+
+                let num_joints = poses.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+                let mut blended: Vec<Mat4> = Vec::with_capacity(num_joints);
+                for j in 0..num_joints {
+                    let mut first = true;
+                    let mut pos = Vec3::ZERO;
+                    let mut scale = Vec3::ONE;
+                    let mut rot = Quat::IDENTITY;
+                    let mut cum = 0.0f32;
+                    for (pose, w) in &poses {
+                        let Some(m) = pose.get(j) else { continue };
+                        let (s, r, t) = m.to_scale_rotation_translation();
+                        if first {
+                            pos = t;
+                            scale = s;
+                            rot = r;
+                            cum = *w;
+                            first = false;
+                        } else {
+                            let tot = cum + *w;
+                            let alpha = if tot > 1e-6 { *w / tot } else { 0.0 };
+                            pos = pos.lerp(t, alpha);
+                            scale = scale.lerp(s, alpha);
+                            rot = rot.slerp(r, alpha);
+                            cum = tot;
+                        }
+                    }
+                    blended.push(Mat4::from_scale_rotation_translation(scale, rot, pos));
+                }
+                layer_poses.push(LayerPose {
+                    pose: blended,
+                    mask: mask.clone(),
+                    weight: effective_weight,
+                });
+            }
+
+            if layer_poses.is_empty() {
+                self.prev_times.insert(e, new_time_base);
+                continue;
+            }
+
+            let base = &layer_poses[0];
+            let num_joints = base.pose.len();
+            let mut final_pose: Vec<Mat4> = base.pose.clone();
+            for overlay in layer_poses.iter().skip(1) {
+                if overlay.weight < 1e-4 {
+                    continue;
+                }
+                for j in 0..num_joints.min(overlay.pose.len()) {
+                    if !overlay.mask.contains(j) {
+                        continue;
+                    }
+                    let b = final_pose[j];
+                    let o = overlay.pose[j];
+                    let (bs, br, bt) = b.to_scale_rotation_translation();
+                    let (os, or_, ot) = o.to_scale_rotation_translation();
+                    let a = overlay.weight;
+                    let pos = bt.lerp(ot, a);
+                    let scale = bs.lerp(os, a);
+                    let rot = br.slerp(or_, a);
+                    final_pose[j] = Mat4::from_scale_rotation_translation(scale, rot, pos);
+                }
+            }
+
+            let joint_matrices = skel.joint_matrices(&final_pose);
+            renderer.update_skeleton(&handle.0, &joint_matrices);
+
+            if let Some((tree, axis, time, layer_looping, _w, _m)) = layers_snapshot.first() {
+                let prev_time = self.prev_times.get(&e).copied().unwrap_or(0.0);
+                let outputs = tree.evaluate(*axis);
+                let mut dominant: Option<usize> = None;
+                let mut dom_w = 0.0f32;
+                for out in &outputs {
+                    if out.weight > dom_w {
+                        dom_w = out.weight;
+                        dominant = Some(out.sample_idx);
+                    }
+                }
+                if let Some(didx) = dominant
+                    && let Some(sample) = tree.samples.get(didx)
+                    && let Some(clip) = clips.get(&sample.clip)
+                {
+                    let duration = clip.duration;
+                    if duration > 1e-4 {
+                        let prev_local = if *layer_looping {
+                            (prev_time * sample.time_scale) % duration
+                        } else {
+                            (prev_time * sample.time_scale).min(duration)
+                        };
+                        let to_local = if *layer_looping {
+                            (time * sample.time_scale) % duration
+                        } else {
+                            (time * sample.time_scale).min(duration)
+                        };
+                        for ev in events.get(&sample.clip) {
+                            if event_in_range(ev.time, prev_local, to_local, *layer_looping, duration) {
+                                triggered.push(AnimationEventTriggered {
+                                    entity: e,
+                                    clip: sample.clip.clone(),
+                                    name: ev.name.clone(),
+                                    payload: ev.payload.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.prev_times.insert(e, new_time_base);
+        }
+
+        // === Step 11.5: AnimationStateMachine ===
+        for e in &state_machine_entities {
+            let e = *e;
+
+            // 1. Тик state machine (обновляет время, запускает переходы).
+            {
+                let Some(sm) = world.get_mut::<crate::game::animation_blend::AnimationStateMachine>(e) else {
+                    continue;
+                };
+                sm.tick(dt);
+            }
+
+            // 2. Скелет.
+            let skel_handle = world.get::<SkeletonHandle>(e).cloned();
+            let Some(handle) = skel_handle else {
+                continue;
+            };
+            let Some(skel) = skeletons.get(&handle.0) else {
+                continue;
+            };
+
+            // 3. Поза текущего состояния (с учётом активного blend'а).
+            let sm_clone = match world.get::<crate::game::animation_blend::AnimationStateMachine>(e) {
+                Some(sm) => sm.clone(),
+                None => continue,
+            };
+
+            let evaluate_tree = |tree: &crate::game::animation_blend::BlendTree1D,
+                                 time: f32,
+                                 looping: bool|
+             -> Vec<Mat4> {
+                let outputs = tree.evaluate(0.0); // ось — из tree
+                if outputs.is_empty() {
+                    return Vec::new();
+                }
+                // Собираем blend-позу дерева.
+                let mut poses: Vec<(Vec<Mat4>, f32)> = Vec::with_capacity(outputs.len());
+                let mut total = 0.0f32;
+                for out in &outputs {
+                    if out.weight < 1e-4 {
+                        continue;
+                    }
+                    let Some(sample) = tree.samples.get(out.sample_idx) else {
+                        continue;
+                    };
+                    let Some(clip) = clips.get(&sample.clip) else {
+                        continue;
+                    };
+                    let duration = clip.duration;
+                    if duration <= 1e-4 {
+                        continue;
+                    }
+                    let local_time = if looping {
+                        (time * out.time_scale) % duration
+                    } else {
+                        (time * out.time_scale).min(duration)
+                    };
+                    let pose = clip.local_pose(local_time, &skel.local_bind);
+                    poses.push((pose, out.weight));
+                    total += out.weight;
+                }
+                if poses.is_empty() || total < 1e-4 {
+                    return Vec::new();
+                }
+                let num_joints = poses.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+                let mut blended: Vec<Mat4> = Vec::with_capacity(num_joints);
+                for j in 0..num_joints {
+                    let mut first = true;
+                    let mut pos = Vec3::ZERO;
+                    let mut scale = Vec3::ONE;
+                    let mut rot = Quat::IDENTITY;
+                    let mut cum = 0.0f32;
+                    for (pose, w) in &poses {
+                        let Some(m) = pose.get(j) else { continue };
+                        let (s, r, t) = m.to_scale_rotation_translation();
+                        if first {
+                            pos = t;
+                            scale = s;
+                            rot = r;
+                            cum = *w;
+                            first = false;
+                        } else {
+                            let tot = cum + *w;
+                            let alpha = if tot > 1e-6 { *w / tot } else { 0.0 };
+                            pos = pos.lerp(t, alpha);
+                            scale = scale.lerp(s, alpha);
+                            rot = rot.slerp(r, alpha);
+                            cum = tot;
+                        }
+                    }
+                    blended.push(Mat4::from_scale_rotation_translation(scale, rot, pos));
+                }
+                blended
+            };
+
+            let final_pose = match sm_clone.current_pose(evaluate_tree) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            if final_pose.is_empty() {
+                continue;
+            }
+
+            // 4. Отдать в рендер.
+            let joint_matrices = skel.joint_matrices(&final_pose);
+            renderer.update_skeleton(&handle.0, &joint_matrices);
+
+            // 5. Events — только из доминирующего клипа current-состояния.
+            if let Some(state_def) = sm_clone.states.get(&sm_clone.current_state) {
+                let outputs = state_def.tree.evaluate(0.0);
+                let mut dominant: Option<usize> = None;
+                let mut dom_w = 0.0f32;
+                for out in &outputs {
+                    if out.weight > dom_w {
+                        dom_w = out.weight;
+                        dominant = Some(out.sample_idx);
+                    }
+                }
+                if let Some(didx) = dominant
+                    && let Some(sample) = state_def.tree.samples.get(didx)
+                    && let Some(clip) = clips.get(&sample.clip)
+                {
+                    let duration = clip.duration;
+                    if duration > 1e-4 {
+                        let prev_time = self.prev_times.get(&e).copied().unwrap_or(0.0);
+                        let prev_local = if sm_clone.looping {
+                            (prev_time * sample.time_scale) % duration
+                        } else {
+                            (prev_time * sample.time_scale).min(duration)
+                        };
+                        let to_local = if sm_clone.looping {
+                            (sm_clone.state_time * sample.time_scale) % duration
+                        } else {
+                            (sm_clone.state_time * sample.time_scale).min(duration)
+                        };
+                        for ev in events.get(&sample.clip) {
+                            if event_in_range(ev.time, prev_local, to_local, sm_clone.looping, duration) {
+                                triggered.push(AnimationEventTriggered {
+                                    entity: e,
+                                    clip: sample.clip.clone(),
+                                    name: ev.name.clone(),
+                                    payload: ev.payload.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.prev_times.insert(e, sm_clone.state_time);
+        }
+
         for (e, delta_pos, delta_rot) in root_motions {
             if let Some(t) = world.get_mut::<Transform>(e) {
                 let world_delta = t.rotation * delta_pos;
@@ -363,11 +721,17 @@ impl AnimationRuntime {
             }
         }
         let mut alive_set: std::collections::HashSet<Entity> =
-            std::collections::HashSet::with_capacity(plain_entities.len() + blend_entities.len());
+            std::collections::HashSet::with_capacity(
+                plain_entities.len()
+                    + blend_entities.len()
+                    + layered_entities.len()
+                    + state_machine_entities.len(),
+            );
         alive_set.extend(plain_entities.iter().copied());
         alive_set.extend(blend_entities.iter().copied());
+        alive_set.extend(layered_entities.iter().copied());
+        alive_set.extend(state_machine_entities.iter().copied());
         self.prev_times.retain(|k, _| alive_set.contains(k));
-
         triggered
     }
 

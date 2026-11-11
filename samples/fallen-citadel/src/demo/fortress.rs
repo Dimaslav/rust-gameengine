@@ -1,5 +1,3 @@
-//! "The Fallen Citadel" — 5-актовая сюжетная кампания.
-
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
@@ -19,6 +17,10 @@ use rust_engine::game::items::{
     roll_loot, Equipment, Inventory, ItemKind, ItemRegistry, ItemStack, LootRegistry,
 };
 use rust_engine::game::vendors::{VendorDef, VendorNpc, VendorRegistry, VendorSession};
+use rust_engine::game::melee::{
+    consume_animation_hit, perform_hit, start_attack, tick_timers,
+    MeleeAttackKind, MeleeState, MeleeWeapon, PendingHit,
+};
 use rust_engine::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
 use rust_engine::ui::vendor_ui::{self, VendorAction};
 use rust_engine::ui::crafting_ui::{self, CraftingAction};
@@ -292,15 +294,15 @@ pub struct FortressDemo {
     pending_autosave: bool,
     pending_save_slot: Option<u32>,
     pending_quit_to_menu: bool,
-
     prev_world_matrices: HashMap<Entity, glam::Mat4>,
     was_in_play_mode: bool,
     last_dt: f32,
     weapon_recoil: f32,
     pending_hit_stop: Option<(f32, f32)>,
     auto_fire_accumulator: f32,
-
     probe_baked_this_session: bool,
+    melee_weapon: MeleeWeapon,
+    melee_state: MeleeState,
 }
 
 impl FortressDemo {
@@ -377,11 +379,9 @@ impl FortressDemo {
             hud: Hud::new(),
             campaign: CampaignState::new(),
             quest_manager,
-
             dialogs: HashMap::new(),
             current_dialog_lang: initial_lang,
             dialog_session: None,
-
             save_manager: rust_engine::scene::SaveManager::new("saves"),
             pending_world_request: None,
             save_slots_cache: Vec::new(),
@@ -389,7 +389,6 @@ impl FortressDemo {
             pending_autosave: false,
             pending_save_slot: None,
             pending_quit_to_menu: false,
-
             prev_world_matrices: HashMap::new(),
             was_in_play_mode: false,
             last_dt: 1.0 / 60.0,
@@ -397,6 +396,8 @@ impl FortressDemo {
             pending_hit_stop: None,
             auto_fire_accumulator: 0.0,
             probe_baked_this_session: false,
+            melee_weapon: MeleeWeapon::sword(),
+            melee_state: MeleeState::default(),
         }
     }
 
@@ -791,6 +792,52 @@ impl FortressDemo {
                 }
             }
             (InvLocation::Equipment(_), InvLocation::Equipment(_)) => {}
+        }
+    }
+
+    fn current_melee_weapon(&self) -> MeleeWeapon {
+        self.equipment.weapon_id
+            .as_deref()
+            .and_then(|id| self.item_registry.get_by_id(id))
+            .filter(|i| i.melee_damage > 0.0)
+            .map(|i| MeleeWeapon {
+                damage: i.melee_damage,
+                range: i.melee_range.max(0.5),
+                arc_degrees: i.melee_arc_degrees.max(10.0),
+                cooldown: i.melee_cooldown.max(0.15),
+                combo_window: 0.6,
+                knockback: 4.0,
+            })
+            .unwrap_or_else(MeleeWeapon::fists)
+    }
+
+    fn apply_melee_hit(&mut self, world: &mut World, pending: PendingHit) {
+        let weapon = self.melee_weapon;
+        let hits = perform_hit(world, &self.camera, &weapon, pending);
+        if hits.is_empty() {
+            return;
+        }
+        let stop_scale = if matches!(pending.kind, MeleeAttackKind::Heavy) {
+            0.10
+        } else {
+            0.20
+        };
+        self.pending_hit_stop = Some((stop_scale, 0.06));
+
+        for hit in hits {
+            self.hud.push(format!(
+                "⚔ {:.0} dmg{}",
+                hit.damage,
+                if hit.is_crit { " CRIT!" } else { "" },
+            ));
+            let dead = world
+                .get::<Health>(hit.target)
+                .map(|h| h.current <= 0.0)
+                .unwrap_or(false);
+            if dead {
+                self.on_kill(world, hit.target);
+                world.despawn(hit.target);
+            }
         }
     }
 
@@ -1574,7 +1621,7 @@ impl FortressDemo {
         }
     }
 
-    fn on_animation_event(&mut self, world: &World, ev: AnimationEventTriggered) {
+    fn on_animation_event(&mut self, world: &mut World, ev: AnimationEventTriggered) {
         let pos = rust_engine::game::world_position(world, ev.entity).unwrap_or(Vec3::ZERO);
         match ev.name.as_str() {
             "footstep" => {
@@ -1584,6 +1631,12 @@ impl FortressDemo {
             "hit" => {
                 self.hud.push("⚔ Hit!");
             }
+            "melee_hit" => {
+                // Анимация синхронизирует удар — отменяем fallback.
+                if let Some(pending) = consume_animation_hit(&mut self.melee_state) {
+                    self.apply_melee_hit(world, pending);
+                }
+            }            
             "open_door" => {
                 self.hud.push("🚪 Door opens");
             }
@@ -2073,6 +2126,27 @@ impl Game for FortressDemo {
                             (self.auto_fire_accumulator + 0.6).min(1.5);
                         self.weapon_recoil = (self.weapon_recoil + 0.35).min(1.0);
                     }
+            }
+        }
+
+        // === Step 12: Melee ===
+        if in_play && !self.demo_paused && self.campaign.stage != Stage::Victory {
+            let weapon = self.current_melee_weapon();
+            self.melee_weapon = weapon;
+            let can_attack = !self.has_blocking_modal();
+            if can_attack {
+                let trigger = input.key_pressed(KeyCode::KeyF);
+                let shift = input.key_down(KeyCode::ShiftLeft)
+                    || input.key_down(KeyCode::ShiftRight);
+                let kind = if shift { MeleeAttackKind::Heavy } else { MeleeAttackKind::Light };
+                if trigger {
+                    let _ = start_attack(&mut self.melee_state, &weapon, kind);
+                }
+            }
+
+            let fallback = tick_timers(&mut self.melee_state, dt);
+            if let Some(pending) = fallback {
+                self.apply_melee_hit(world, pending);
             }
         }
 
@@ -2693,13 +2767,18 @@ impl Game for FortressDemo {
             )
             .collect();
 
-        // FIX: ViewModel — оружие в руках, привязано к камере.
+        let has_melee_equipped = self.equipment.weapon_id
+            .as_deref()
+            .and_then(|id| self.item_registry.get_by_id(id))
+            .map(|i| i.melee_damage > 0.0)
+            .unwrap_or(false);
         if self.last_play_mode
             && !self.demo_paused
             && !self.show_inventory
             && !self.show_character_sheet
             && self.dialog_session.is_none()
             && self.campaign.stage != Stage::Victory
+            && !has_melee_equipped
         {
             if let Some(w) = self.current_weapon() {
                 let mesh_name = w

@@ -161,6 +161,17 @@ pub struct Item {
     /// Может быть экипирован (только Weapon/Armor/Trinket).
     #[serde(default)]
     pub equippable: bool,
+
+    // === Step 12: melee ===
+    /// Урон ближнего боя. `0.0` = не melee-оружие.
+    #[serde(default)]
+    pub melee_damage: f32,
+    #[serde(default)]
+    pub melee_range: f32,
+    #[serde(default)]
+    pub melee_arc_degrees: f32,
+    #[serde(default)]
+    pub melee_cooldown: f32,
 }
 
 fn default_stack() -> u32 { 1 }
@@ -253,7 +264,6 @@ impl ItemRegistry {
         Ok(Self { items })
     }
 
-    /// Fallback: встроенный набор.
     pub fn default_set() -> Self {
         Self {
             items: vec![
@@ -268,6 +278,8 @@ impl ItemRegistry {
                     bonus_intelligence: 0, bonus_vitality: 0, bonus_luck: 0,
                     heal_amount: 0.0, gold_value: 1, sell_price: 0,
                     max_stack: 9999, equippable: false,
+                    melee_damage: 0.0, melee_range: 0.0,
+                    melee_arc_degrees: 0.0, melee_cooldown: 0.0,
                 },
                 Item {
                     id: "health_potion".into(),
@@ -280,6 +292,8 @@ impl ItemRegistry {
                     bonus_intelligence: 0, bonus_vitality: 0, bonus_luck: 0,
                     heal_amount: 40.0, gold_value: 0, sell_price: 15,
                     max_stack: 5, equippable: false,
+                    melee_damage: 0.0, melee_range: 0.0,
+                    melee_arc_degrees: 0.0, melee_cooldown: 0.0,
                 },
                 Item {
                     id: "leather_armor".into(),
@@ -292,6 +306,8 @@ impl ItemRegistry {
                     bonus_intelligence: 0, bonus_vitality: 3, bonus_luck: 0,
                     heal_amount: 0.0, gold_value: 0, sell_price: 60,
                     max_stack: 1, equippable: true,
+                    melee_damage: 0.0, melee_range: 0.0,
+                    melee_arc_degrees: 0.0, melee_cooldown: 0.0,
                 },
                 Item {
                     id: "lucky_charm".into(),
@@ -304,6 +320,8 @@ impl ItemRegistry {
                     bonus_intelligence: 0, bonus_vitality: 0, bonus_luck: 5,
                     heal_amount: 0.0, gold_value: 0, sell_price: 150,
                     max_stack: 1, equippable: true,
+                    melee_damage: 0.0, melee_range: 0.0,
+                    melee_arc_degrees: 0.0, melee_cooldown: 0.0,
                 },
             ],
         }
