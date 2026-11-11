@@ -21,8 +21,8 @@ struct Lights {
     fog_params:      vec4<f32>,
     fog_color:       vec4<f32>,
     shadow_params:   vec4<f32>,
-    dir_lights:      array<vec4<f32>, 8>,
-    point_lights:    array<vec4<f32>, 32>,
+    dir_lights:      array<vec4<f32>, 16>,
+    point_lights:    array<vec4<f32>, 64>,
     cube_shadow_pos: array<vec4<f32>, 4>,
 };
 
@@ -34,7 +34,7 @@ struct Material {
 };
 
 struct Skeleton {
-    joints: array<mat4x4<f32>, 64>,
+    joints: array<mat4x4<f32>, 128>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

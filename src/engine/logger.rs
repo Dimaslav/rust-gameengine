@@ -119,5 +119,5 @@ pub fn init() {
     .build();
 
     let _ = log::set_boxed_logger(Box::new(DualLogger { env }));
-    log::set_max_level(log::LevelFilter::Info);
+    log::set_max_level(log::LevelFilter::Trace);
 }

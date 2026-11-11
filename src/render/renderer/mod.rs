@@ -2087,13 +2087,13 @@ impl Renderer {
             .map(|l| Vec3::new(l.direction[0], l.direction[1], l.direction[2]))
             .unwrap_or(Vec3::Y);
 
-        let mut dir_packed = [[0.0f32; 4]; 8];
+        let mut dir_packed = [[0.0f32; 4]; 16];
         let dir_count = dir_lights.len().min(MAX_DIR_LIGHTS);
         for i in 0..dir_count {
             dir_packed[i * 2] = dir_lights[i].direction;
             dir_packed[i * 2 + 1] = dir_lights[i].color;
         }
-        let mut pt_packed = [[0.0f32; 4]; 32];
+        let mut pt_packed = [[0.0f32; 4]; 64];
         let pt_count = point_lights.len().min(MAX_POINT_LIGHTS);
         for i in 0..pt_count {
             pt_packed[i * 2] = point_lights[i].position;

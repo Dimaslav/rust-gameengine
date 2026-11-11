@@ -1,8 +1,6 @@
-//! Скелетная анимация: скелет, клипы, интерполяция.
-
 use glam::{Mat4, Quat, Vec3};
 
-pub const MAX_JOINTS: usize = 64;
+pub const MAX_JOINTS: usize = 128;
 pub const PARENT_NONE: usize = usize::MAX;
 
 #[derive(Debug, Clone)]
@@ -12,8 +10,6 @@ pub struct Track {
 }
 
 impl Track {
-    /// Линейная интерполяция (для rotation — slerp).
-    /// Защита от дублирующихся timestamps: если `t1 == t0`, возвращаем a.
     pub fn sample(&self, time: f32, is_rotation: bool) -> [f32; 4] {
         if self.times.is_empty() || self.values.is_empty() {
             return [0.0, 0.0, 0.0, 1.0];

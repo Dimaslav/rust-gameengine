@@ -411,10 +411,10 @@
         contact_shadow_thickness: 0.05,
     ),
     audio_bus_volumes: {
-        "Voice": 1.0,
-        "SFX": 1.0,
-        "UI": 0.9,
-        "Master": 1.0,
         "Music": 0.7,
+        "SFX": 1.0,
+        "Master": 1.0,
+        "Voice": 1.0,
+        "UI": 0.9,
     },
 )

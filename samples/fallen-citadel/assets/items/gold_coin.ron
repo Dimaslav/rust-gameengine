@@ -1,7 +1,7 @@
 (
     id: "gold_coin",
     name: "Gold Coin",
-    kind: Misc,
+    kind: Currency,
     rarity: Common,
     description: "Universal currency",
     gold_value: 1,

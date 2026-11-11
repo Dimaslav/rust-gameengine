@@ -179,15 +179,33 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     let view_z = (near * far) / max(far - depth_raw * (far - near), 1e-4);
     let ratio = far / near;
-    let slice_f = clamp(log(view_z / near) / log(ratio), 0.0, 1.0);
+    let z_end_uv = clamp(log(view_z / near) / log(ratio), 0.0, 1.0);
+    let z_end_froxels = z_end_uv * FROXEL_Z;
+    let total_froxels = u32(ceil(z_end_froxels));
 
-    let z_uv = slice_f * (FROXEL_Z - 1.0) / FROXEL_Z + 0.5 / FROXEL_Z;
-    let fog = textureSampleLevel(t_fog, s_lin, vec3<f32>(in.uv.x, in.uv.y, z_uv), 0.0);
+    const N_STEPS: u32 = 8u;
+    let steps_per_sample = max(1u, (total_froxels + N_STEPS - 1u) / N_STEPS);
 
-    let scattering = fog.rgb;
-    let extinction = fog.a;
-    let transmittance = exp(-extinction);
+    var total_scatter = vec3<f32>(0.0);
+    var accumulated_ext = 0.0;
 
-    let result = hdr * transmittance + scattering;
+    for (var i: u32 = 0u; i < total_froxels; i = i + steps_per_sample) {
+        let z_uv_i = (f32(i) + 0.5) / FROXEL_Z;
+        let f = textureSampleLevel(
+            t_fog, s_lin,
+            vec3<f32>(in.uv.x, in.uv.y, z_uv_i),
+            0.0,
+        );
+        let trans = exp(-accumulated_ext);
+        let w = f32(steps_per_sample);
+        total_scatter += f.rgb * trans * w;
+        accumulated_ext += f.a * w;
+        if (accumulated_ext > 5.0) {
+            break;
+        }
+    }
+
+    let transmittance = exp(-accumulated_ext);
+    let result = hdr * transmittance + total_scatter;
     return vec4<f32>(result, 1.0);
 }

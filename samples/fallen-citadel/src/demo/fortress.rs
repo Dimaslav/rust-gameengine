@@ -1911,11 +1911,11 @@ impl Game for FortressDemo {
 
         add_materials(renderer);
 
-        let heightmap = rust_engine::render::terrain::Heightmap::new_procedural(256, 2000.0, 42);
+        let heightmap = rust_engine::render::terrain::Heightmap::new_procedural(512, 2000.0, 42);
         let terrain_mesh = rust_engine::render::terrain::generate_terrain_mesh(&renderer.device, &heightmap);
         renderer.add_mesh("terrain", terrain_mesh);
-        let tex_data = rust_engine::render::terrain::generate_terrain_texture(&heightmap, 2048);
-        renderer.load_texture_rgba("terrain_tex", &tex_data, 2048, 2048).expect("terrain texture");
+        let tex_data = rust_engine::render::terrain::generate_terrain_texture(&heightmap, 4096);
+        renderer.load_texture_rgba("terrain_tex", &tex_data, 4096, 4096).expect("terrain texture");
         renderer.add_material("terrain_mat",
             Material::new([1.0, 1.0, 1.0, 1.0])
                 .with_metallic_roughness(0.0, 0.92)

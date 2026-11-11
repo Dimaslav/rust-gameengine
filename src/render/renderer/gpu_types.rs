@@ -25,8 +25,8 @@ pub const VOLUMETRIC_GRID_W: u32 = 80;
 pub const VOLUMETRIC_GRID_H: u32 = 45;
 pub const VOLUMETRIC_GRID_D: u32 = 32;
 
-pub const MAX_DIR_LIGHTS: usize = 4;
-pub const MAX_POINT_LIGHTS: usize = 16;
+pub const MAX_DIR_LIGHTS: usize = 8;
+pub const MAX_POINT_LIGHTS: usize = 32;
 
 pub const MAX_SHADOW_CUBES: usize = 4;
 
@@ -83,8 +83,8 @@ pub struct LightsUniform {
     pub fog_params: [f32; 4],
     pub fog_color: [f32; 4],
     pub shadow_params: [f32; 4],
-    pub dir_lights: [[f32; 4]; 8],
-    pub point_lights: [[f32; 4]; 32],
+    pub dir_lights: [[f32; 4]; 16],
+    pub point_lights: [[f32; 4]; 64],
     pub cube_shadow_pos: [[f32; 4]; 4],
 }
 
