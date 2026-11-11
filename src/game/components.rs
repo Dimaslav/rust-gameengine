@@ -372,3 +372,8 @@ pub struct HealthPickup {
 pub struct AmmoPickup {
     pub amount: u32,
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RootMotion {
+    pub enabled: bool,
+}

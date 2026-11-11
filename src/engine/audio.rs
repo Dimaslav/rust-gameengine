@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use glam::Vec3;
 use rodio::source::Source;
-use rodio::{OutputStream, OutputStreamBuilder, Sink};
+use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
+use rodio::Player;
 
 use crate::ecs::{Entity, World};
 use crate::game::audio::{attenuation, source_position, AudioBus, AudioSource};
@@ -36,20 +38,24 @@ impl Iterator for SharedSamples {
 
 impl Source for SharedSamples {
     fn current_span_len(&self) -> Option<usize> { None }
-    fn channels(&self) -> u16 { 1 }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn channels(&self) -> NonZero<u16> {
+        NonZero::new(1).unwrap()
+    }
+    fn sample_rate(&self) -> NonZero<u32> {
+        NonZero::new(self.sample_rate).unwrap_or(NonZero::new(44_100).unwrap())
+    }
     fn total_duration(&self) -> Option<Duration> { None }
 }
 
 struct ActiveSound {
-    sink: Sink,
+    player: Player,
     last_volume: f32,
     last_pitch: f32,
     last_occlusion: f32,
 }
 
 pub struct AudioSystem {
-    _stream: OutputStream,
+    _stream: MixerDeviceSink,
     cache: HashMap<String, SoundEntry>,
     bus_volumes: HashMap<AudioBus, f32>,
     active: HashMap<Entity, ActiveSound>,
@@ -69,7 +75,7 @@ pub fn effective_bus_volume(
 
 impl AudioSystem {
     pub fn new() -> Option<Self> {
-        let stream = match OutputStreamBuilder::open_default_stream() {
+        let stream = match DeviceSinkBuilder::open_default_sink() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("audio: cannot open output stream: {}", e);
@@ -117,12 +123,9 @@ impl AudioSystem {
         let reader = std::io::BufReader::new(file);
         let decoder = rodio::Decoder::new(reader)
             .with_context(|| format!("decode audio {}", path.display()))?;
-
-        let channels = decoder.channels() as usize;
-        let sample_rate = decoder.sample_rate();
-
+        let channels = decoder.channels().get() as usize;
+        let sample_rate = decoder.sample_rate().get();
         let raw: Vec<f32> = decoder.collect();
-
         let samples = if channels > 1 {
             let frames = raw.len() / channels;
             let mut out = Vec::with_capacity(frames);
@@ -192,22 +195,12 @@ impl AudioSystem {
         let source = SharedSamples {
             data: entry.samples, pos: 0, sample_rate: entry.sample_rate,
         };
-        let sink = Sink::connect_new(self._stream.mixer());
-        sink.set_volume(volume);
-        sink.append(source);
-        sink.detach();
+        let player = Player::connect_new(&self._stream.mixer());
+        player.set_volume(volume);
+        player.append(source);
+        player.detach();
     }
 
-    /// FIX #7: пространственный одиночный звук.
-    ///
-    /// Раньше script-API `play_sound_at` игнорировал позицию —
-    /// `App::apply_script_commands` вызывал `audio.play(&sound)`
-    /// и всё. Звук всегда играл «из центра», независимо от того,
-    /// где находится source.
-    ///
-    /// Использует ту же `attenuation`, что и `AudioSource::update`:
-    /// внутри 1 м — полная громкость, за 20 м — тишина (обратный
-    /// квадрат).
     pub fn play_at(&mut self, name: &str, position: Vec3, listener: Vec3) {
         let Some(entry) = self.cache.get(name).cloned() else {
             log::debug!("audio: sound '{}' not found (play_at)", name);
@@ -225,10 +218,10 @@ impl AudioSystem {
             pos: 0,
             sample_rate: entry.sample_rate,
         };
-        let sink = Sink::connect_new(self._stream.mixer());
-        sink.set_volume(volume);
-        sink.append(source);
-        sink.detach();
+        let player = Player::connect_new(&self._stream.mixer());
+        player.set_volume(volume);
+        player.append(source);
+        player.detach();
     }
 
     pub fn update(&mut self, world: &mut World, listener_pos: Vec3, dt: f32) {
@@ -240,19 +233,10 @@ impl AudioSystem {
         let alive: std::collections::HashSet<Entity> =
             sources.iter().map(|(e, _, _)| *e).collect();
 
-        // === Step 6: сначала обработать завершённые sinks ===
-        //
-        // Раньше `retain` удалял пустые sinks, а затем основной цикл
-        // создавал для них новые Sink'и и запускал звук заново —
-        // non-looping звук играл бесконечно.
-        //
-        // Теперь: если sink пуст, но src.playing == true и src.looping == false
-        // — это доигранный non-looping звук. Помечаем playing = false
-        // ДО основного цикла, чтобы он не создавал новый sink.
         let mut to_remove: Vec<Entity> = Vec::new();
         let mut finished: Vec<Entity> = Vec::new();
         for (e, active) in self.active.iter() {
-            if active.sink.empty() {
+            if active.player.empty() {
                 to_remove.push(*e);
                 if alive.contains(e)
                     && let Some(src) = world.get::<AudioSource>(*e)
@@ -276,7 +260,7 @@ impl AudioSystem {
 
         for (e, src, pos) in sources {
             if !src.playing {
-                if let Some(active) = self.active.remove(&e) { active.sink.stop(); }
+                if let Some(active) = self.active.remove(&e) { active.player.stop(); }
                 continue;
             }
 
@@ -288,23 +272,21 @@ impl AudioSystem {
                 let source = SharedSamples {
                     data: entry.samples, pos: 0, sample_rate: entry.sample_rate,
                 };
-                let sink = Sink::connect_new(self._stream.mixer());
+                let player = Player::connect_new(&self._stream.mixer());
                 let initial_vol = (src.volume * self.bus_volume_effective(src.bus)).clamp(0.0, 4.0);
-                sink.set_volume(initial_vol);
-                sink.set_speed(src.pitch.max(0.01));
+                player.set_volume(initial_vol);
+                player.set_speed(src.pitch.max(0.01));
 
-                if src.looping { sink.append(source.repeat_infinite()); }
-                else { sink.append(source); }
+                if src.looping { player.append(source.repeat_infinite()); }
+                else { player.append(source); }
 
                 self.active.insert(e, ActiveSound {
-                    sink, last_volume: initial_vol,
+                    player, last_volume: initial_vol,
                     last_pitch: src.pitch, last_occlusion: 1.0,
                 });
                 continue;
             }
 
-            // Step 6: occlusion только если источник spatial.
-            // Non-spatial (max_distance <= min_distance) — не raycast.
             let is_spatial = src.max_distance > src.min_distance;
             let occl_target = if src.occlusion && is_spatial {
                 let blocked = !crate::physics::navmesh::segment_clear(
@@ -332,24 +314,20 @@ impl AudioSystem {
             let smoothing = (dt * 10.0).clamp(0.0, 1.0);
             let smoothed = active.last_volume + (target - active.last_volume) * smoothing;
             if (smoothed - active.last_volume).abs() > 1e-4 {
-                active.sink.set_volume(smoothed);
+                active.player.set_volume(smoothed);
                 active.last_volume = smoothed;
             }
 
             if (src.pitch - active.last_pitch).abs() > 1e-4 {
-                active.sink.set_speed(src.pitch.max(0.01));
+                active.player.set_speed(src.pitch.max(0.01));
                 active.last_pitch = src.pitch;
             }
         }
     }
 
-    pub fn stop_all(&mut self) { for (_, a) in self.active.drain() { a.sink.stop(); } }
+    pub fn stop_all(&mut self) { for (_, a) in self.active.drain() { a.player.stop(); } }
     pub fn active_count(&self) -> usize { self.active.len() }
 }
-
-// ============================================================
-// Процедурные генераторы
-// ============================================================
 
 fn gen_shot(sr: u32) -> Vec<f32> {
     let n = (sr as f32 * 0.08) as usize;

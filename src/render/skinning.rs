@@ -120,6 +120,30 @@ impl AnimationClip {
 
         result
     }
+
+    pub fn root_motion_delta(
+        &self,
+        from_time: f32,
+        to_time: f32,
+        base_local: &[Mat4],
+        root_idx: usize,
+    ) -> (Vec3, Quat) {
+        if root_idx >= base_local.len() {
+            return (Vec3::ZERO, Quat::IDENTITY);
+        }
+        let pose_from = self.local_pose(from_time, base_local);
+        let pose_to = self.local_pose(to_time, base_local);
+        if root_idx >= pose_from.len() || root_idx >= pose_to.len() {
+            return (Vec3::ZERO, Quat::IDENTITY);
+        }
+        let (_, rot_from, trans_from) =
+            pose_from[root_idx].to_scale_rotation_translation();
+        let (_, rot_to, trans_to) =
+            pose_to[root_idx].to_scale_rotation_translation();
+        let delta_pos = trans_to - trans_from;
+        let delta_rot = rot_to * rot_from.inverse();
+        (delta_pos, delta_rot)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,9 +168,28 @@ impl Skeleton {
         self.local_bind.clone()
     }
 
-    /// World-матрицы костей. Устойчиво к произвольному порядку костей
-    /// (glTF не требует топологического порядка joints).
-    /// Защита от циклов и out-of-range parents.
+    pub fn find_root_bone(&self) -> Option<usize> {
+        self.parents.iter().position(|&p| p == PARENT_NONE)
+    }
+
+    pub fn local_pose_with_root(
+        &self,
+        clip: &AnimationClip,
+        time: f32,
+        root_idx: Option<usize>,
+    ) -> (Vec<Mat4>, Option<(Vec3, Quat)>) {
+        let mut pose = clip.local_pose(time, &self.local_bind);
+        let root = root_idx.and_then(|idx| {
+            if idx >= pose.len() {
+                return None;
+            }
+            let (scale, rot, trans) = pose[idx].to_scale_rotation_translation();
+            pose[idx] = Mat4::from_scale_rotation_translation(scale, rot, Vec3::ZERO);
+            Some((trans, rot))
+        });
+        (pose, root)
+    }
+
     pub fn world_matrices(&self, local_pose: &[Mat4]) -> Vec<Mat4> {
         let n = self.names.len();
         let mut world = vec![Mat4::IDENTITY; n];

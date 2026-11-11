@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod animation;
+pub mod animation_blend;
 pub mod audio;
 pub mod components;
 pub mod crafting;
@@ -14,7 +15,7 @@ pub mod stats;
 pub mod timers;
 pub mod vendors;
 pub mod weapons;
-pub mod world_gen; // <-- НОВЫЙ МОДУЛЬ
+pub mod world_gen;
 
 pub use ai::{
     AiAgent, AiState, AiTarget, DebugPath, Enemy, NoiseEvent, NoiseKind, PatrolPath,
@@ -23,12 +24,15 @@ pub use animation::{
     AnimationEvent, AnimationEventTriggered, AnimationEvents, AnimationEventsFile,
     AnimationRuntime,
 };
+pub use animation_blend::{
+    AnimationBlendPlayer, BlendOutput, BlendSample, BlendTree1D,
+};
 pub use audio::{attenuation, source_position, AudioBus, AudioSource};
 pub use components::{
     AnimationPlayer, Chase, Elevator, ElevatorState, Health, Interactable, MaterialHandle,
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
-    HealthPickup, AmmoPickup,
+    HealthPickup, AmmoPickup, RootMotion,
 };
 pub use crafting::{
     CraftingRegistry, CraftingSession, RecipeDef, RecipeInput, RecipeOutput,

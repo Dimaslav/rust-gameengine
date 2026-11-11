@@ -1,51 +1,3 @@
-//! Анимационные события и рантайм анимаций.
-//!
-//! # Что это
-//!
-//! `AnimationEvent` — «маркер» на таймлайне анимационного клипа:
-//! "в момент t секунд от начала клипа сработало событие name с
-//! произвольным payload". Классические примеры: footstep, hit,
-//! spawn_vfx, open_door, detach_weapon.
-//!
-//! # Как это работает
-//!
-//! События не хранятся в `AnimationClip` (glTF их не умеет), а живут
-//! отдельно в `AnimationEvents` — реестре, который заполняется
-//! программно или из sidecar-файла `.anim_events.ron`.
-//!
-//! На каждом кадре `AnimationRuntime::advance_all`:
-//!   1. Продвигает `AnimationPlayer::time` для всех entity.
-//!   2. Достаёт предыдущее значение `time` из side-table.
-//!   3. Ищет события в интервале `(prev_time, new_time]` (с учётом
-//!      wrap для looping-клипов).
-//!   4. Возвращает найденные события — вызывающий код сам решает,
-//!      что с ними делать (отправить в `World::events`, проиграть
-//!      звук, заспавнить частицы и т.д.).
-//!
-//! # Почему side-table, а не поле в AnimationPlayer
-//!
-//! `prev_time` — чисто рантаймовая величина. Он не должен попадать
-//! в сериализацию сцены и не должен восстанавливаться при load.
-//! `AnimationPlayer` уже сериализуется через `AnimationSnapshot` —
-//! добавлять туда transient-поле значит создавать рассинхрон.
-//!
-//! Side-table в `AnimationRuntime` решает это чисто: HashMap живёт
-//! в DemoGame рядом с другими runtime-структурами, entity-keys
-//! автоматически «забываются», когда entity исчезает из World
-//! (см. `retain_alive` в конце `advance_all`).
-//!
-//! # Ограничения
-//!
-//! Событие в момент `t = 0.0` **не срабатывает** никогда: интервал
-//! `(prev_time, new_time]` открыт слева. Если нужно поведение «на
-//! старте» — ставь событие на `t = 0.001` или обрабатывай старт
-//! анимации отдельно (например, через сравнение `prev_time == 0.0`).
-//!
-//! При очень большом `dt` (длиннее одного периода клипа) события
-//! внутри пропущенных периодов теряются. Это осознанно: догонять
-//! несколько секунд анимационных событий — почти всегда баг, а не
-//! фича.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -53,24 +5,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::ecs::{Entity, World};
-use crate::game::components::{AnimationPlayer, SkeletonHandle};
+use crate::game::components::{AnimationPlayer, RootMotion, SkeletonHandle, Transform};
 use crate::render::skinning::{AnimationClip, Skeleton};
 use crate::render::Renderer;
+use glam::{Mat4, Quat, Vec3};
 
-// ============================================================
-// Публичные типы
-// ============================================================
-
-/// Маркер на таймлайне клипа.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimationEvent {
-    /// Момент срабатывания, в секундах от начала клипа.
-    /// Должен быть в диапазоне `(0.0, duration]`.
     pub time: f32,
-    /// Имя события. Соглашение — snake_case: "footstep", "hit".
     pub name: String,
-    /// Произвольная строка-параметр. Например, имя звука
-    /// ("footstep_grass") или идентификатор точки ("muzzle").
     #[serde(default)]
     pub payload: Option<String>,
 }
@@ -85,11 +28,6 @@ impl AnimationEvent {
     }
 }
 
-/// Событие, сработавшее в этом кадре.
-///
-/// Возвращается `AnimationRuntime::advance_all`. Вызывающий код либо
-/// обрабатывает их напрямую, либо пересылает в `World::events`
-/// для систем.
 #[derive(Debug, Clone)]
 pub struct AnimationEventTriggered {
     pub entity: Entity,
@@ -98,10 +36,6 @@ pub struct AnimationEventTriggered {
     pub payload: Option<String>,
 }
 
-/// Реестр событий: `clip_name → [AnimationEvent]`.
-///
-/// Не привязан к ECS. Хранится в игре (DemoGame) и передаётся в
-/// `AnimationRuntime::advance_all`.
 #[derive(Debug, Default, Clone)]
 pub struct AnimationEvents {
     by_clip: HashMap<String, Vec<AnimationEvent>>,
@@ -109,10 +43,6 @@ pub struct AnimationEvents {
 
 impl AnimationEvents {
     pub fn new() -> Self { Self::default() }
-
-    /// Добавить событие к клипу. Список автоматически сортируется
-    /// по `time` — `advance_all` рассчитывает, что события
-    /// упорядочены.
     pub fn add(&mut self, clip: impl Into<String>, event: AnimationEvent) {
         let list = self.by_clip.entry(clip.into()).or_default();
         list.push(event);
@@ -121,7 +51,6 @@ impl AnimationEvents {
         });
     }
 
-    /// Билдер.
     pub fn with(mut self, clip: impl Into<String>, event: AnimationEvent) -> Self {
         self.add(clip, event);
         self
@@ -132,27 +61,7 @@ impl AnimationEvents {
     }
 
     pub fn is_empty(&self) -> bool { self.by_clip.is_empty() }
-
-    /// Число зарегистрированных клипов (не событий).
     pub fn clip_count(&self) -> usize { self.by_clip.len() }
-
-    /// Загрузить из RON-файла.
-    ///
-    /// Формат:
-    /// ```ron
-    /// (
-    ///     by_clip: {
-    ///         "Walk": [
-    ///             (time: 0.3, name: "footstep", payload: Some("footstep_grass")),
-    ///             (time: 0.8, name: "footstep", payload: Some("footstep_grass")),
-    ///         ],
-    ///         "Attack": [
-    ///             (time: 0.15, name: "swing", payload: None),
-    ///             (time: 0.42, name: "hit",   payload: None),
-    ///         ],
-    ///     },
-    /// )
-    /// ```
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("read {}", path.as_ref().display()))?;
@@ -178,26 +87,13 @@ impl AnimationEvents {
     }
 }
 
-/// Формат RON-файла. Публичный — на случай, если пользователь захочет
-/// читать/писать файл вручную через `ron::from_str`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AnimationEventsFile {
     #[serde(default)]
     pub by_clip: HashMap<String, Vec<AnimationEvent>>,
 }
 
-// ============================================================
-// Runtime
-// ============================================================
-
-/// Рантайм анимаций: продвигает время, обновляет скелеты, эмитит
-/// события.
-///
-/// Хранит side-table `prev_times` — время на предыдущем кадре для
-/// каждой entity. Не сериализуется, не привязан к ECS.
 pub struct AnimationRuntime {
-    /// `Entity → prev_time`. Записи для сущностей без
-    /// `AnimationPlayer` автоматически удаляются.
     prev_times: HashMap<Entity, f32>,
 }
 
@@ -206,15 +102,6 @@ impl AnimationRuntime {
         Self { prev_times: HashMap::new() }
     }
 
-    /// Продвинуть все анимации и вернуть сработавшие события.
-    ///
-    /// `renderer` нужен для `update_skeleton`. `clips` и `skeletons`
-    /// — словари из `gltf_loader` (или откуда угодно). `events` —
-    /// реестр анимационных событий.
-    ///
-    /// Если у entity нет `SkeletonHandle` или его скелет/клип не
-    /// найден — entity пропускается, но время всё равно продвигается,
-    /// чтобы избежать «прыжка» при догрузке.
     pub fn advance_all(
         &mut self,
         world: &mut World,
@@ -224,18 +111,20 @@ impl AnimationRuntime {
         events: &AnimationEvents,
         dt: f32,
     ) -> Vec<AnimationEventTriggered> {
-        let entities: Vec<Entity> = world
+        let plain_entities: Vec<Entity> = world
             .query::<AnimationPlayer>()
+            .map(|(e, _)| e)
+            .collect();
+        let blend_entities: Vec<Entity> = world
+            .query::<crate::game::animation_blend::AnimationBlendPlayer>()
             .map(|(e, _)| e)
             .collect();
 
         let mut triggered: Vec<AnimationEventTriggered> = Vec::new();
+        let mut root_motions: Vec<(Entity, Vec3, Quat)> = Vec::new();
 
-        for e in &entities {
+        for e in &plain_entities {
             let e = *e;
-
-            // 1. Продвигаем время. Читаем поля заранее, чтобы не
-            //    держать borrow World при дальнейших чтениях.
             let (clip_name, looping, new_time) = {
                 let Some(player) = world.get_mut::<AnimationPlayer>(e) else {
                     continue;
@@ -243,23 +132,12 @@ impl AnimationRuntime {
                 player.time += dt * player.speed;
                 (player.clip.clone(), player.looping, player.time)
             };
-
-            // 2. prev_time — из side-table. Для новой entity
-            //    считаем prev_time == 0.0.
             let prev_time = self.prev_times.get(&e).copied().unwrap_or(0.0);
-
-            // 3. Находим клип.
             let Some(clip) = clips.get(&clip_name) else {
-                // Клип не загружен — prev_time всё равно обновляем,
-                // чтобы при догрузке не выстрелить пачкой старых
-                // событий.
                 self.prev_times.insert(e, new_time);
                 continue;
             };
             let duration = clip.duration;
-
-            // 4. Границы интервала (from, to]. Для looping обёрнуты
-            //    в [0, duration).
             let from_time = if looping && duration > 0.0 {
                 prev_time % duration
             } else {
@@ -271,7 +149,6 @@ impl AnimationRuntime {
                 new_time.min(duration)
             };
 
-            // 5. Эмитим события.
             for ev in events.get(&clip_name) {
                 if event_in_range(ev.time, from_time, to_time, looping, duration) {
                     triggered.push(AnimationEventTriggered {
@@ -283,45 +160,225 @@ impl AnimationRuntime {
                 }
             }
 
-            // 6. Обновляем скелет.
+            let root_motion_enabled = world
+                .get::<RootMotion>(e)
+                .map(|r| r.enabled)
+                .unwrap_or(false)
+                && !looping;
+
+            // 7. Обновляем скелет + считаем root delta.
             let skel_handle = world.get::<SkeletonHandle>(e).cloned();
             if let Some(handle) = skel_handle
-                && let Some(skel) = skeletons.get(&handle.0) {
-                    let final_time = if looping && duration > 0.0 {
-                        to_time
-                    } else {
-                        new_time.min(duration)
-                    };
-                    let local_pose = clip.local_pose(final_time, &skel.local_bind);
-                    let joint_matrices = skel.joint_matrices(&local_pose);
-                    renderer.update_skeleton(&handle.0, &joint_matrices);
-                }
+                && let Some(skel) = skeletons.get(&handle.0)
+            {
+                let final_time = if looping && duration > 0.0 {
+                    to_time
+                } else {
+                    new_time.min(duration)
+                };
 
-            // 7. Запоминаем new_time для следующего кадра.
+                let root_idx = if root_motion_enabled {
+                    skel.find_root_bone()
+                } else {
+                    None
+                };
+                let (local_pose, root_to) =
+                    skel.local_pose_with_root(clip, final_time, root_idx);
+                let joint_matrices = skel.joint_matrices(&local_pose);
+                renderer.update_skeleton(&handle.0, &joint_matrices);
+                if let (Some(idx), Some((trans_to, rot_to))) = (root_idx, root_to) {
+                    let pose_from = clip.local_pose(from_time, &skel.local_bind);
+                    if idx < pose_from.len() {
+                        let (_, rot_from, trans_from) =
+                            pose_from[idx].to_scale_rotation_translation();
+                        let delta_pos = trans_to - trans_from;
+                        let delta_rot = rot_to * rot_from.inverse();
+                        if delta_pos.length_squared() > 1e-8
+                            || (delta_rot.w.abs() - 1.0).abs() > 1e-4
+                        {
+                            root_motions.push((e, delta_pos, delta_rot));
+                        }
+                    }
+                }
+            }
+
+            // 8. Запоминаем new_time для следующего кадра.
             self.prev_times.insert(e, new_time);
         }
 
-        // 8. Чистим записи для entity, которых больше нет.
-        let alive_set: std::collections::HashSet<Entity> =
-            entities.iter().copied().collect();
+        // === Step 11.3: AnimationBlendPlayer ===
+        for e in &blend_entities {
+            let e = *e;
+
+            // 1. Продвигаем глобальное время.
+            let (tree, axis, looping, new_time) = {
+                let Some(bp) = world.get_mut::<crate::game::animation_blend::AnimationBlendPlayer>(e) else {
+                    continue;
+                };
+                bp.time += dt * bp.speed;
+                (bp.tree.clone(), bp.axis, bp.looping, bp.time)
+            };
+
+            if tree.samples.is_empty() {
+                self.prev_times.insert(e, new_time);
+                continue;
+            }
+
+            let prev_time = self.prev_times.get(&e).copied().unwrap_or(0.0);
+
+            // 2. Оценить дерево.
+            let outputs = tree.evaluate(axis);
+            if outputs.is_empty() {
+                self.prev_times.insert(e, new_time);
+                continue;
+            }
+
+            // 3. Найти доминирующий клип (для events).
+            let mut dominant_idx: Option<usize> = None;
+            let mut dominant_weight: f32 = 0.0;
+            for out in &outputs {
+                if out.weight > dominant_weight {
+                    dominant_weight = out.weight;
+                    dominant_idx = Some(out.sample_idx);
+                }
+            }
+
+            // 4. Собрать позы активных клипов.
+            let skel_handle = world.get::<SkeletonHandle>(e).cloned();
+            let Some(handle) = skel_handle else {
+                self.prev_times.insert(e, new_time);
+                continue;
+            };
+            let Some(skel) = skeletons.get(&handle.0) else {
+                self.prev_times.insert(e, new_time);
+                continue;
+            };
+
+            let mut poses: Vec<(Vec<Mat4>, f32)> = Vec::with_capacity(outputs.len());
+            let mut total_weight = 0.0f32;
+
+            for out in &outputs {
+                if out.weight < 1e-4 {
+                    continue;
+                }
+                let Some(sample) = tree.samples.get(out.sample_idx) else {
+                    continue;
+                };
+                let Some(clip) = clips.get(&sample.clip) else {
+                    continue;
+                };
+                let duration = clip.duration;
+                if duration <= 1e-4 {
+                    continue;
+                }
+                let local_time = if looping {
+                    (new_time * out.time_scale) % duration
+                } else {
+                    (new_time * out.time_scale).min(duration)
+                };
+                let pose = clip.local_pose(local_time, &skel.local_bind);
+                poses.push((pose, out.weight));
+                total_weight += out.weight;
+            }
+
+            if poses.is_empty() || total_weight < 1e-4 {
+                self.prev_times.insert(e, new_time);
+                continue;
+            }
+
+            let num_joints = poses.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+            let mut blended: Vec<Mat4> = Vec::with_capacity(num_joints);
+            for j in 0..num_joints {
+                let mut first = true;
+                let mut pos = Vec3::ZERO;
+                let mut scale = Vec3::ONE;
+                let mut rot = Quat::IDENTITY;
+                let mut cum = 0.0f32;
+                for (pose, w) in &poses {
+                    let Some(m) = pose.get(j) else { continue };
+                    let (s, r, t) = m.to_scale_rotation_translation();
+                    if first {
+                        pos = t;
+                        scale = s;
+                        rot = r;
+                        cum = *w;
+                        first = false;
+                    } else {
+                        let total = cum + *w;
+                        let alpha = if total > 1e-6 { *w / total } else { 0.0 };
+                        pos = pos.lerp(t, alpha);
+                        scale = scale.lerp(s, alpha);
+                        rot = rot.slerp(r, alpha);
+                        cum = total;
+                    }
+                }
+                blended.push(Mat4::from_scale_rotation_translation(scale, rot, pos));
+            }
+
+            let joint_matrices = skel.joint_matrices(&blended);
+            renderer.update_skeleton(&handle.0, &joint_matrices);
+            if let Some(didx) = dominant_idx
+                && let Some(sample) = tree.samples.get(didx)
+                && let Some(clip) = clips.get(&sample.clip)
+            {
+                let duration = clip.duration;
+                if duration > 1e-4 {
+                    let from_t = if looping {
+                        (prev_time * 0.0)
+                    } else {
+                        0.0
+                    };
+                    let _ = from_t;
+                    let prev_local = if looping {
+                        (prev_time * sample.time_scale) % duration
+                    } else {
+                        (prev_time * sample.time_scale).min(duration)
+                    };
+                    let to_local = if looping {
+                        (new_time * sample.time_scale) % duration
+                    } else {
+                        (new_time * sample.time_scale).min(duration)
+                    };
+                    for ev in events.get(&sample.clip) {
+                        if event_in_range(ev.time, prev_local, to_local, looping, duration) {
+                            triggered.push(AnimationEventTriggered {
+                                entity: e,
+                                clip: sample.clip.clone(),
+                                name: ev.name.clone(),
+                                payload: ev.payload.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            self.prev_times.insert(e, new_time);
+        }
+
+        for (e, delta_pos, delta_rot) in root_motions {
+            if let Some(t) = world.get_mut::<Transform>(e) {
+                let world_delta = t.rotation * delta_pos;
+                t.position += world_delta;
+                t.rotation = (t.rotation * delta_rot).normalize();
+            }
+        }
+        let mut alive_set: std::collections::HashSet<Entity> =
+            std::collections::HashSet::with_capacity(plain_entities.len() + blend_entities.len());
+        alive_set.extend(plain_entities.iter().copied());
+        alive_set.extend(blend_entities.iter().copied());
         self.prev_times.retain(|k, _| alive_set.contains(k));
 
         triggered
     }
 
-    /// Сбросить историю для конкретной entity. Полезно после телепорта
-    /// или смены клипа: иначе возможен «прыжок» через большой
-    /// интервал — и пачка событий за один кадр.
     pub fn reset(&mut self, entity: Entity) {
         self.prev_times.remove(&entity);
     }
 
-    /// Полный сброс.
     pub fn clear(&mut self) {
         self.prev_times.clear();
     }
 
-    /// Сколько entity сейчас отслеживается. Для дебага.
     pub fn tracked_count(&self) -> usize {
         self.prev_times.len()
     }
@@ -331,15 +388,6 @@ impl Default for AnimationRuntime {
     fn default() -> Self { Self::new() }
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
-/// Попадает ли `event_time` в интервал `(from, to]` с учётом wrap.
-///
-/// * `from <= to` — обычный случай, интервал без wrap.
-/// * `from > to` и `looping` — интервал = `(from, duration] ∪ [0, to]`.
-/// * `from > to` и не looping — не должно случаться; игнорируем.
 fn event_in_range(
     event_time: f32,
     from: f32,

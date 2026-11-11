@@ -77,7 +77,7 @@ anyhow = "1.0.104"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 ron = "0.12.2"
-base64 = "0.22"
+base64 = "0.23.1"
 
 # --- UI (editor) ---
 egui = { version = "0.37.0", features = ["default_fonts"] }
@@ -86,10 +86,10 @@ egui-winit = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["image", "svg"] }
 
 # --- Audio ---
-rodio = "0.21"
+rodio = "0.23.0"
 
 # --- Native file dialog ---
-rfd = "0.17.2"
+rfd = "0.18.0"
 
 # --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"

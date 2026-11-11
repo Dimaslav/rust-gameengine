@@ -1,37 +1,3 @@
-//! Сериализация сцены в RON.
-//!
-//! ## Изменения (v2)
-//!
-//! * `EntitySnapshot.entity_id` / `.parent` теперь `Option<Entity>`
-//!   (index + generation), а не `Option<u32>`.
-//! * `TriggerSnapshot` для `CallElevator` хранит `elevator: Option<Entity>`
-//!   и `floor_idx: Option<u32>` отдельно.
-//! * `b64_encode` / `b64_decode` — через crate `base64`.
-//!
-//! ## Изменения (v3)
-//!
-//! * Добавлены `dialog_npc: Option<String>` и `vendor_npc: Option<String>`
-//!   в `EntitySnapshot`. Раньше эти компоненты терялись при Save/Load
-//!   и при Editor Undo — все NPC переставали отвечать на `[E] Talk`.
-//!
-//! ## Изменения (FIX #2)
-//!
-//! * `SceneFile::texture_paths` теперь `HashMap<String, TextureRef>`.
-//!   `TextureRef` хранит `is_srgb` — иначе normal-map, metallic-roughness,
-//!   AO и height-map после Load/Undo загружались как sRGB, и освещение
-//!   ломалось (металл матовел, нормали инвертировались).
-//! * `TextureRef` — `#[serde(untagged)]`, чтобы старые сцены со
-//!   строковым `texture_paths` грузились без миграции (`is_srgb = true`
-//!   — то же поведение, что и было до фикса).
-//!
-//! ## Изменения (FIX #3)
-//!
-//! * Добавлена `save_scene_for_undo_to_string` — сериализует сцену
-//!   **без terrain** (heightmap 256×256 + splat = ~510 KB base64,
-//!   RON pretty-print = 60 ms). Undo-стек использует именно её.
-//!   Save Scene и Save Slot по-прежнему пишут terrain (им нужен
-//!   полный снапшот).
-
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -57,23 +23,10 @@ use crate::game::vendors::VendorNpc;
 use crate::physics::{Collider, PhysicsMaterial, RigidBody};
 use crate::render::{Material, Renderer};
 
-// ============================================================
-// TextureRef — FIX #2
-// ============================================================
-
-/// Ссылка на текстуру в сцене. Хранит путь к файлу и sRGB-флаг,
-/// чтобы Load/Undo восстанавливали текстуру с корректным цветовым
-/// профилем (albedo/emissive — sRGB, normal/MR/AO — linear).
-///
-/// `#[serde(untagged)]` — обратная совместимость: старые сцены
-/// хранят `"путь"` (строку), новые — `(path: "…", is_srgb: bool)`.
-/// Старая форма = `is_srgb = true` (поведение до FIX #2).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum TextureRef {
-    /// Старый формат: только путь. `is_srgb = true` по умолчанию.
     Path(String),
-    /// Новый формат: путь + флаг.
     Full {
         path: String,
         #[serde(default = "default_true")]
@@ -97,10 +50,6 @@ impl TextureRef {
     }
 }
 
-// ============================================================
-// SceneFile
-// ============================================================
-
 #[derive(Serialize, Deserialize, Default)]
 pub struct SceneFile {
     #[serde(default)]
@@ -109,9 +58,6 @@ pub struct SceneFile {
     pub player_spawn: Option<[f32; 3]>,
     #[serde(default)]
     pub materials: HashMap<String, Material>,
-    /// FIX #2: было `HashMap<String, String>`. Теперь `TextureRef`
-    /// хранит sRGB-флаг. Старые сцены (строковое значение) грузятся
-    /// через `#[serde(untagged)]` → `TextureRef::Path` → sRGB = true.
     #[serde(default)]
     pub texture_paths: HashMap<String, TextureRef>,
     #[serde(default)]
@@ -119,10 +65,6 @@ pub struct SceneFile {
     #[serde(default)]
     pub terrain: Option<TerrainRef>,
 }
-
-// ============================================================
-// TerrainRef
-// ============================================================
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TerrainRef {
@@ -137,22 +79,14 @@ pub struct TerrainRef {
     pub source_path: Option<String>,
 }
 
-// ============================================================
-// EntitySnapshot
-// ============================================================
-
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntitySnapshot {
-    /// Оригинальный handle (index + generation). `None` для
-    /// prefab-инстансов и при копипасте — generation будет 0.
     #[serde(default)]
     pub entity_id: Option<Entity>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub transform: Option<TransformSnapshot>,
-    /// Ссылка на родителя. В сцене — реальный `Entity` (с generation).
-    /// В префабе — `Entity { index, 0 }` — индекс в массиве.
     #[serde(default)]
     pub parent: Option<Entity>,
     #[serde(default)]
@@ -163,6 +97,8 @@ pub struct EntitySnapshot {
     pub skeleton: Option<String>,
     #[serde(default)]
     pub animation: Option<AnimationSnapshot>,
+    #[serde(default)]
+    pub root_motion: Option<bool>,
     #[serde(default)]
     pub spinner: Option<SpinnerSnapshot>,
     #[serde(default)]
@@ -185,19 +121,16 @@ pub struct EntitySnapshot {
     pub elevator: Option<ElevatorSnapshot>,
     #[serde(default)]
     pub sliding_door: Option<SlidingDoorSnapshot>,
-
     #[serde(default)]
     pub rigid_body: Option<RigidBody>,
     #[serde(default)]
     pub collider: Option<Collider>,
     #[serde(default)]
     pub physics_material: Option<PhysicsMaterial>,
-
     #[serde(default)]
     pub dir_light: Option<DirectionalLightSnapshot>,
     #[serde(default)]
     pub point_light: Option<PointLightSnapshot>,
-
     #[serde(default)]
     pub decal: Option<DecalSnapshot>,
     #[serde(default)]
@@ -212,7 +145,6 @@ pub struct EntitySnapshot {
     pub npc: Option<NpcSnapshot>,
     #[serde(default)]
     pub quest_target: Option<u32>,
-
     #[serde(default)]
     pub ai_agent: Option<AiAgentSnapshot>,
     #[serde(default)]
@@ -227,22 +159,13 @@ pub struct EntitySnapshot {
     pub enemy: Option<bool>,
     #[serde(default)]
     pub debug_path: Option<bool>,
-
     #[serde(default)]
     pub script: Option<ScriptComponentSnapshot>,
-
-    /// Диалоговый NPC — `DialogNpc::dialog_id`. См. `src/game/dialogs.rs`.
     #[serde(default)]
     pub dialog_npc: Option<String>,
-
-    /// NPC-вендор — `VendorNpc::vendor_id`. См. `src/game/vendors.rs`.
     #[serde(default)]
     pub vendor_npc: Option<String>,
 }
-
-// ============================================================
-// Simple snapshots
-// ============================================================
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct TransformSnapshot {
@@ -822,6 +745,10 @@ pub fn snapshot_entity(world: &World, e: Entity) -> Option<EntitySnapshot> {
         });
         any = true;
     }
+    if let Some(rm) = world.get::<crate::game::components::RootMotion>(e) {
+        s.root_motion = Some(rm.enabled);
+        any = true;
+    }
     if let Some(sp) = world.get::<Spinner>(e) {
         s.spinner = Some(SpinnerSnapshot {
             axis: sp.axis.to_array(),
@@ -1250,6 +1177,12 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
             },
         );
     }
+    if let Some(enabled) = snap.root_motion {
+        world.insert(
+            e,
+            crate::game::components::RootMotion { enabled },
+        );
+    }
     if let Some(sp) = snap.spinner {
         world.insert(
             e,
@@ -1424,10 +1357,6 @@ pub fn spawn_snapshot(world: &mut World, snap: EntitySnapshot) -> Entity {
         if t.paused {
             timer.pause();
         }
-        // FIX (P0.3): было `timer.elapsed = timer.duration` — но
-        // `finished` оставалось `false`, и на следующем tick
-        // `TimerFinished` срабатывал повторно. Теперь `restore_finished`
-        // ставит `finished = true`, `just_finished = false`.
         if t.finished && mode == TimerMode::Once {
             timer = Timer::restore_finished(t.duration, t.elapsed);
             if t.paused {
