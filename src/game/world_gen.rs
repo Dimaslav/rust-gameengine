@@ -399,7 +399,7 @@ impl WorldGen {
             world.insert(e, MeshHandle("cube".into()));
             world.insert(e, MaterialHandle("arena_wall".into()));
             world.insert(e, RigidBody::static_body());
-            world.insert(e, Collider::aabb(Vec3::new(wall_len * 0.5, 2.0, 0.3)));
+            world.insert(e, Collider::aabb(Vec3::splat(0.5)));
         }
 
         if rng.chance(0.6) {
@@ -541,7 +541,7 @@ impl WorldGen {
             world.insert(e, MeshHandle("cube".into()));
             world.insert(e, MaterialHandle("rpg_dungeon".into()));
             world.insert(e, RigidBody::static_body());
-            world.insert(e, Collider::aabb(*sz * 0.5));
+            world.insert(e, Collider::aabb(Vec3::splat(0.5)));
         }
 
         // 2. Процедурный лабиринт (сетка комнат)
@@ -569,7 +569,7 @@ impl WorldGen {
                     world.insert(e, MeshHandle("cube".into()));
                     world.insert(e, MaterialHandle("rpg_dungeon".into()));
                     world.insert(e, RigidBody::static_body());
-                    world.insert(e, Collider::aabb(Vec3::new(wall_t*0.5, room_h*0.5, cell_w*0.4)));
+                    world.insert(e, Collider::aabb(Vec3::splat(0.5)));
                 }
                 
                 if gz < grid_size - 1 && rng.chance(0.7) {
@@ -587,7 +587,7 @@ impl WorldGen {
                     world.insert(e, MeshHandle("cube".into()));
                     world.insert(e, MaterialHandle("rpg_dungeon".into()));
                     world.insert(e, RigidBody::static_body());
-                    world.insert(e, Collider::aabb(Vec3::new(cell_w*0.4, room_h*0.5, wall_t*0.5)));
+                    world.insert(e, Collider::aabb(Vec3::splat(0.5)));
                 }
                 
                 // Случайная колонна или факел в комнате

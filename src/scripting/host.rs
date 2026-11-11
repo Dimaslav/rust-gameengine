@@ -1,44 +1,13 @@
-//! ScriptHost — прослойка между Rhai-скриптами и ECS.
-//!
-//! Скрипты вызываются внутри цикла по entity. Мы не можем держать
-//! `&mut World` в borrow-checker'е, потому что скрипт мутирует World
-//! прямо во время итерации. Решение — сырые указатели + методы-обёртки.
-//!
-//! # Безопасность
-//!
-//! `world_ptr` валиден ровно на время вызова скрипта (гарантируется
-//! `ScriptSystem::update`). `input_ptr` — ссылка на `&Input`, живёт
-//! столько же. Оба указателя не выходят за пределы `ScriptHost`.
-//!
-//! `ScriptHost` клонируется Rhai-ом в `Dynamic` (через `Rc<RefCell<>>`),
-//! но копия содержит **те же** указатели. Реально мутируем мы всегда
-//! один экземпляр — через тот, что лежит в `Scope`.
-//!
-//! # Entity-кодировка
-//!
-//! `Entity` передаётся в Rhai как `i64` через `Entity::to_bits()`.
-//! Обратная конвертация — `Entity::from_bits(e as u64)`. Специально
-//! **не** проверяем `e < 0`: при `generation > 0x7FFF_FFFF` handle
-//! кодируется отрицательным i64, и это валидная сущность.
-//! Маркер «нет источника» в `event_source()` — `i64::MIN`.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use glam::Vec3;
-
 use crate::ecs::{Entity, World};
 use crate::engine::Input;
 use crate::game::components::{Health, Name, Transform, Velocity};
-
 use super::event::ScriptEvent;
 
-/// Общая ссылка на хост — Rhai требует `Clone`, `Rc<RefCell<>>` даёт его.
 pub type SharedHost = Rc<RefCell<ScriptHost>>;
-
-/// Команды, которые скрипт хочет выполнить «снаружи» (звук, событие).
-/// Мы не исполняем их сразу — копим, чтобы `App` применил их
-/// в корректном порядке после тика.
 #[derive(Debug, Clone)]
 pub enum ScriptCommand {
     PlaySound { sound: String, position: Option<Vec3> },
@@ -59,18 +28,11 @@ pub struct ScriptHost {
     entity: Entity,
     dt: f32,
     elapsed: f32,
-
-    /// Команды за текущий кадр (сбрасываются в начале каждого update).
     pub commands: RefCell<Vec<ScriptCommand>>,
-
-    /// Событие, которое скрипт обрабатывает прямо сейчас
-    /// (только внутри `on_event`). `None` для `on_start` / `on_update`.
     current_event: Option<ScriptEvent>,
 }
 
 impl ScriptHost {
-    /// Создать хост. **Не** вызывать из безопасного кода за пределами
-    /// `ScriptSystem::update` — указатели валидны только в этом окне.
     pub(crate) unsafe fn new(
         world: *mut World,
         input: *const Input,
@@ -89,8 +51,26 @@ impl ScriptHost {
         }
     }
 
-    /// Обогатить хост текущим событием. Вызывается из `ScriptSystem::update`
-    /// для `on_event`. Для `on_start` / `on_update` не вызывается.
+    pub fn set_visible(&self, e: i64, v: bool) {
+        if !self.entity_exists(e) { return; }
+        let ent = Self::entity_from_rhai(e);
+        let w = self.world_mut();
+        if v {
+            w.remove::<crate::game::components::Visible>(ent);
+        } else {
+            w.insert(ent, crate::game::components::Visible(false));
+        }
+    }
+
+    pub fn deal_damage(&self, e: i64, amount: f64) {
+        if !self.entity_exists(e) { return; }
+        let ent = Self::entity_from_rhai(e);
+        let w = self.world_mut();
+        if let Some(h) = w.get_mut::<Health>(ent) {
+            h.current = (h.current - amount as f32).max(0.0);
+        }
+    }
+
     pub(crate) fn with_event(mut self, ev: ScriptEvent) -> Self {
         self.current_event = Some(ev);
         self
@@ -109,7 +89,6 @@ impl ScriptHost {
         unsafe { &*self.input_ptr }
     }
 
-    /// `i64` (Rhai) → `Entity`. **Не** проверяет `e < 0`.
     #[inline]
     fn entity_from_rhai(e: i64) -> Entity {
         Entity::from_bits(e as u64)
@@ -145,7 +124,7 @@ impl ScriptHost {
                 return e.to_bits() as i64;
             }
         }
-        -1 // «не найдено». Не совпадёт ни с одной живой сущностью.
+        -1
     }
 
     // ============================================================
@@ -312,8 +291,6 @@ impl ScriptHost {
         self.world_mut().despawn(ent);
     }
 
-    /// Все entity, чьё `Name` начинается с префикса.
-    /// Возвращает Rhai-массив i64-id.
     pub fn query_name_prefix(&self, prefix: &str) -> rhai::Array {
         let mut arr = rhai::Array::new();
         for (e, n) in self.world().query::<Name>() {
@@ -324,7 +301,6 @@ impl ScriptHost {
         arr
     }
 
-    /// Есть ли у entity компонент с данным именем (для условий в скриптах).
     pub fn has_component(&self, e: i64, kind: &str) -> bool {
         if !self.entity_exists(e) {
             return false;
@@ -361,8 +337,6 @@ impl ScriptHost {
     // Events
     // ============================================================
 
-    /// Имя события, которое скрипт обрабатывает. Пусто, если
-    /// вызов не из `on_event`.
     pub fn event_name(&self) -> String {
         self.current_event
             .as_ref()
@@ -375,11 +349,6 @@ impl ScriptHost {
         self.current_event.is_some()
     }
 
-    /// Entity-источник события. Маркер «нет источника» — `i64::MIN`.
-    /// Живая сущность никогда не даст `to_bits() as i64 == i64::MIN`,
-    /// потому что это `{ index: 0, generation: 0x8000_0000 }`, а
-    /// `generation` инкрементируется от 0 (и в обозримом будущем не
-    /// дойдёт до `0x8000_0000`).
     pub fn event_source(&self) -> i64 {
         self.current_event
             .as_ref()
@@ -388,7 +357,6 @@ impl ScriptHost {
             .unwrap_or(i64::MIN)
     }
 
-    /// Числовой параметр события. `0.0`, если ключа нет.
     pub fn event_get(&self, key: &str) -> f64 {
         self.current_event
             .as_ref()
@@ -396,8 +364,6 @@ impl ScriptHost {
             .unwrap_or(0.0)
     }
 
-    /// Отправить событие в шину. Скрипты получат его через `on_event`
-    /// в **следующем** кадре.
     pub fn emit_event(&self, name: &str) {
         self.commands
             .borrow_mut()

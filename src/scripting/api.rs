@@ -1,5 +1,3 @@
-//! Регистрация всего скриптового API в Rhai Engine.
-
 use glam::Vec3;
 use rhai::Engine;
 
@@ -10,10 +8,6 @@ pub fn register_all(engine: &mut Engine) {
     register_host(engine);
     register_math(engine);
 }
-
-// ============================================================
-// Vec3
-// ============================================================
 
 fn register_vec3(engine: &mut Engine) {
     engine.register_type_with_name::<Vec3>("Vec3");
@@ -38,14 +32,6 @@ fn register_vec3(engine: &mut Engine) {
     });
 }
 
-// ============================================================
-// Host (World + Input + Time + Events)
-// ============================================================
-//
-// Все функции принимают `SharedHost` (= Rc<RefCell<ScriptHost>>),
-// клонируют Rc и бросают `borrow()` / `borrow_mut()`.
-// Так Rhai может держать `Dynamic` с клонируемой ссылкой на хост.
-
 fn register_host(engine: &mut Engine) {
     engine.register_type_with_name::<SharedHost>("Host");
 
@@ -53,6 +39,9 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("self_entity", |h: SharedHost| h.borrow().self_entity());
     engine.register_fn("entity_name", |h: SharedHost, e: i64| h.borrow().entity_name(e));
     engine.register_fn("find_by_name", |h: SharedHost, n: &str| h.borrow().find_by_name(n));
+
+    engine.register_fn("set_visible", |h: SharedHost, e: i64, v: bool| h.borrow().set_visible(e, v));
+    engine.register_fn("deal_damage", |h: SharedHost, e: i64, v: f64| h.borrow().deal_damage(e, v));
 
     // --- Transform ---
     engine.register_fn("position", |h: SharedHost, e: i64| h.borrow().position(e));

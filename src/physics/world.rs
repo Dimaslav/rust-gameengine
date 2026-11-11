@@ -60,6 +60,7 @@ struct BodyState {
     scale: Vec3,
     sleeping: bool,
     sleep_timer: f32,
+    parent_inv: glam::Mat4,
 }
 
 struct Contact {
@@ -275,13 +276,9 @@ fn compute_inv_inertia(col: &Collider, mass: f32, scale: Vec3) -> f32 {
     if i > 1e-8 { 1.0 / i } else { 0.0 }
 }
 
-// ============================================================
-// State collection
-// ============================================================
-
 fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
     let mut out = Vec::new();
-    let mut skipped = Vec::new();
+    let skipped = Vec::new();
     for &e in world.entities() {
         let Some(rb) = world.get::<RigidBody>(e).copied() else {
             continue;
@@ -290,20 +287,22 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
             continue;
         };
 
-        if world.get::<Parent>(e).is_some() {
-            if rb.body_type != BodyType::Static {
-                skipped.push(e);
-            }
+        let Some(_t) = world.get::<Transform>(e) else {
             continue;
-        }
+        };
 
-        let Some(t) = world.get::<Transform>(e) else {
-            continue;
+        let (world_pos, world_rot, parent_inv) = if let Some(Parent(p)) = world.get::<Parent>(e).copied() {
+            let pm = crate::game::world_matrix(world, p);
+            let model = pm * _t.matrix();
+            let (_, rot, pos) = model.to_scale_rotation_translation();
+            (pos, rot, pm.inverse())
+        } else {
+            (_t.position, _t.rotation, glam::Mat4::IDENTITY)
         };
 
         let material = world.get::<PhysicsMaterial>(e).copied().unwrap_or_default();
         let mass = rb.mass.max(1e-4);
-        let scale = t.scale.abs();
+        let scale = _t.scale.abs();
         let inv_inertia = compute_inv_inertia(&col, mass, scale);
 
         out.push(BodyState {
@@ -311,9 +310,9 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
             body_type: rb.body_type,
             inv_mass: rb.inv_mass(),
             inv_inertia,
-            position: t.position,
+            position: world_pos,
             velocity: rb.velocity,
-            rotation: t.rotation.normalize(),
+            rotation: world_rot.normalize(),
             angular_velocity: rb.angular_velocity,
             gravity_scale: rb.gravity_scale,
             linear_damping: rb.linear_damping,
@@ -323,6 +322,7 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
             scale,
             sleeping: rb.sleeping,
             sleep_timer: rb.sleep_timer,
+            parent_inv,
         });
     }
     (out, skipped)
@@ -331,8 +331,16 @@ fn collect_states(world: &World) -> (Vec<BodyState>, Vec<Entity>) {
 fn write_back(world: &mut World, states: &[BodyState]) {
     for s in states {
         if let Some(t) = world.get_mut::<Transform>(s.entity) {
-            t.position = s.position;
-            t.rotation = s.rotation;
+            if s.parent_inv != glam::Mat4::IDENTITY {
+                let world_mat = glam::Mat4::from_scale_rotation_translation(s.scale, s.rotation, s.position);
+                let local = s.parent_inv * world_mat;
+                let (_, l_rot, l_pos) = local.to_scale_rotation_translation();
+                t.position = l_pos;
+                t.rotation = l_rot;
+            } else {
+                t.position = s.position;
+                t.rotation = s.rotation;
+            }
         }
         if let Some(rb) = world.get_mut::<RigidBody>(s.entity) {
             rb.velocity = s.velocity;
@@ -345,17 +353,6 @@ fn write_back(world: &mut World, states: &[BodyState]) {
     }
 }
 
-// ============================================================
-// Broad-phase (spatial hash)
-// ============================================================
-
-/// Broad-phase через spatial hash (XZ-сетка).
-///
-/// FIX #1: использует `SpatialHash2D::insert_aabb` вместо точечной
-/// вставки центра. Раньше два больших тела (пол 20×20 м и стена)
-/// не попадали в одну клетку и никогда не сталкивались. Теперь
-/// payload вставляется во все клетки AABB, а объекты > 128×128 м
-/// уходят в `always_check` (см. `spatial_hash.rs`).
 fn broad_phase(states: &[BodyState]) -> Vec<(usize, usize)> {
     let n = states.len();
     if n < 2 {
@@ -968,6 +965,7 @@ mod tests {
             scale: Vec3::ONE,
             sleeping: false,
             sleep_timer: 0.0,
+            parent_inv: glam::Mat4::IDENTITY,            
         };
         let box_ = BodyState {
             entity: Entity::from_raw(1, 0),
@@ -988,7 +986,8 @@ mod tests {
             scale: Vec3::ONE,
             sleeping: false,
             sleep_timer: 0.0,
-        };
+            parent_inv: glam::Mat4::IDENTITY,            
+        };        
         let c = collide(&cap, &box_, 0, 1);
         assert!(c.is_some(), "capsule-vs-aabb must produce contact");
     }

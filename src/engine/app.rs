@@ -1058,14 +1058,35 @@ impl<G: Game> App<G> {
 
                     if let Some((origin, dir)) = cam.tps_collision_ray() {
                         let max_d = (tps_distance + 1.0).max(2.0);
-                        let hit = self.physics.raycast(
-                            &self.world,
-                            origin,
-                            dir,
-                            max_d,
-                            crate::physics::QueryFilter::static_only(),
-                        );
-                        cam.apply_tps_collision_hit(hit.map(|h| h.distance));
+                        let right = cam.right();
+                        let up = cam.up();
+                        let radius = cam.tps_collision_radius;
+
+                        let mut min_hit: Option<f32> = None;
+                        // FIX: Стреляем 5-ю лучами (центр + 4 смещения), чтобы камера не застревала в углах
+                        let offsets = [
+                            Vec3::ZERO,
+                            right * radius,
+                            -right * radius,
+                            up * radius,
+                            -up * radius,
+                        ];
+
+                        for offset in offsets {
+                            let o = origin + offset;
+                            if let Some(hit) = self.physics.raycast(
+                                &self.world,
+                                o,
+                                dir,
+                                max_d,
+                                crate::physics::QueryFilter::static_only(),
+                            ) {
+                                if min_hit.is_none_or(|d| hit.distance < d) {
+                                    min_hit = Some(hit.distance);
+                                }
+                            }
+                        }
+                        cam.apply_tps_collision_hit(min_hit);
                     }
                 }
                 _ => {

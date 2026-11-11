@@ -81,6 +81,18 @@ impl HotReload {
                         ),
                     }
                 }
+                AssetKind::Item 
+                | AssetKind::Weapon 
+                | AssetKind::Quest 
+                | AssetKind::Dialog 
+                | AssetKind::Vendor 
+                | AssetKind::Recipe 
+                | AssetKind::Loot 
+                | AssetKind::Locale 
+                | AssetKind::Data => {
+                    log::info!("HotReload: Data file '{}' changed. Game should reload registries.", meta.file_name());
+                    reloaded.push(*id);
+                }
                 _ => {
                     log::debug!(
                         "HotReload: {} changed ({}), no reloader yet",
