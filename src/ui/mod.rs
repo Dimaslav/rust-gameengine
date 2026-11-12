@@ -10,6 +10,7 @@ pub mod vendor_ui;
 pub use crafting_ui::CraftingAction;
 pub use dialog::DialogUi;
 pub use hud::{Hud, Notification};
+pub use font::Font;
 pub use inventory_ui::{InvDragState, InvLocation, InventoryAction};
 pub use layer::{UiInput, UiLayer, UiModifiers};
 pub use quad::{UiGlobal, UiQuad};

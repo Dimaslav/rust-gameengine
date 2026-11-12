@@ -2413,6 +2413,7 @@ impl<G: Game> App<G> {
                 mouse_down,
                 modifiers,
             },
+            self.renderer.font.clone(),
         );
         if !in_menu {
             let game = &mut self.game;
@@ -2422,7 +2423,6 @@ impl<G: Game> App<G> {
         }
         let ui_quads = ui_layer.into_quads();
 
-        // Игра может запросить снятие паузы из собственного меню (Resume).
         if !in_menu && self.game.take_unpause_request() {
             if self.editor.state.play.active && self.editor.state.play.paused {
                 self.editor.state.play.paused = false;

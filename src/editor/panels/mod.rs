@@ -4,6 +4,7 @@ pub mod command_palette;
 pub mod console;
 pub mod content;
 pub mod details;
+pub mod dialog_editor;
 pub mod inspector_audio;
 pub mod left_panel;
 pub mod outliner;

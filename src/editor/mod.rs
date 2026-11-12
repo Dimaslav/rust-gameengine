@@ -26,13 +26,14 @@ use crate::game::audio::AudioBus;
 use crate::game::components::{Parent, Transform};
 use crate::render::Material;
 use crate::scene::serialize::EntitySnapshot;
-use crate::game::world_gen::WorldGenConfig; // <-- импорт для состояния
+use crate::game::world_gen::WorldGenConfig;
 
 use clipboard::{ClipboardComponent, ComponentKind};
 use gizmo::GizmoState;
 use hotkeys::{HotkeyAction, HotkeyMap};
 use layout::{LayoutState, OutlinerFilter, Workspace, WorkspaceLayouts};
 use palette::PaletteState;
+use panels::dialog_editor::DialogEditorState;
 use play::PlayState;
 use scene_validation::SceneIssue;
 use settings::EditorSettings;
@@ -151,6 +152,9 @@ pub struct EditorState {
 
     // НОВОЕ ПОЛЕ ДЛЯ ГЕНЕРАТОРА
     pub last_gen_config: WorldGenConfig,
+
+    // P1.6 phase 1: визуальный редактор диалогов.
+    pub dialog_editor: DialogEditorState,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +245,8 @@ impl EditorState {
             show_welcome_panel: true,
             grid_size: 1.0,
             snap_enabled: true,
-            last_gen_config: WorldGenConfig::default(), // <-- Инициализация
+            last_gen_config: WorldGenConfig::default(),
+            dialog_editor: DialogEditorState::default(),
         };
 
         s.save_path = s.settings.save_path.clone();

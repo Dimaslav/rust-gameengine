@@ -65,6 +65,17 @@ pub fn draw_menu(ui: &mut egui::Ui, state: &mut EditorState, action: &mut Option
                     *action = Some(EditorAction::ExportFbxAll);
                     ui.close();
                 }
+                ui.separator();
+                if ui
+                    .button("💬 Dialog Editor")
+                    .on_hover_text("Open dialog graph editor")
+                    .clicked()
+                {
+                    state.dialog_editor.open = true;
+                    state.dialog_editor.available =
+                        crate::editor::panels::dialog_editor::scan_dialog_files();
+                    ui.close();
+                }
             });
             ui.menu_button("GameObject", |ui| {
                 if ui.button("Create Empty").clicked() {
@@ -80,7 +91,6 @@ pub fn draw_menu(ui: &mut egui::Ui, state: &mut EditorState, action: &mut Option
                 }
                 ui.separator();
                 
-                // Полностью случайный мир (Биом + Seed)
                 if ui.button("🎲 Random World").on_hover_text("Generate a completely random world (any biome)").clicked() {
                     let new_seed = random_seed();
                     let biome = random_biome(new_seed);
@@ -126,6 +136,8 @@ pub fn draw_menu(ui: &mut egui::Ui, state: &mut EditorState, action: &mut Option
                 ui.checkbox(&mut state.layout.show_content_browser, "Content Browser");
                 ui.checkbox(&mut state.layout.show_script_panel, "Scripts");
                 ui.checkbox(&mut state.layout.show_audio_panel, "Audio");
+                ui.separator();
+                ui.checkbox(&mut state.dialog_editor.open, "💬 Dialog Editor");
             });
             ui.menu_button("Help", |ui| {
                 ui.label("Rust Engine 3D v0.3.0");

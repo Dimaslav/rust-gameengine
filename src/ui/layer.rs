@@ -1,21 +1,8 @@
-//! UiLayer — immediate-mode API для построения игрового UI.
-//!
-//! Работает в screen-space пикселях (top-left origin). Игровой код
-//! вызывает `ui.rect(...)`, `ui.text(...)`, `ui.button(...)` из
-//! `Game::collect_ui` — каждая функция добавляет квады и (для
-//! интерактивных элементов) возвращает interaction-статус.
-//!
-//! ## FIX #10: multiline
-//!
-//! `text` и `text_width` поддерживают `\n` (перенос строки).
-//! Раньше `\n` (char code 10) попадал в `glyph_uv` → saturating_sub
-//! → пустой глиф → длинные реплики в `dialog.rs` рисовались в одну
-//! строку и уезжали за правый край панели.
+use std::sync::Arc;
 
-use super::font;
+use super::font::Font;
 use super::quad::UiQuad;
 
-/// Модификаторы клавиатуры, интересные для UI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UiModifiers {
     pub ctrl: bool,
@@ -23,7 +10,6 @@ pub struct UiModifiers {
     pub alt: bool,
 }
 
-/// Состояние мыши, нужное для interaction.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UiInput {
     pub mouse_pos: (f32, f32),
@@ -37,18 +23,24 @@ pub struct UiLayer {
     screen_w: f32,
     screen_h: f32,
     input: UiInput,
-    /// Был ли interaction-клик потреблён UI в этом кадре.
+    font: Arc<Font>,
     pub consumed_click: bool,
     next_widget_id: u32,
 }
 
 impl UiLayer {
-    pub fn new(screen_w: f32, screen_h: f32, input: UiInput) -> Self {
+    pub fn new(
+        screen_w: f32,
+        screen_h: f32,
+        input: UiInput,
+        font: Arc<Font>,
+    ) -> Self {
         Self {
             quads: Vec::with_capacity(256),
             screen_w,
             screen_h,
             input,
+            font,
             consumed_click: false,
             next_widget_id: 0,
         }
@@ -72,7 +64,7 @@ impl UiLayer {
         self.quads.push(UiQuad {
             rect: [x, y, w, h],
             color,
-            uv: font::white_uv(),
+            uv: self.font.white_uv,
         });
     }
 
@@ -84,15 +76,9 @@ impl UiLayer {
         self.rect(x + w - t, y + t, t, h - 2.0 * t, color);
     }
 
-    /// FIX #10: поддержка `\n` — многострочный текст.
-    ///
-    /// Раньше `\n` (char code 10) попадал в `glyph_uv` → saturating_sub
-    /// → пустой глиф → длинные реплики в `dialog.rs` рисовались в одну
-    /// строку и уезжали за правый край панели.
     pub fn text(&mut self, x: f32, y: f32, text: &str, size_px: f32, color: [f32; 4]) {
         if size_px <= 0.0 || color[3] <= 0.0 { return; }
-        let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
-        let line_h = size_px * 1.15;
+        let line_h = self.font.line_height(size_px);
         let mut cx = x;
         let mut cy = y;
         for c in text.chars() {
@@ -101,43 +87,39 @@ impl UiLayer {
                 cy += line_h;
                 continue;
             }
-            if c == ' ' {
-                cx += glyph_w;
-                continue;
+            match self.font.glyph(c, size_px) {
+                Some(g) => {
+                    if g.draw_w > 0.0 && g.draw_h > 0.0 && c != ' ' && c != '\t' {
+                        self.quads.push(UiQuad {
+                            rect: [cx + g.offset_x, cy + g.offset_y, g.draw_w, g.draw_h],
+                            color,
+                            uv: g.uv,
+                        });
+                    }
+                    cx += g.advance;
+                }
+                None => {
+                    // Неизвестный символ — сдвигаем на «среднюю» ширину.
+                    cx += size_px * 0.4;
+                }
             }
-            let uv = font::glyph_uv(c);
-            self.quads.push(UiQuad {
-                rect: [cx, cy, glyph_w, size_px],
-                color,
-                uv,
-            });
-            cx += glyph_w;
         }
     }
 
     pub fn text_centered(&mut self, cx: f32, cy: f32, text: &str, size_px: f32, color: [f32; 4]) {
         if size_px <= 0.0 { return; }
-        let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
-        let n = text.chars().count() as f32;
-        let total_w = n * glyph_w;
-        let x = cx - total_w * 0.5;
-        let y = cy - size_px * 0.5;
+        let (w, h) = self.font.measure(text, size_px);
+        let x = cx - w * 0.5;
+        let y = cy - h * 0.5;
         self.text(x, y, text, size_px, color);
     }
 
-    /// FIX #10: для многострочного текста возвращает ширину
-    /// **самой длинной** строки, а не всего текста в одну строку.
     pub fn text_width(&self, text: &str, size_px: f32) -> f32 {
-        let glyph_w = size_px * font::GLYPH_W as f32 / font::GLYPH_H as f32;
-        text.lines()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0) as f32
-            * glyph_w
+        self.font.measure(text, size_px).0
     }
 
     // ============================================================
-    // Интерактивные элементы
+    // Интерактивные элементы (без изменений)
     // ============================================================
 
     fn is_hovered(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
@@ -147,10 +129,8 @@ impl UiLayer {
 
     pub fn button(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str) -> bool {
         self.next_widget_id += 1;
-
         let hovered = self.is_hovered(x, y, w, h);
         let pressed = hovered && self.input.mouse_down;
-
         let bg = if pressed {
             [0.12, 0.12, 0.18, 0.95]
         } else if hovered {
@@ -158,29 +138,18 @@ impl UiLayer {
         } else {
             [0.18, 0.20, 0.26, 0.95]
         };
-
         self.rect(x, y, w, h, bg);
         self.rect_outline(x, y, w, h, 1.5, [0.55, 0.60, 0.75, 1.0]);
-
         let text_size = h.min(24.0) * 0.55;
         self.text_centered(x + w * 0.5, y + h * 0.5, label, text_size, [1.0, 1.0, 1.0, 1.0]);
-
         let clicked = hovered && self.input.mouse_clicked;
-        if clicked {
-            self.consumed_click = true;
-        }
+        if clicked { self.consumed_click = true; }
         clicked
     }
 
     pub fn bar(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        frac: f32,
-        fg: [f32; 4],
-        bg: [f32; 4],
+        &mut self, x: f32, y: f32, w: f32, h: f32,
+        frac: f32, fg: [f32; 4], bg: [f32; 4],
     ) {
         let f = frac.clamp(0.0, 1.0);
         self.rect(x, y, w, h, bg);

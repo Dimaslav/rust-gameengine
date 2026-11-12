@@ -237,6 +237,7 @@ pub struct Renderer {
     ui_instance_buffer: wgpu::Buffer,
     ui_instance_capacity: u64,
     _ui_font_atlas_tex: wgpu::Texture,
+    pub font: Arc<crate::ui::font::Font>,
 }
 
 fn draw_center(d: &MeshDraw) -> Vec3 {
@@ -1300,12 +1301,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let font_atlas_bytes = crate::ui::font::generate_atlas();
+        let font = Arc::new(crate::ui::font::Font::load_default());
+
         let ui_font_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ui_font_atlas"),
             size: wgpu::Extent3d {
-                width: crate::ui::font::ATLAS_W,
-                height: crate::ui::font::ATLAS_H,
+                width: font.atlas_w,
+                height: font.atlas_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1, sample_count: 1,
@@ -1319,15 +1321,15 @@ impl Renderer {
                 texture: &ui_font_atlas_tex, mip_level: 0,
                 origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
             },
-            &font_atlas_bytes,
+            &font.atlas,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(crate::ui::font::ATLAS_W * 4),
-                rows_per_image: Some(crate::ui::font::ATLAS_H),
+                bytes_per_row: Some(font.atlas_w * 4),
+                rows_per_image: Some(font.atlas_h),
             },
             wgpu::Extent3d {
-                width: crate::ui::font::ATLAS_W,
-                height: crate::ui::font::ATLAS_H,
+                width: font.atlas_w,
+                height: font.atlas_h,
                 depth_or_array_layers: 1,
             },
         );
@@ -1337,10 +1339,11 @@ impl Renderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+
         let ui_global_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ui_global_bind_group"),
             layout: &ui_layout,
@@ -1471,6 +1474,7 @@ impl Renderer {
             ui_pipeline, ui_global_buffer, ui_global_bind_group,
             ui_instance_buffer, ui_instance_capacity: INITIAL_UI_CAPACITY,
             _ui_font_atlas_tex: ui_font_atlas_tex,
+            font,
         }
     }
 

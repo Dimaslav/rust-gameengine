@@ -1,5 +1,3 @@
-//! Глобальное состояние приложения: режим (меню / игра), настройки.
-
 use serde::{Deserialize, Serialize};
 
 use crate::render::PostFx;
@@ -11,9 +9,6 @@ use crate::render::renderer::atmosphere::AtmosphereSettings;
 
 #[derive(Debug, Clone, Default)]
 pub enum AppMode {
-    /// FIX #8: было `#[default] InGame`. При первом запуске
-    /// приложение стартовало в игре, минуя главное меню. Теперь
-    /// дефолт — `MainMenu`, как и положено.
     #[default]
     MainMenu,
     InGame,

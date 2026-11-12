@@ -1,10 +1,3 @@
-//! UI кузницы: список рецептов + панель деталей + кнопка "Craft".
-//!
-//! Управление:
-//! - **ЛКМ на рецепт** — выбрать.
-//! - **ЛКМ на Craft** — попытаться создать.
-//! - **X** или **Esc** — закрыть.
-
 use crate::game::crafting::{CraftingRegistry, CraftingSession, RecipeDef};
 use crate::game::items::{Inventory, ItemRegistry};
 use crate::ui::UiLayer;

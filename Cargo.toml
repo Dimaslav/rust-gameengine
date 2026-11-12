@@ -48,6 +48,7 @@ path = "src/bin/packer.rs"
 # --- Window / scripting ---
 winit = "0.30.13"
 rhai = "1.27.0"
+fontdue = "0.9"
 
 # --- Graphics ---
 wgpu = "30.0.1"
@@ -113,3 +114,5 @@ strip = true
 inherits = "release"
 lto = false
 codegen-units = 16
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
