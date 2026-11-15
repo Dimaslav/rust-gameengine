@@ -1,31 +1,3 @@
-//! Функции кодирования рендер-проходов.
-//!
-//! # Порядок вызовов в `Renderer::render()`
-//!
-//! ```text
-//! [Sprint 4]   encode_cluster_assign    — atomicAdd counts + fill fixed-size cluster_lights
-//! [CSM]        encode_csm_all
-//! [Cube]       encode_cube_shadow_all
-//! [GBuffer]    encode_gbuffer_pass
-//! [Sprint 6]   encode_contact_shadow_pass — читает gbuffer_depth
-//! [Decals]     encode_decal_pass
-//! [SSAO]       encode_ssao_pass, encode_ssao_blur_pass
-//! [Lighting]   encode_lighting_pass       — читает cluster_lighting_bg + probe_lighting_bg
-//! [Sprint 5]   encode_atmosphere_pass  ─┐
-//! [Skybox]     encode_skybox_pass       ┴ взаимоисключающие
-//! [Forward]    encode_forward_pass        — линии
-//! [Particles]  encode_particles_pass
-//! [Transp]     encode_transparent_pass
-//! [Vol]        encode_volumetric_compute, encode_volumetric_composite
-//! [LensFlare]  encode_lens_flare_pass    — опционально
-//! [DOF]        encode_dof_pass
-//! [Motion]     encode_motion_blur_pass
-//! [TAA]        encode_taa_pass           — если taa_strength > 0.01
-//! [Post]       encode_post_processing    — bloom + tonemap + fxaa
-//!    или       encode_debug_pass
-//! [UI]         encode_ui_pass
-//! ```
-
 use crate::render::csm::CASCADE_COUNT;
 use crate::render::debug::DebugView;
 use crate::render::line::LineVertex;
@@ -513,6 +485,34 @@ pub(super) fn encode_particles_pass(
     pass.set_bind_group(0, &r.camera_bind_group, &[]);
     pass.set_vertex_buffer(0, r.particles_instance_buffer.slice(..));
     pass.draw(0..6, 0..particle_count);
+}
+
+
+/// P1.5: GPU-частицы. Проход идёт **после** CPU-частиц и **до**
+/// transparent-геометрии. Depth-write выключен (как у CPU-частиц) —
+/// они не должны перекрывать прозрачные объекты.
+pub(super) fn encode_gpu_particles_pass(
+    r: &Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("gpu_particles_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &r.sd.hdr_view,
+            resolve_target: None,
+            ops: load(),
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &r.sd.gbuffer_depth_view,
+            depth_ops: Some(depth_load()),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    r.gpu_particles.draw(&mut pass, &r.camera_bind_group);
 }
 
 // ============================================================

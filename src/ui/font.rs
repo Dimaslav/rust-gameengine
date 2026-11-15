@@ -1,16 +1,11 @@
 use std::collections::HashMap;
 
-/// Размеры полос атласа (высота в пикселях).
 pub const SIZE_BANDS: &[f32] = &[10.0, 12.0, 14.0, 16.0, 20.0, 24.0, 32.0, 48.0];
 
 const ATLAS_W: u32 = 2048;
 const ATLAS_H: u32 = 2048;
 const GLYPH_PADDING: u32 = 1;
 const WHITE_SIZE: u32 = 1;
-
-// ============================================================
-// Legacy bitmap constants (для fallback)
-// ============================================================
 
 pub const GLYPH_W: u32 = 5;
 pub const GLYPH_H: u32 = 7;
@@ -24,29 +19,18 @@ pub const WHITE_BLOCK_X: u32 = 120;
 pub const WHITE_BLOCK_Y: u32 = 56;
 pub const WHITE_BLOCK_SIZE: u32 = 4;
 
-// ============================================================
-// Публичные типы
-// ============================================================
-
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphMetrics {
-    /// UV в атласе: [u0, v0, u1, v1].
     pub uv: [f32; 4],
-    /// Размер quad'а в пикселях экрана.
     pub draw_w: f32,
     pub draw_h: f32,
-    /// Смещение от левого-верхнего угла текущей строки текста.
     pub offset_x: f32,
     pub offset_y: f32,
-    /// Продвижение пера (px).
     pub advance: f32,
 }
 
 struct Band {
     glyphs: HashMap<char, GlyphMetrics>,
-    /// Расстояние от верхнего края строки до baseline.
-    ascent: f32,
-    /// Полная высота строки (ascent + descent + gap).
     line_height: f32,
 }
 
@@ -54,7 +38,6 @@ pub struct Font {
     pub atlas: Vec<u8>,
     pub atlas_w: u32,
     pub atlas_h: u32,
-    /// UV белого 1×1-блока (для solid-квадов).
     pub white_uv: [f32; 4],
     bands: Vec<Band>,
     sizes: Vec<f32>,
@@ -67,12 +50,7 @@ enum Backend {
     Bitmap,
 }
 
-// ============================================================
-// Загрузка / инициализация
-// ============================================================
-
 impl Font {
-    /// Основная точка входа. Пытается загрузить TTF, иначе — bitmap.
     pub fn load_default() -> Self {
         match Self::try_load_ttf() {
             Ok(f) => {
@@ -98,7 +76,6 @@ impl Font {
     }
 
     fn find_ttf_bytes() -> Option<Vec<u8>> {
-        // 1. Bundled assets (если пользователь положил)
         for p in [
             "assets/fonts/DejaVuSans.ttf",
             "assets/fonts/Inter-Regular.ttf",
@@ -112,7 +89,6 @@ impl Font {
             }
         }
 
-        // 2. Windows system fonts (все с полной кириллицей)
         #[cfg(windows)]
         {
             for p in [
@@ -137,7 +113,6 @@ impl Font {
         let inv_w = 1.0 / ATLAS_W as f32;
         let inv_h = 1.0 / ATLAS_H as f32;
 
-        // Резервируем 1×1 белый пиксель в нижнем-правом углу.
         let white_x = ATLAS_W - 4;
         let white_y = ATLAS_H - 4;
         {
@@ -167,7 +142,6 @@ impl Font {
 
             let mut glyphs = HashMap::with_capacity(charset.len());
 
-            // Растеризация, сортировка по высоте (лучший shelf-packing).
             let mut items: Vec<(char, fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(charset.len());
             for &c in &charset {
                 let (m, b) = font.rasterize(c, size);
@@ -179,7 +153,6 @@ impl Font {
 
             for (c, m, bitmap) in items {
                 if m.width == 0 || m.height == 0 {
-                    // Пробельные глифы — только advance, без quad'а.
                     glyphs.insert(c, GlyphMetrics {
                         uv: [0.0; 4],
                         draw_w: 0.0,
@@ -195,8 +168,6 @@ impl Font {
                 let h = m.height as u32;
                 let total_w = w + GLYPH_PADDING * 2;
                 let total_h = h + GLYPH_PADDING * 2;
-
-                // Не залезаем в зону белого пикселя в углу.
                 let safe_x_limit = ATLAS_W.saturating_sub(WHITE_SIZE + 4);
                 let safe_y_limit = ATLAS_H.saturating_sub(WHITE_SIZE + 4);
 
@@ -249,9 +220,7 @@ impl Font {
                 row_h = row_h.max(total_h);
             }
 
-            bands.push(Band { glyphs, ascent, line_height });
-
-            // Каждая полоса — с новой строки, для предсказуемости раскладки.
+            bands.push(Band { glyphs, line_height });
             cursor_x = 0;
             cursor_y += row_h;
             row_h = 0;
@@ -340,7 +309,6 @@ impl Font {
             white_uv,
             bands: vec![Band {
                 glyphs,
-                ascent: GLYPH_H as f32,
                 line_height: GLYPH_CELL_H as f32,
             }],
             sizes: vec![GLYPH_H as f32],
@@ -348,17 +316,12 @@ impl Font {
         }
     }
 
-    // ============================================================
-    // Запросы
-    // ============================================================
-
     pub fn glyph(&self, c: char, size_px: f32) -> Option<GlyphMetrics> {
         let idx = self.band_for(size_px);
         let band = self.bands.get(idx)?;
         let g = band.glyphs.get(&c)?;
 
         if self.backend == Backend::Bitmap {
-            // Единый native-размер (7), масштабируем.
             let scale = size_px / self.sizes[idx];
             return Some(GlyphMetrics {
                 uv: g.uv,
@@ -402,7 +365,6 @@ impl Font {
         band.line_height * scale
     }
 
-    /// Возвращает (ширина, высота) многострочного текста.
     pub fn measure(&self, text: &str, size_px: f32) -> (f32, f32) {
         let idx = self.band_for(size_px);
         let band = &self.bands[idx];
@@ -431,25 +393,17 @@ impl Font {
     }
 }
 
-// ============================================================
-// Charset
-// ============================================================
-
 fn build_charset() -> Vec<char> {
     let mut set = std::collections::BTreeSet::new();
-    // ASCII printable
     for c in 32u8..=126 {
         set.insert(c as char);
     }
-    // Latin-1 supplement
     for c in '\u{00A0}'..='\u{00FF}' {
         set.insert(c);
     }
-    // Cyrillic (основной + дополнение)
     for c in '\u{0400}'..='\u{04FF}' {
         set.insert(c);
     }
-    // UI-символы
     for c in "─│┌┐└┘├┤┬┴┼←↑→↓↔⇐⇒⇑⇓★☆♥♦♣♠█▓▒░✓✗•·…—–«»„".chars() {
         set.insert(c);
     }
@@ -459,10 +413,6 @@ fn build_charset() -> Vec<char> {
     set.insert('\u{2019}');
     set.into_iter().collect()
 }
-
-// ============================================================
-// Bitmap fallback (старый 5×7 ASCII)
-// ============================================================
 
 #[rustfmt::skip]
 pub const FONT_GLYPHS: [[u8; 5]; 96] = [

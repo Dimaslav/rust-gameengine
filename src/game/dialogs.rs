@@ -40,15 +40,17 @@ impl DialogGraph {
         Ok(graph)
     }
 
-    /// Загружает все `.ron` из папки с учётом языка.
-    ///
-    /// Приоритет: `<name>.<lang>.ron` > `<name>.ron`.
-    /// Если файла для `lang` нет — используется базовый (без суффикса).
-    ///
-    /// ИЗМЕНЕНО: pass 2 (fallback) теперь **пропускает** файлы с чужим
-    /// `.<2 ascii-буквы>.ron` суффиксом. Раньше для `lang="ru"` файл
-    /// `blacksmith.en.ron` шёл раньше `blacksmith.ron` по алфавиту,
-    /// попадал в `loaded_ids`, и русский перевод молча отбрасывался.
+    pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        let pretty = ron::ser::PrettyConfig::default()
+            .new_line("\n".to_string())
+            .indentor("    ".to_string())
+            .enumerate_arrays(false);
+        let text = ron::ser::to_string_pretty(self, pretty)
+            .context("serialize DialogGraph")?;
+        std::fs::write(path.as_ref(), text)
+            .with_context(|| format!("write dialog {}", path.as_ref().display()))?;
+        Ok(())
+    }
     pub fn load_from_dir(
         dir: impl AsRef<Path>,
         lang: &str,

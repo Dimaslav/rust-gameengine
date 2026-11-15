@@ -2194,6 +2194,13 @@ impl Game for FortressDemo {
                             world.send(ShotFired { origin, direction: dir, damage, is_crit });
                         }
 
+                        let muzzle = origin + base_dir * 0.5;
+                        renderer.gpu_particles.spawn_burst(
+                            muzzle,
+                            base_dir,
+                            &particles::sparks(base_dir),
+                        );
+
                         let ads_mult = if self.ads_active { 0.5 } else { 1.0 };
                         let kick_up = w.recoil_up * ads_mult
                             + self.auto_fire_accumulator * 0.002;

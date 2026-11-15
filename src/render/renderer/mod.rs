@@ -19,6 +19,7 @@ use winit::window::Window;
 use crate::render::camera::{Camera3D, CameraMode};
 use crate::render::csm::{self, CASCADE_COUNT};
 use crate::render::decal::{DecalDraw, DecalInstance};
+use crate::render::gpu_particles;
 use crate::render::ibl;
 use crate::render::line::{LineBuffer, LineVertex};
 use crate::render::material::{Material, MaterialRegistry, SamplerDesc};
@@ -208,29 +209,24 @@ pub struct Renderer {
     decal_texture_bind_groups: HashMap<String, wgpu::BindGroup>,
     decal_instance_buffer: wgpu::Buffer,
     decal_instance_capacity: u64,
-
     pub meshes: HashMap<String, Mesh>,
     pub materials: MaterialRegistry,
     pub textures: HashMap<String, Texture>,
     default_material: Material,
     pub terrain: Option<crate::render::terrain::Heightmap>,
-
     skybox_time: f32,
-
     taa_frame_index: u32,
     taa_prev_view_proj: Mat4,
     taa_reset_frames: u32,
     taa_prev_camera_mode: Option<CameraMode>,
     taa_prev_jitter_px: Vec2,
     taa_prev_enabled: bool,
-
+    pub gpu_particles: gpu_particles::GpuParticleSystem,
+    last_render_time: f32,
     pub last_draw_count: usize,
     pub last_instance_count: usize,
-
     pub features: wgpu::Features,
-
     render_scale: f32,
-
     ui_pipeline: wgpu::RenderPipeline,
     ui_global_buffer: wgpu::Buffer,
     ui_global_bind_group: wgpu::BindGroup,
@@ -1254,6 +1250,7 @@ impl Renderer {
             ],
         });
 
+        let gpu_particles = gpu_particles::GpuParticleSystem::new(&device, &camera_layout);
         const INITIAL_INSTANCE_CAPACITY: u64 = 4096;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance_buffer"),
@@ -1468,6 +1465,8 @@ impl Renderer {
             taa_prev_camera_mode: None,
             taa_prev_jitter_px: Vec2::ZERO,
             taa_prev_enabled: true,
+            gpu_particles,
+            last_render_time: 0.0,
             last_draw_count: 0, last_instance_count: 0,
             features,
             render_scale: initial_render_scale,
@@ -2376,6 +2375,14 @@ impl Renderer {
             );
         }
 
+        let gpu_dt = (time - self.last_render_time).max(0.0).min(0.1);
+        self.last_render_time = time;
+        {
+            let queue_clone = self.queue.clone();
+            self.gpu_particles
+                .dispatch(&queue_clone, &mut encoder, gpu_dt, time);
+        }
+
         encoder.clear_buffer(&self.sd.cluster_counts_buffer, 0, None);
         if clustered_light_count > 0 {
             passes::encode_cluster_assign(self, &mut encoder, clustered_light_count as u32);
@@ -2414,6 +2421,7 @@ impl Renderer {
 
         passes::encode_forward_pass(self, &mut encoder, line_vertices);
         passes::encode_particles_pass(self, &mut encoder, particle_instances.len() as u32);
+        passes::encode_gpu_particles_pass(self, &mut encoder);
         passes::encode_transparent_pass(self, &mut encoder, &sorted_draws);
         passes::encode_volumetric_compute(self, &mut encoder);
         passes::encode_volumetric_composite(self, &mut encoder);
