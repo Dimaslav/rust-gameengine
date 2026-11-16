@@ -35,30 +35,32 @@ pub struct MovementResult {
     pub support: Option<SupportInfo>,
 }
 
-// ============================================================
-// Helpers (используются только для surface_normal_at)
-// ============================================================
-
 fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
     let ab = b - a;
     let t = (p - a).dot(ab) / ab.length_squared().max(1e-12);
     a + ab * t.clamp(0.0, 1.0)
 }
 
-/// Нормаль поверхности коллайдера в точке `probe` (world-space).
-///
-/// Использует данные из `ColliderEntry` (уже готовые world pos/rot/scale).
 fn surface_normal_at_entry(e: &super::collision_cache::ColliderEntry, probe: Vec3) -> Vec3 {
+    // C1.2: для mesh-коллайдера сначала пробуем найти нормаль через
+    // raycast вниз. Если попали — возвращаем нормаль треугольника.
+    if let Some(mesh) = &e.mesh
+        && let Some(n) = mesh_surface_normal(mesh, e, probe)
+    {
+        return n;
+    }
+
+    // Fallback: primitive.
     let inv_rot = e.world_rot.inverse();
     match e.collider {
-        Collider::Sphere { radius } => {
+        Some(Collider::Sphere { radius }) => {
             let r = radius * e.world_scale.max_element();
             let to = probe - e.world_pos;
             let dist = to.length();
             if dist < 1e-4 || r < 1e-6 { Vec3::Y }
             else { (to / dist).normalize_or(Vec3::Y) }
         }
-        Collider::Aabb { half_extents } => {
+        Some(Collider::Aabb { half_extents }) => {
             let h = half_extents * e.world_scale;
             let d = inv_rot * (probe - e.world_pos);
             let dx = (h.x - d.x.abs()).max(0.0);
@@ -73,7 +75,7 @@ fn surface_normal_at_entry(e: &super::collision_cache::ColliderEntry, probe: Vec
             };
             (e.world_rot * local_normal).normalize_or(Vec3::Y)
         }
-        Collider::Capsule { radius, height } => {
+        Some(Collider::Capsule { radius, height }) => {
             let r = radius * e.world_scale.max_element();
             let hy = height * e.world_scale.y * 0.5;
             let up = e.world_rot * Vec3::new(0.0, hy, 0.0);
@@ -85,12 +87,42 @@ fn surface_normal_at_entry(e: &super::collision_cache::ColliderEntry, probe: Vec
             if dist < 1e-4 || r < 1e-6 { Vec3::Y }
             else { (to / dist).normalize_or(Vec3::Y) }
         }
+        None => Vec3::Y,
     }
 }
 
-// ============================================================
-// Find support — принимает кэш
-// ============================================================
+fn mesh_surface_normal(
+    mesh: &crate::physics::MeshCollider,
+    e: &super::collision_cache::ColliderEntry,
+    probe: Vec3,
+) -> Option<Vec3> {
+    let scale_inv = Vec3::new(
+        if e.world_scale.x.abs() > 1e-6 { 1.0 / e.world_scale.x } else { 1.0 },
+        if e.world_scale.y.abs() > 1e-6 { 1.0 / e.world_scale.y } else { 1.0 },
+        if e.world_scale.z.abs() > 1e-6 { 1.0 / e.world_scale.z } else { 1.0 },
+    );
+    let inv_rot = e.world_rot.inverse();
+    let origin_world = probe + Vec3::Y * 0.3;
+    let local_o = inv_rot * ((origin_world - e.world_pos) * scale_inv);
+    let local_d_unnorm = inv_rot * (Vec3::NEG_Y * scale_inv);
+    let local_d_len = local_d_unnorm.length();
+    if local_d_len < 1e-12 { return None; }
+    let local_d = local_d_unnorm / local_d_len;
+    let triangles = mesh.triangles();
+    if triangles.is_empty() { return None; }
+    let max_t_local = 0.6 * local_d_len;
+    let (tri_idx, _t_local) = mesh.bvh().raycast(local_o, local_d, max_t_local, &triangles)?;
+    let tri = triangles.get(tri_idx as usize)?;
+    let e1 = tri[1] - tri[0];
+    let e2 = tri[2] - tri[0];
+    let n_local = e1.cross(e2).normalize_or(Vec3::Y);
+    let n_scaled = Vec3::new(
+        n_local.x / e.world_scale.x.max(1e-6),
+        n_local.y / e.world_scale.y.max(1e-6),
+        n_local.z / e.world_scale.z.max(1e-6),
+    );
+    Some((e.world_rot * n_scaled).normalize_or(Vec3::Y))
+}
 
 pub fn find_support(
     cache: &ColliderCache,
@@ -126,10 +158,6 @@ pub fn find_support_entity(
     find_support(cache, feet_pos, cap).map(|s| s.entity)
 }
 
-// ============================================================
-// Movement resolution — принимает кэш
-// ============================================================
-
 pub fn resolve_movement_ex(
     _world: &World,
     cache: &ColliderCache,
@@ -149,7 +177,6 @@ pub fn resolve_movement_ex(
     let r = cap.radius;
     let h = cap.height.max(2.0 * r + 1e-3);
 
-    // === X — субшагами ===
     if delta.x.abs() > 1e-6 {
         let steps = (delta.x.abs() / SUBSTEP_SIZE).ceil().max(1.0) as i32;
         let step = delta.x / steps as f32;
@@ -178,7 +205,6 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Z — субшагами ===
     if delta.z.abs() > 1e-6 {
         let steps = (delta.z.abs() / SUBSTEP_SIZE).ceil().max(1.0) as i32;
         let step = delta.z / steps as f32;
@@ -207,7 +233,6 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Y — субшагами (с dynamic-телами: можно стоять на ящике) ===
     if delta.y.abs() > 1e-6 {
         let max_step = 0.1_f32;
         let steps = (delta.y.abs() / max_step).ceil().max(1.0) as i32;
@@ -226,7 +251,6 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Step-down ===
     if !on_ground && delta.y <= 0.0 && step_down_max > 1e-4 {
         let probe_step = 0.05_f32;
         let n = (step_down_max / probe_step).ceil() as i32;
@@ -245,7 +269,6 @@ pub fn resolve_movement_ex(
         }
     }
 
-    // === Terrain приземление ===
     let local_floor = match terrain {
         Some(t) if t.contains(pos.x, pos.z) => t.sample(pos.x, pos.z).max(floor_y),
         _ => floor_y,
@@ -263,7 +286,6 @@ pub fn resolve_movement_ex(
     MovementResult { new_feet: pos, landed: on_ground, support }
 }
 
-/// Устаревшая обёртка: строит кэш внутри. Не использовать в hot-path.
 pub fn resolve_movement(
     world: &World,
     start_feet: Vec3,

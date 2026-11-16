@@ -1,5 +1,3 @@
-//! Компоненты физики: RigidBody, Collider, PhysicsMaterial.
-
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -114,9 +112,6 @@ impl Default for RigidBody {
     fn default() -> Self { Self::dynamic(1.0) }
 }
 
-/// Коллайдер. Центр совпадает с `Transform.position`.
-///
-/// `Capsule::height` — **полная высота, включая обе полусферы-крышки**.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Collider {
     Sphere { radius: f32 },
@@ -141,22 +136,6 @@ impl Collider {
         }
     }
 
-    /// Мировой AABB этого коллайдера с учётом поворота.
-    ///
-    /// Для AABB-коллайдера вычисляется **обёртывающий** AABB повёрнутого
-    /// OBB: каждая из 3 локальных полуосей умножается на `rotation`, и
-    /// берётся сумма абсолютных значений компонент. Для поворотов,
-    /// кратных 90°, это **точный** AABB. Для произвольных — слегка
-    /// завышенный (максимум в √3 раз), что безопасно для collision
-    /// (только false positives на очень острых углах).
-    ///
-    /// Для Capsule мировые концы сегмента (±Y · height/2) поворачиваются,
-    /// берётся их AABB, и к результату добавляется радиус.
-    ///
-    /// **ИЗМЕНЕНО:** раньше в `engine/collision.rs` и `physics/*` поворот
-    /// полностью игнорировался — коллайдеры стен, повёрнутых на 90°,
-    /// оказывались перпендикулярны визуальному мешу. Это был главный
-    /// источник «плохих коллизий».
     pub fn world_aabb(&self, pos: Vec3, rotation: Quat, scale: Vec3) -> (Vec3, Vec3) {
         let scale = scale.abs();
         match self {
@@ -213,4 +192,77 @@ impl PhysicsMaterial {
 
 impl Default for PhysicsMaterial {
     fn default() -> Self { Self::wood() }
+}
+
+use std::sync::{Arc, OnceLock};
+
+use crate::render::bvh::Bvh;
+
+#[derive(Clone)]
+pub struct MeshCollider {
+    pub vertices: Arc<Vec<Vec3>>,
+    pub indices: Arc<Vec<[u32; 3]>>,
+    bvh: Arc<OnceLock<Bvh>>,
+    pub walkable: bool,
+}
+
+impl MeshCollider {
+    pub fn from_mesh(vertices: Vec<Vec3>, indices: Vec<[u32; 3]>) -> Self {
+        Self {
+            vertices: Arc::new(vertices),
+            indices: Arc::new(indices),
+            bvh: Arc::new(OnceLock::new()),
+            walkable: true,
+        }
+    }
+
+    pub fn triangles(&self) -> Vec<[Vec3; 3]> {
+        let mut out = Vec::with_capacity(self.indices.len());
+        for idx in self.indices.iter() {
+            let (Some(&v0), Some(&v1), Some(&v2)) = (
+                self.vertices.get(idx[0] as usize),
+                self.vertices.get(idx[1] as usize),
+                self.vertices.get(idx[2] as usize),
+            ) else {
+                continue;
+            };
+            out.push([v0, v1, v2]);
+        }
+        out
+    }
+
+    pub fn bvh(&self) -> &Bvh {
+        self.bvh.get_or_init(|| Bvh::build(&self.triangles()))
+    }
+
+    pub fn local_aabb(&self) -> (Vec3, Vec3) {
+        if self.vertices.is_empty() {
+            return (Vec3::ZERO, Vec3::ZERO);
+        }
+        let mut mn = Vec3::splat(f32::INFINITY);
+        let mut mx = Vec3::splat(f32::NEG_INFINITY);
+        for &v in self.vertices.iter() {
+            mn = mn.min(v);
+            mx = mx.max(v);
+        }
+        (mn, mx)
+    }
+
+    pub fn world_aabb(&self, pos: Vec3, rot: glam::Quat, scale: Vec3) -> (Vec3, Vec3) {
+        let (lmin, lmax) = self.local_aabb();
+        let scale = scale.abs();
+        let mut mn = Vec3::splat(f32::INFINITY);
+        let mut mx = Vec3::splat(f32::NEG_INFINITY);
+        for &x in &[lmin.x, lmax.x] {
+            for &y in &[lmin.y, lmax.y] {
+                for &z in &[lmin.z, lmax.z] {
+                    let local = Vec3::new(x * scale.x, y * scale.y, z * scale.z);
+                    let world = rot * local + pos;
+                    mn = mn.min(world);
+                    mx = mx.max(world);
+                }
+            }
+        }
+        (mn, mx)
+    }
 }

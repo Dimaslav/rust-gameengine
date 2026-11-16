@@ -6,6 +6,7 @@ use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
 use rust_engine::ecs::{Entity, System, World};
+use rust_engine::engine::particles;
 use rust_engine::engine::{Game, Input, InputMap, Key, ShotFired, WorldLoadRequest};
 use rust_engine::game::ai::{AiAgent, AiState, AiTarget, DebugPath};
 use rust_engine::game::animation::{AnimationEventTriggered, AnimationEvents, AnimationRuntime};

@@ -1,0 +1,22 @@
+(
+    format: 1,
+    bindings: {
+        "reload_shaders": [
+            Key(F12),
+        ],
+        "toggle_grid": [
+            Key(KeyG),
+        ],
+        "toggle_culling": [
+            Key(KeyC),
+        ],
+    },
+    contexts: {
+        "toggle_culling": [
+            "editor",
+        ],
+        "toggle_grid": [
+            "editor",
+        ],
+    },
+)

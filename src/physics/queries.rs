@@ -1,32 +1,17 @@
-//! Physics queries: raycast, overlap, sweeps.
-//!
-//! Работают по компонентам `Collider` + `Transform` + `RigidBody`,
-//! а не по рендер-мешам. Это «игровая» геометрия: стены, двери, NPC,
-//! хитбоксы — всё, что должно быть невидимым для игрока, но осязаемым.
-//!
-//! Отличие от `editor::picking`:
-//!   * picking — по треугольникам меша, для клика мышью в редакторе;
-//!   * physics queries — по коллайдерам, для геймплея.
-
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
 use crate::game::components::{Parent, Transform, Visible};
 use crate::game::world_matrix;
 
-use super::components::{BodyType, Collider, RigidBody};
-
-// ============================================================
-// Фильтр
-// ============================================================
+use std::sync::Arc;
+use super::components::{BodyType, Collider, MeshCollider, RigidBody};
 
 #[derive(Debug, Clone, Copy)]
 pub struct QueryFilter {
     pub include_static: bool,
     pub include_dynamic: bool,
     pub include_kinematic: bool,
-    /// Игнорировать ли entity с `Visible(false)`.
-    /// По умолчанию true — скрытые объекты не должны ловить лучи.
     pub visible_only: bool,
 }
 
@@ -66,10 +51,6 @@ impl QueryFilter {
     }
 }
 
-// ============================================================
-// Результаты
-// ============================================================
-
 #[derive(Debug, Clone, Copy)]
 pub struct RayHit {
     pub entity: Entity,
@@ -78,21 +59,12 @@ pub struct RayHit {
     pub distance: f32,
 }
 
-// ============================================================
-// Снапшот коллайдеров (мировые позиции, с учётом Parent)
-// ============================================================
-
 struct ColliderSnapshot {
     entity: Entity,
-    collider: Collider,
-    /// Мировая позиция центра.
+    primitive: Option<Collider>,
+    mesh: Option<Arc<MeshCollider>>,
     position: Vec3,
-    /// Мировой масштаб (abs).
     scale: Vec3,
-    /// Мировой поворот. Для AABB и Capsule пока не применяется
-    /// (см. примечание в `raycast_collider`), но сохраняется,
-    /// чтобы future-proof'ить API.
-    #[allow(dead_code)]
     rotation: glam::Quat,
 }
 
@@ -102,7 +74,9 @@ fn collect(world: &World, filter: &QueryFilter) -> Vec<ColliderSnapshot> {
         if filter.visible_only
             && let Some(v) = world.get::<Visible>(e)
                 && !v.0 { continue; }
-        let Some(col) = world.get::<Collider>(e).copied() else { continue };
+        let primitive = world.get::<Collider>(e).copied();
+        let mesh = world.get::<MeshCollider>(e).cloned().map(Arc::new);
+        if primitive.is_none() && mesh.is_none() { continue; }
         let Some(t) = world.get::<Transform>(e) else { continue };
 
         let bt = world.get::<RigidBody>(e).map(|rb| rb.body_type).unwrap_or(BodyType::Static);
@@ -116,17 +90,19 @@ fn collect(world: &World, filter: &QueryFilter) -> Vec<ColliderSnapshot> {
             (t.position, t.rotation, t.scale.abs())
         };
 
-        out.push(ColliderSnapshot { entity: e, collider: col, position, scale, rotation });
+        out.push(ColliderSnapshot {
+            entity: e,
+            primitive,
+            mesh,
+            position,
+            scale,
+            rotation,
+        });
     }
     out
 }
 
-// ============================================================
-// Публичный API
-// ============================================================
-
 impl super::PhysicsWorld {
-    /// Ближайшее попадание луча. `dir` нормализуется внутри.
     pub fn raycast(
         &self,
         world: &World,
@@ -153,8 +129,6 @@ impl super::PhysicsWorld {
         best
     }
 
-    /// Все попадания, отсортированные по дистанции.
-    /// Полезно для penetration-оружия, лазеров, ricochet.
     pub fn raycast_all(
         &self,
         world: &World,
@@ -175,8 +149,6 @@ impl super::PhysicsWorld {
         hits
     }
 
-    /// Есть ли хоть что-то на пути луча. Быстрее `raycast`, потому
-    /// что не строит `RayHit` — полезно для line-of-sight.
     pub fn ray_blocked(
         &self,
         world: &World,
@@ -194,7 +166,6 @@ impl super::PhysicsWorld {
         false
     }
 
-    /// Все entity, чей коллайдер пересекается со сферой.
     pub fn overlap_sphere(
         &self,
         world: &World,
@@ -213,7 +184,6 @@ impl super::PhysicsWorld {
         out
     }
 
-    /// Все entity, чей коллайдер пересекается с AABB.
     pub fn overlap_aabb(
         &self,
         world: &World,
@@ -229,7 +199,6 @@ impl super::PhysicsWorld {
         out
     }
 
-    /// Все entity в капсуле (сегмент `a`–`b` + радиус).
     pub fn overlap_capsule(
         &self,
         world: &World,
@@ -252,19 +221,31 @@ impl super::PhysicsWorld {
     }
 }
 
-// ============================================================
-// Ray vs collider
-// ============================================================
-
 fn ray_collider(origin: Vec3, dir: Vec3, s: &ColliderSnapshot) -> Option<(f32, Vec3)> {
-    match s.collider {
+    // Проверяем primitive.
+    let mut best: Option<(f32, Vec3)> = s.primitive.and_then(|c| ray_primitive(origin, dir, &c, s));
+
+    // Проверяем mesh (если есть).
+    if let Some(m) = &s.mesh
+        && let Some((t, n)) = ray_mesh(origin, dir, m, s)
+        && best.is_none_or(|(bt, _)| t < bt)
+    {
+        best = Some((t, n));
+    }
+    best
+}
+
+fn ray_primitive(
+    origin: Vec3,
+    dir: Vec3,
+    col: &Collider,
+    s: &ColliderSnapshot,
+) -> Option<(f32, Vec3)> {
+    match *col {
         Collider::Sphere { radius } => {
             ray_sphere(origin, dir, s.position, radius * s.scale.max_element())
         }
         Collider::Aabb { half_extents } => {
-            // ИЗМЕНЕНО (rotation fix): трансформируем луч в локальное
-            // пространство OBB, делаем обычный ray-AABB тест в нём,
-            // и возвращаем нормаль обратно в world space.
             let h = half_extents * s.scale;
             let inv_rot = s.rotation.inverse();
             let local_o = inv_rot * (origin - s.position);
@@ -274,8 +255,6 @@ fn ray_collider(origin: Vec3, dir: Vec3, s: &ColliderSnapshot) -> Option<(f32, V
             Some((t, world_n))
         }
         Collider::Capsule { radius, height } => {
-            // ИЗМЕНЕНО (rotation fix): сегмент капсулы теперь поворачивается
-            // вместе с Transform.rotation.
             let r = radius * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
             let up = s.rotation * Vec3::new(0.0, hy, 0.0);
@@ -287,6 +266,42 @@ fn ray_collider(origin: Vec3, dir: Vec3, s: &ColliderSnapshot) -> Option<(f32, V
             )
         }
     }
+}
+
+fn ray_mesh(
+    origin: Vec3,
+    dir: Vec3,
+    m: &MeshCollider,
+    s: &ColliderSnapshot,
+) -> Option<(f32, Vec3)> {
+    let scale_inv = Vec3::new(
+        if s.scale.x.abs() > 1e-6 { 1.0 / s.scale.x } else { 1.0 },
+        if s.scale.y.abs() > 1e-6 { 1.0 / s.scale.y } else { 1.0 },
+        if s.scale.z.abs() > 1e-6 { 1.0 / s.scale.z } else { 1.0 },
+    );
+    let inv_rot = s.rotation.inverse();
+    let local_o = (origin - s.position) * scale_inv;
+    let local_o = inv_rot * local_o;
+    let local_d_unnorm = inv_rot * (dir * scale_inv);
+    let local_d_len = local_d_unnorm.length();
+    if local_d_len < 1e-12 { return None; }
+    let local_d = local_d_unnorm / local_d_len;
+    let triangles = m.triangles();
+    if triangles.is_empty() { return None; }
+    let bvh = m.bvh();
+    let (tri_idx, t_local) = bvh.raycast(local_o, local_d, f32::INFINITY, &triangles)?;
+    let tri = &triangles[tri_idx as usize];
+    let e1 = tri[1] - tri[0];
+    let e2 = tri[2] - tri[0];
+    let n_local = e1.cross(e2).normalize_or(Vec3::Y);
+    let n_scaled = Vec3::new(
+        n_local.x / s.scale.x.max(1e-6),
+        n_local.y / s.scale.y.max(1e-6),
+        n_local.z / s.scale.z.max(1e-6),
+    );
+    let n_world = (s.rotation * n_scaled).normalize_or(Vec3::Y);
+    let t_world = t_local / local_d_len;
+    Some((t_world, n_world))
 }
 
 fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<(f32, Vec3)> {
@@ -330,14 +345,11 @@ fn ray_aabb(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option<(f32, Vec
         }
     }
     if tmin <= 1e-6 {
-        // Origin внутри AABB — «попали сразу».
         return Some((0.0, -dir));
     }
     Some((tmin, normal))
 }
 
-/// Ray-vs-capsule (Iraklis 2012). Возвращает (t, normal) ближайшего
-/// положительного пересечения.
 fn ray_capsule(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, radius: f32) -> Option<(f32, Vec3)> {
     let ba = b - a;
     let oa = origin - a;
@@ -367,12 +379,9 @@ fn ray_capsule(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, radius: f32) -> Option
         }
     }
 
-    // Сферические крышки — берём ближайшее из двух.
     let mut best: Option<(f32, Vec3)> = None;
     for (center, sgn) in [(a, -1.0f32), (b, 1.0)] {
         if let Some((t, n)) = ray_sphere(origin, dir, center, radius) {
-            // Отсекаем «внутренние» попадания: крышка валидна,
-            // только если точка за соответствующим концом.
             let pt = origin + dir * t;
             let along = (pt - a).dot(ba) / baba.max(1e-12);
             let on_cap = if sgn < 0.0 { along <= 0.0 } else { along >= 1.0 };
@@ -385,25 +394,43 @@ fn ray_capsule(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, radius: f32) -> Option
     best
 }
 
-// ============================================================
-// Overlap helpers
-// ============================================================
-
 fn world_aabb(s: &ColliderSnapshot) -> (Vec3, Vec3) {
-    // ИЗМЕНЕНО (rotation fix): используем Collider::world_aabb,
-    // который корректно учитывает rotation.
-    s.collider.world_aabb(s.position, s.rotation, s.scale)
+    let mut mn = Vec3::splat(f32::INFINITY);
+    let mut mx = Vec3::splat(f32::NEG_INFINITY);
+    if let Some(col) = &s.primitive {
+        let (a, b) = col.world_aabb(s.position, s.rotation, s.scale);
+        mn = mn.min(a);
+        mx = mx.max(b);
+    }
+    if let Some(m) = &s.mesh {
+        let (a, b) = m.world_aabb(s.position, s.rotation, s.scale);
+        mn = mn.min(a);
+        mx = mx.max(b);
+    }
+    (mn, mx)
 }
 
 fn sphere_hits(center: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
-    match s.collider {
+    if let Some(col) = &s.primitive {
+        if sphere_hits_primitive(center, radius, col, s) {
+            return true;
+        }
+    }
+    if let Some(m) = &s.mesh {
+        if sphere_hits_mesh(center, radius, m, s) {
+            return true;
+        }
+    }
+    false
+}
+
+fn sphere_hits_primitive(center: Vec3, radius: f32, col: &Collider, s: &ColliderSnapshot) -> bool {
+    match *col {
         Collider::Sphere { radius: r } => {
             let rr = r * s.scale.max_element();
             (center - s.position).length_squared() < (radius + rr) * (radius + rr)
         }
         Collider::Aabb { half_extents } => {
-            // ИЗМЕНЕНО (rotation fix): трансформируем центр сферы
-            // в локальное пространство OBB.
             let h = half_extents * s.scale;
             let inv_rot = s.rotation.inverse();
             let local_center = inv_rot * (center - s.position);
@@ -411,7 +438,6 @@ fn sphere_hits(center: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
             (local_center - p).length_squared() < radius * radius
         }
         Collider::Capsule { radius: r, height } => {
-            // ИЗМЕНЕНО (rotation fix): сегмент капсулы повёрнут.
             let rr = r * s.scale.max_element();
             let hy = height * s.scale.y * 0.5;
             let up = s.rotation * Vec3::new(0.0, hy, 0.0);
@@ -423,10 +449,71 @@ fn sphere_hits(center: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
     }
 }
 
+
+fn sphere_hits_mesh(
+    center: Vec3,
+    radius: f32,
+    m: &MeshCollider,
+    s: &ColliderSnapshot,
+) -> bool {
+    let (wmn, wmx) = m.world_aabb(s.position, s.rotation, s.scale);
+    if center.x + radius < wmn.x || center.x - radius > wmx.x
+        || center.y + radius < wmn.y || center.y - radius > wmx.y
+        || center.z + radius < wmn.z || center.z - radius > wmx.z
+    {
+        return false;
+    }
+
+    let scale_inv = Vec3::new(
+        if s.scale.x.abs() > 1e-6 { 1.0 / s.scale.x } else { 1.0 },
+        if s.scale.y.abs() > 1e-6 { 1.0 / s.scale.y } else { 1.0 },
+        if s.scale.z.abs() > 1e-6 { 1.0 / s.scale.z } else { 1.0 },
+    );
+    let inv_rot = s.rotation.inverse();
+    let local_c = inv_rot * ((center - s.position) * scale_inv);
+    let scale_max = s.scale.max_element();
+    let local_r = radius / scale_max.max(1e-6);
+    let triangles = m.triangles();
+    let bvh = m.bvh();
+    for tri in &triangles {
+        if sphere_triangle_hit(local_c, local_r, tri[0], tri[1], tri[2]) {
+            return true;
+        }
+    }
+    let _ = bvh;
+    false
+}
+
+fn sphere_triangle_hit(center: Vec3, radius: f32, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    let r2 = radius * radius;
+    if (center - a).length_squared() < r2 { return true; }
+    if (center - b).length_squared() < r2 { return true; }
+    if (center - c).length_squared() < r2 { return true; }
+    let e1 = b - a;
+    let e2 = c - a;
+    let n = e1.cross(e2);
+    let n_len2 = n.length_squared();
+    if n_len2 < 1e-12 { return false; }
+    let dist = (center - a).dot(n);
+    let d2 = dist * dist / n_len2;
+    if d2 > r2 { return false; }
+    let proj = center - n * (dist / n_len2);
+    let v0 = e1;
+    let v1 = e2;
+    let v2 = proj - a;
+    let d00 = v0.dot(v0);
+    let d01 = v0.dot(v1);
+    let d11 = v1.dot(v1);
+    let d20 = v2.dot(v0);
+    let d21 = v2.dot(v1);
+    let denom = d00 * d11 - d01 * d01;
+    if denom.abs() < 1e-12 { return false; }
+    let u = (d11 * d20 - d01 * d21) / denom;
+    let v = (d00 * d21 - d01 * d20) / denom;
+    u >= 0.0 && v >= 0.0 && u + v <= 1.0
+}
+
 fn capsule_hits(a: Vec3, b: Vec3, radius: f32, s: &ColliderSnapshot) -> bool {
-    // Segment-vs-collider — через проверку нескольких точек вдоль
-    // сегмента + радиус. Для геймплея этого достаточно; при росте
-    // сцены можно перейти на GJK.
     let samples = 8;
     for i in 0..=samples {
         let t = i as f32 / samples as f32;
