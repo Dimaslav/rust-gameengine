@@ -7,6 +7,7 @@
 pub mod app_state;
 pub mod assets;
 pub mod ecs;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod engine;
 pub mod game;

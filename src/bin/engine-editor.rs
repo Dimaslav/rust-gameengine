@@ -1,3 +1,5 @@
+#![cfg(feature = "editor")]
+
 use rust_engine::engine::crash::install_crash_handler;
 use rust_engine::engine::run;
 use rust_engine::engine::{Game, Input};

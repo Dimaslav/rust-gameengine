@@ -1,7 +1,7 @@
 [workspace]
 members = [".", "samples/fallen-citadel"]
 default-members = ["."]
-exclude = ["projects"]
+exclude = ["projects", "templates"]
 resolver = "2"
 
 [workspace.package]
@@ -27,22 +27,37 @@ default-run = "engine-editor"
 name = "rust_engine"
 path = "src/lib.rs"
 
-# Редактор движка (пока пустой, запускает пустую сцену)
+# ---------------------------------------------------------------------------
+# Feature flags: runtime (default для движка) vs editor.
+# `editor` включает egui-стек, rfd и hot-reload.
+# Shipping-билд игр пользователя собирается с --no-default-features.
+# ---------------------------------------------------------------------------
+[features]
+default = ["editor"]
+editor = [
+    "dep:egui",
+    "dep:egui-wgpu",
+    "dep:egui-winit",
+    "dep:egui_extras",
+    "dep:rfd",
+    "hot-reload",
+]
+hot-reload = []
+
+# Редактор: требует `editor`.
 [[bin]]
 name = "engine-editor"
 path = "src/bin/engine-editor.rs"
+required-features = ["editor"]
 
+# CLI и packer — без редактора.
 [[bin]]
 name = "engine-cli"
 path = "src/bin/engine-cli.rs"
 
-# Упаковщик ассетов
 [[bin]]
 name = "packer"
 path = "src/bin/packer.rs"
-
-# Бинарник rust-engine (src/main.rs) мы УДАЛИЛИ, 
-# так как игра теперь запускается из samples/fallen-citadel.
 
 [dependencies]
 # --- Window / scripting ---
@@ -80,20 +95,18 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 ron = "0.12.2"
 base64 = "0.23.1"
 
-# --- UI (editor) ---
-egui = { version = "0.37.0", features = ["default_fonts"] }
-egui-wgpu = "0.37.0"
-egui-winit = "0.37.0"
-egui_extras = { version = "0.37.0", features = ["image", "svg"] }
-
 # --- Audio ---
 rodio = "0.23.0"
 
-# --- Native file dialog ---
-rfd = "0.18.0"
-
 # --- windows version pin for wgpu-hal / gpu-allocator ---
 windows = "0.62.2"
+
+# --- Editor (ВСЁ optional) ---
+egui        = { version = "0.37.0", features = ["default_fonts"], optional = true }
+egui-wgpu   = { version = "0.37.0", optional = true }
+egui-winit  = { version = "0.37.0", optional = true }
+egui_extras = { version = "0.37.0", features = ["image", "svg"], optional = true }
+rfd         = { version = "0.18.0", optional = true }
 
 [profile.dev]
 opt-level = 0
@@ -114,5 +127,6 @@ strip = true
 inherits = "release"
 lto = false
 codegen-units = 16
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

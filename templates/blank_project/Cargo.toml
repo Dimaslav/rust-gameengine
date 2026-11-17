@@ -1,0 +1,11 @@
+[package]
+name = "__PROJECT_NAME__"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["editor"]
+editor = ["rust-engine/editor"]
+
+[dependencies]
+rust-engine = { path = "../../", default-features = false }

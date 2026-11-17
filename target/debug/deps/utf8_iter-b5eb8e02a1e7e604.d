@@ -1,0 +1,11 @@
+C:\Users\shutk\Desktop\soft\rust-engine\target\debug\deps\utf8_iter-b5eb8e02a1e7e604.d: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\basic.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\handler.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\indices.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\macros.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\report.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\str.rs
+
+C:\Users\shutk\Desktop\soft\rust-engine\target\debug\deps\libutf8_iter-b5eb8e02a1e7e604.rmeta: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\basic.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\handler.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\indices.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\macros.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\report.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\str.rs
+
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\lib.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\basic.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\handler.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\indices.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\macros.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\report.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\utf8_iter-1.1.0\src\str.rs:

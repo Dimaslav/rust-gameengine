@@ -1,11 +1,3 @@
-//! AssetDatabase: сканирует `assets/`, строит индекс, следит за
-//! изменениями, обеспечивает lookup по ID и по пути.
-//!
-//! ИЗМЕНЕНО: `hash_file` хеширует целиком файлы ≤ 256 KB. Раньше всегда
-//! брались только head/tail-4KB + размер — hot-reload не замечал правки
-//! в середине `.ron`-файла (а именно их правят чаще всего). Для больших
-//! файлов (текстуры, модели) head/tail стратегия сохранена.
-
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom};
@@ -24,8 +16,6 @@ pub struct AssetDatabase {
 }
 
 const HASH_CHUNK: usize = 4096;
-/// Файлы до этого размера хешируются целиком (ловим правки в середине).
-/// Файлы больше — только head/tail (память O(1) от размера).
 const FULL_HASH_THRESHOLD: u64 = 256 * 1024;
 
 impl AssetDatabase {
@@ -47,7 +37,6 @@ impl AssetDatabase {
     }
 
     pub fn root(&self) -> &Path { &self.root }
-
     pub fn rescan(&mut self) {
         self.by_id.clear();
         self.by_path.clear();
@@ -65,17 +54,13 @@ impl AssetDatabase {
 
     fn scan_dir(&mut self, dir: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else { return; };
-
         for entry in entries.flatten() {
             let path = entry.path();
-
             if path.is_dir() {
                 self.scan_dir(&path);
                 continue;
             }
-
             if path.to_string_lossy().ends_with(".meta") { continue; }
-
             let Some(kind) = Self::kind_of(&path) else { continue; };
             self.register(&path, kind);
         }
@@ -85,7 +70,6 @@ impl AssetDatabase {
         let ext = path.extension()?.to_str()?.to_lowercase();
         let stem = path.file_stem()?.to_str()?.to_lowercase();
 
-        // Имя родительской папки (например, "items", "quests", "dialogs").
         let parent_dir = path
             .parent()
             .and_then(|p| p.file_name())
@@ -101,7 +85,6 @@ impl AssetDatabase {
             "wgsl" | "glsl" | "vert" | "frag" => AssetKind::Shader,
             "rs" | "rhai" | "lua" => AssetKind::Script,
             "ron" => {
-                // Приоритет 1: явный суффикс (foo.scene.ron, foo.prefab.ron, ...).
                 if stem.ends_with(".scene") {
                     AssetKind::Scene
                 } else if stem.ends_with(".prefab") {
@@ -111,7 +94,6 @@ impl AssetDatabase {
                 } else if stem.ends_with(".material") {
                     AssetKind::Material
                 } else {
-                    // Приоритет 2: родительская папка.
                     match parent_dir.as_str() {
                         "items" => AssetKind::Item,
                         "weapons" => AssetKind::Weapon,
@@ -125,7 +107,6 @@ impl AssetDatabase {
                         "prefabs" => AssetKind::Prefab,
                         "materials" => AssetKind::Material,
                         "animations" => AssetKind::Animation,
-                        // Fallback: generic `.ron` вне известных папок.
                         _ => AssetKind::Data,
                     }
                 }
@@ -136,7 +117,6 @@ impl AssetDatabase {
 
     fn register(&mut self, path: &Path, kind: AssetKind) -> AssetId {
         let meta_path = Self::meta_path_for(path);
-
         let (id, import_settings, dependencies) = match std::fs::read_to_string(&meta_path) {
             Ok(text) => match ron::from_str::<AssetMetaFile>(&text) {
                 Ok(f) => (f.id, f.import_settings, f.dependencies),
@@ -228,17 +208,6 @@ impl AssetDatabase {
         path.with_file_name(format!("{}.meta", name))
     }
 
-    /// Хэш содержимого файла.
-    ///
-    /// Стратегия:
-    ///   * `len ≤ FULL_HASH_THRESHOLD` (256 KB) — читаем весь файл.
-    ///     Маленькие файлы — это `.ron`, `.toml`, `.json`, мелкие текстуры.
-    ///     Их правят **в середине** (правка одного числа в сцене), и
-    ///     head/tail-хеш эту правку не увидит. Цена — O(size), но size
-    ///     ограничен 256 KB.
-    ///   * `len > FULL_HASH_THRESHOLD` — head+tail по 4 KB + размер.
-    ///     Для больших `.exr`/`.glb` это спасает от чтения сотен MB в RAM
-    ///     на каждый скан (`detect_changes` бежит раз в 0.75 с).
     fn hash_file(path: &Path) -> std::io::Result<u64> {
         let mut f = std::fs::File::open(path)?;
         let len = f.metadata()?.len();
@@ -263,10 +232,6 @@ impl AssetDatabase {
         Ok(h.finish())
     }
 
-    // ============================================================
-    // Lookup
-    // ============================================================
-
     pub fn get(&self, id: AssetId) -> Option<&AssetMeta> {
         self.by_id.get(&id)
     }
@@ -286,10 +251,6 @@ impl AssetDatabase {
     pub fn path_of(&self, id: AssetId) -> Option<&Path> {
         self.by_id.get(&id).map(|m| m.path.as_path())
     }
-
-    // ============================================================
-    // Итерация
-    // ============================================================
 
     pub fn iter(&self) -> impl Iterator<Item = &AssetMeta> {
         self.by_id.values()

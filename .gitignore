@@ -1,51 +1,29 @@
-# ============================================================
-# RUST ENGINE 3D — .gitignore
-# ============================================================
-#
-# Принципы:
-#   * Конфиги проектов (project.ron, scene.ron, settings.ron,
-#     input.ron, editor.ron) — это исходники, они КОММИТЯТСЯ.
-#   * `assets/**` и `assets/**/*.meta` — КОММИТЯТСЯ (в т.ч. .meta,
-#     потому что AssetId должен быть стабильным между машинами).
-#   * Артефакты сборки (`target/`, `dist/`, `*.pak`) — игнорируются.
-#   * Пользовательские данные (`saves/`, `crash.log`) — игнорируются.
-
-# --- Rust build artifacts ---
-/target/
-**/target/
+templates/*/target/
+templates/*/Cargo.lock
 **/*.rs.bk
 *.pdb
 
-# --- Game distribution artifacts ---
 /dist/
 *.pak
 
-# --- Пользовательские данные ---
-# Корень движка.
 /saves/
-# Проекты (шаблон создаёт свой .gitignore в projects/<name>/, но
-# на случай, если проект создан вручную).
+
 projects/*/saves/
-# Сэмплы.
 samples/*/saves/
 
-# Логи.
 crash.log
 build.log
 build-release.log
 
-# --- Локальные отчёты линтера/тестов (скретч, не артефакты) ---
 clippy_baseline.txt
 tests_baseline.txt
 clippy_after_fix.txt
 tests_after.txt
 
-# --- IDE ---
 .vscode/
 .idea/
 *.iml
 .claude/
 
-# --- OS ---
 Thumbs.db
 .DS_Store

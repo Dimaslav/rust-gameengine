@@ -1,0 +1,11 @@
+C:\Users\shutk\Desktop\soft\rust-engine\target\debug\deps\arrayvec-0a28e33c5b34ef7e.d: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec_impl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\array_string.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\char.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\errors.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\utils.rs
+
+C:\Users\shutk\Desktop\soft\rust-engine\target\debug\deps\libarrayvec-0a28e33c5b34ef7e.rmeta: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec_impl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\array_string.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\char.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\errors.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\utils.rs
+
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\lib.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec_impl.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\array_string.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\char.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\errors.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\utils.rs:

@@ -3,9 +3,13 @@ name = "fallen-citadel"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["editor"]
+editor = ["rust-engine/editor"]
+
 [dependencies]
-# Ссылка на наш движок (из папки samples/fallen-citadel на два уровня вверх)
-rust-engine = { path = "../../" }
+# Движок. Runtime — по умолчанию, editor — через feature выше.
+rust-engine = { path = "../../", default-features = false }
 
 # Зависимости, которые нужны самой игре
 glam = "0.34.2"

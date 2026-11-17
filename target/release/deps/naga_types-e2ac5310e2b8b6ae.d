@@ -1,0 +1,11 @@
+C:\Users\shutk\Desktop\soft\rust-engine\target\release\deps\naga_types-e2ac5310e2b8b6ae.d: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\glsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\hlsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\msl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\spv.rs
+
+C:\Users\shutk\Desktop\soft\rust-engine\target\release\deps\libnaga_types-e2ac5310e2b8b6ae.rlib: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\glsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\hlsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\msl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\spv.rs
+
+C:\Users\shutk\Desktop\soft\rust-engine\target\release\deps\libnaga_types-e2ac5310e2b8b6ae.rmeta: C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\lib.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\glsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\hlsl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\msl.rs C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\spv.rs
+
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\lib.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\glsl.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\hlsl.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\msl.rs:
+C:\Users\shutk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\naga-types-30.0.2\src\spv.rs:

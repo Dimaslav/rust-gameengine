@@ -1,0 +1,6 @@
+(
+    format: 1,
+    name: "__PROJECT_NAME__",
+    start_scene: "scene.ron",
+    asset_root: "assets",
+)

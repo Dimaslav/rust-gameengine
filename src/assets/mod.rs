@@ -1,12 +1,6 @@
-//! Asset pipeline движка.
-//!
-//! * `AssetId` — стабильный UUID ассета.
-//! * `AssetMeta` — данные `.meta`-файла рядом с ассетом.
-//! * `AssetDatabase` — сканирует `assets/`, следит за изменениями.
-//! * `HotReload` — polling-watcher, перезагружает текстуры при
-//!   изменении файла на диске.
-
 pub mod database;
+pub mod demo;
+#[cfg(feature = "hot-reload")]
 pub mod hotreload;
 pub mod id;
 pub mod meta;
