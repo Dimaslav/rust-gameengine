@@ -1,6 +1,7 @@
 use glam::Vec3;
 
 use crate::ecs::{Entity, World};
+use crate::game::components::{CharacterConfig, CharacterController};
 use crate::physics::Collider;
 use crate::render::terrain::Heightmap;
 
@@ -297,4 +298,296 @@ pub fn resolve_movement(
     cache.build(world);
     let r = resolve_movement_ex(world, &cache, start_feet, delta, cap, floor_y, 0.0, None);
     (r.new_feet, r.landed, r.support.map(|s| s.entity))
+}
+
+pub struct CharacterInput {
+    pub target_horizontal_velocity: Vec3,
+    pub jump_pressed: bool,
+    pub crouching: bool,
+    pub dt: f32,
+}
+
+pub struct CharacterMoveResult {
+    pub new_feet: Vec3,
+    pub new_eye: Vec3,
+    pub on_ground: bool,
+    pub hit_ceiling: bool,
+    pub pushed_bodies: u32,
+}
+
+pub fn move_character(
+    world: &mut World,
+    cache: &ColliderCache,
+    controller: &mut CharacterController,
+    config: &CharacterConfig,
+    current_feet: Vec3,
+    input: &CharacterInput,
+    terrain: Option<&crate::render::terrain::Heightmap>,
+) -> CharacterMoveResult {
+    // === 0. validate config (idempotent, дёшево) ===
+    let mut config = *config;
+    config.validate();
+
+    let dt = input.dt.clamp(1e-4, 0.1);
+
+    // === 1. Coyote / jump buffer ===
+    if controller.was_on_ground {
+        controller.coyote_timer = config.coyote_time;
+    } else {
+        controller.coyote_timer = (controller.coyote_timer - dt).max(0.0);
+    }
+    if input.jump_pressed {
+        controller.jump_buffer_timer = config.jump_buffer_time;
+    } else {
+        controller.jump_buffer_timer = (controller.jump_buffer_timer - dt).max(0.0);
+    }
+
+    // === 2. Crouch: плавная интерполяция eye_height ===
+    controller.crouching = input.crouching;
+    let target_eye_h = if controller.crouching {
+        config.crouch_height
+    } else {
+        config.eye_height
+    };
+    let lerp = (dt * 10.0).clamp(0.0, 1.0);
+    controller.current_eye_height +=
+        (target_eye_h - controller.current_eye_height) * lerp;
+
+    // === 3. Сглаживание horizontal velocity ===
+    let target_h = Vec3::new(
+        input.target_horizontal_velocity.x,
+        0.0,
+        input.target_horizontal_velocity.z,
+    );
+    let tau = if controller.on_ground {
+        config.ground_accel_tau
+    } else {
+        config.air_accel_tau
+    };
+    let alpha = if tau > 1e-4 {
+        1.0 - (-dt / tau).exp()
+    } else {
+        1.0
+    };
+    controller.horizontal_velocity += (target_h - controller.horizontal_velocity) * alpha;
+
+    // === 4. Jump ===
+    let can_jump = controller.jump_buffer_timer > 0.0
+        && controller.coyote_timer > 0.0
+        && !controller.crouching;
+    let mut did_jump = false;
+    if can_jump {
+        controller.vertical_velocity = config.jump_speed;
+        controller.coyote_timer = 0.0;
+        controller.jump_buffer_timer = 0.0;
+        controller.on_ground = false;
+        did_jump = true;
+    }
+
+    // === 5. Gravity ===
+    controller.vertical_velocity -= config.gravity * dt;
+
+    // === 6. Slope slide ===
+    if controller.on_ground
+        && controller.ground_normal.y < config.slope_walk_limit_cos
+    {
+        let n = controller.ground_normal;
+        let g = Vec3::new(0.0, -config.gravity, 0.0);
+        let tangent = g - n * g.dot(n);
+        let steepness = ((config.slope_walk_limit_cos - n.y)
+            / config.slope_walk_limit_cos.max(1e-4))
+            .clamp(0.0, 1.0);
+        let slide = tangent.normalize_or_zero()
+            * config.slope_slide_speed
+            * steepness;
+        controller.horizontal_velocity += slide * dt;
+    }
+
+    // === 7. Total delta ===
+    let horizontal = controller.horizontal_velocity;
+    let dy = controller.vertical_velocity * dt;
+    let delta = horizontal * dt + Vec3::new(0.0, dy, 0.0);
+
+    // === 8. Resolve movement ===
+    let pcap = PlayerCapsule {
+        radius: config.radius,
+        height: config.height,
+    };
+    let result = resolve_movement_ex(
+        &*world,
+        cache,
+        current_feet,
+        delta,
+        &pcap,
+        config.floor_y,
+        config.step_down_max,
+        terrain,
+    );
+
+    let mut new_feet = result.new_feet;
+    let mut on_ground = result.landed;
+
+    // === 9. Snap to ground ===
+    if config.snap_to_ground
+        && !on_ground
+        && controller.vertical_velocity <= 0.0
+        && (new_feet.y - current_feet.y).abs() < config.step_down_max
+    {
+        let probe_delta = Vec3::new(0.0, -config.step_down_max, 0.0);
+        let probe = resolve_movement_ex(
+            &*world,
+            cache,
+            new_feet,
+            probe_delta,
+            &pcap,
+            config.floor_y,
+            config.step_down_max,
+            terrain,
+        );
+        if probe.landed
+            && (new_feet.y - probe.new_feet.y).abs() < config.step_down_max
+        {
+            new_feet = probe.new_feet;
+            on_ground = true;
+        }
+    }
+
+    // === 10. Ground normal ===
+    let ground_normal = if on_ground {
+        result.support.map(|s| s.normal).unwrap_or(Vec3::Y)
+    } else {
+        Vec3::Y
+    };
+
+    // === 11. Update runtime ===
+    controller.was_on_ground = controller.on_ground;
+    controller.on_ground = on_ground;
+    controller.ground_normal = ground_normal;
+
+    // === 12. Vertical velocity resolution ===
+    let hit_ceiling = dy > 0.0 && (new_feet.y - current_feet.y).abs() < 1e-4;
+    if did_jump {
+        controller.on_ground = false;
+    } else if on_ground && controller.vertical_velocity <= 0.0 {
+        controller.vertical_velocity = 0.0;
+    } else if hit_ceiling {
+        controller.vertical_velocity = 0.0;
+    }
+
+    // === 13. Head-bob ===
+    if config.bob_enabled && on_ground {
+        let moved = ((new_feet.x - current_feet.x).powi(2)
+            + (new_feet.z - current_feet.z).powi(2))
+        .sqrt();
+        controller.bob_distance += moved;
+        let bob_target = controller.bob_distance.sin() * config.bob_amplitude;
+        controller.bob_current = controller.bob_current * 0.85 + bob_target * 0.15;
+    } else {
+        controller.bob_current *= 0.85;
+    }
+
+    // === 14. Push dynamic bodies ===
+    let pushed = push_dynamic_bodies(
+        world,
+        config.radius,
+        config.height,
+        new_feet,
+        controller.horizontal_velocity,
+        config.push_force,
+        dt,
+    );
+
+    // === 15. Eye position ===
+    let new_eye = new_feet
+        + Vec3::Y * (controller.current_eye_height + controller.bob_current);
+
+    CharacterMoveResult {
+        new_feet,
+        new_eye,
+        on_ground,
+        hit_ceiling,
+        pushed_bodies: pushed,
+    }
+}
+
+fn push_dynamic_bodies(
+    world: &mut World,
+    radius: f32,
+    height: f32,
+    feet: Vec3,
+    velocity: Vec3,
+    force: f32,
+    dt: f32,
+) -> u32 {
+    if force <= 0.0 {
+        return 0;
+    }
+    let player_horizontal = Vec3::new(velocity.x, 0.0, velocity.z);
+    let speed = player_horizontal.length();
+    if speed < 0.1 {
+        return 0;
+    }
+
+    let player_center = feet + Vec3::Y * (height * 0.5);
+    let query_r = radius + 1.0;
+
+    let candidates: Vec<Entity> = world
+        .query::<crate::physics::RigidBody>()
+        .filter(|(_, rb)| rb.body_type == crate::physics::BodyType::Dynamic)
+        .map(|(e, _)| e)
+        .collect();
+
+    let mut count = 0u32;
+    for e in candidates {
+        let Some(t) = world.get::<crate::game::components::Transform>(e) else {
+            continue;
+        };
+        let to_player = t.position - player_center;
+        let to_player_h = Vec3::new(to_player.x, 0.0, to_player.z);
+        let dist = to_player_h.length();
+        if dist > query_r || dist < 1e-4 {
+            continue;
+        }
+        let dir = to_player_h / dist;
+        if dir.dot(player_horizontal) < 0.1 {
+            continue;
+        }
+        if let Some(rb) = world.get_mut::<crate::physics::RigidBody>(e) {
+            let mass = rb.mass.max(0.1);
+            let impulse = dir * force * mass * speed * dt;
+            rb.velocity += impulse / mass;
+            rb.wake();
+            count += 1;
+        }
+    }
+    count
+}
+
+pub fn character_config_from_play(
+    play: &crate::editor::play::PlayState,
+) -> CharacterConfig {
+    CharacterConfig {
+        radius: play.player_radius,
+        height: play.player_height,
+        eye_height: play.eye_height,
+        crouch_height: play.crouch_height,
+        walk_speed: play.walk_speed,
+        run_speed: play.run_speed,
+        crouch_speed_mult: play.crouch_speed_mult,
+        jump_speed: play.jump_speed,
+        gravity: play.gravity,
+        slope_walk_limit_cos: play.slope_walk_limit_cos,
+        slope_slide_speed: play.slope_slide_speed,
+        step_up_max: 0.3,
+        step_down_max: play.step_down_max,
+        snap_to_ground: true,
+        push_force: play.push_strength * 5.0,
+        ground_accel_tau: play.ground_accel_tau,
+        air_accel_tau: play.air_accel_tau,
+        coyote_time: play.coyote_time,
+        jump_buffer_time: play.jump_buffer_time,
+        bob_enabled: play.bob_enabled,
+        bob_amplitude: play.bob_amplitude,
+        floor_y: play.floor_y,
+    }
 }

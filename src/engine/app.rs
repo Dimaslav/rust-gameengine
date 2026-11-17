@@ -41,7 +41,7 @@ use crate::scripting::{ScriptCommand, ScriptSystem};
 
 use super::ai_system::AiSystem;
 use super::audio::AudioSystem;
-use super::collision::{self, PlayerCapsule};
+use super::collision;
 use super::collision_cache::ColliderCache;
 use super::input::Input;
 use super::particles::{self, Particle, MAX_PARTICLES};
@@ -461,7 +461,6 @@ impl<G: Game> App<G> {
         self.set_cursor_state(want_grab);
     }
 
-    /// Выйти из Play, восстановив snapshot и сбросив runtime-состояние.
     fn exit_play(&mut self) {
         if !self.editor.state.play.active {
             return;
@@ -475,21 +474,13 @@ impl<G: Game> App<G> {
         play.paused = false;
         self.time.paused = false;
         self.input.play_mode = false;
-        play.vertical_velocity = 0.0;
-        play.on_ground = true;
-        play.bob_distance = 0.0;
-        play.bob_current = 0.0;
+        let config = crate::engine::collision::character_config_from_play(play);
+        play.controller = crate::game::components::CharacterController::new(&config);
         play.health = play.max_health;
         play.ammo = play.max_ammo;
         play.fire_cooldown = 0.0;
         play.interact_cooldown = 0.0;
         play.highlight = None;
-        play.crouching = false;
-        play.sprint_toggled = false;
-        play.current_eye_height = play.eye_height;
-        play.horizontal_velocity = Vec3::ZERO;
-        play.coyote_timer = 0.0;
-        play.jump_buffer_timer = 0.0;
         self.particles.clear();
         self.projectiles.clear();
         self.footstep_timer = 0.0;
@@ -829,64 +820,43 @@ impl<G: Game> App<G> {
             log::info!("Player camera mode: {:?}", next);
         }
 
-        if ctrl.crouch_toggle {
+        // === C1.3: input handling → CharacterInput ===
+        let crouching = if ctrl.crouch_toggle {
             if self.input.key_pressed(KeyCode::ControlLeft)
                 || self.input.key_pressed(KeyCode::ControlRight)
             {
-                self.editor.state.play.crouching = !self.editor.state.play.crouching;
+                self.editor.state.play.controller.crouching =
+                    !self.editor.state.play.controller.crouching;
             }
+            self.editor.state.play.controller.crouching
         } else {
-            self.editor.state.play.crouching = self.input.key_down(KeyCode::ControlLeft)
+            let held = self.input.key_down(KeyCode::ControlLeft)
                 || self.input.key_down(KeyCode::ControlRight);
-        }
-        let crouching = self.editor.state.play.crouching;
+            self.editor.state.play.controller.crouching = held;
+            held
+        };
 
         let running = if ctrl.sprint_toggle {
             if self.input.key_pressed(KeyCode::ShiftLeft) {
-                self.editor.state.play.sprint_toggled =
-                    !self.editor.state.play.sprint_toggled;
+                self.editor.state.play.controller.sprint_toggled =
+                    !self.editor.state.play.controller.sprint_toggled;
             }
-            self.editor.state.play.sprint_toggled && !crouching
+            self.editor.state.play.controller.sprint_toggled && !crouching
         } else {
             self.input.key_down(KeyCode::ShiftLeft) && !crouching
         };
 
-        {
-            let play = &mut self.editor.state.play;
-            let target = if crouching {
-                play.crouch_height
-            } else {
-                play.eye_height
-            };
-            let lerp = (dt * 10.0).clamp(0.0, 1.0);
-            play.current_eye_height += (target - play.current_eye_height) * lerp;
-        }
-        let eye_height = self.editor.state.play.current_eye_height;
-        let player_radius = self.editor.state.play.player_radius;
-        let player_height = if crouching {
-            (self.editor.state.play.crouch_height + 0.15).max(2.0 * player_radius + 0.05)
-        } else {
-            self.editor.state.play.player_height
-        };
-        let walk_speed = self.editor.state.play.walk_speed;
-        let run_speed = self.editor.state.play.run_speed;
-        let jump_speed = self.editor.state.play.jump_speed;
-        let gravity = self.editor.state.play.gravity;
-        let floor_y = self.editor.state.play.floor_y;
-        let bob_enabled = self.editor.state.play.bob_enabled;
-        let bob_amp = self.editor.state.play.bob_amplitude;
-        let crouch_mult = self.editor.state.play.crouch_speed_mult;
-        let step_down_max = self.editor.state.play.step_down_max;
-        let slope_walk_limit_cos = self.editor.state.play.slope_walk_limit_cos;
-        let slope_slide_speed = self.editor.state.play.slope_slide_speed;
-        let ground_accel_tau = self.editor.state.play.ground_accel_tau;
-        let air_accel_tau = self.editor.state.play.air_accel_tau;
+        // Desired horizontal velocity из WASD + camera.
         let cam_f = self.game.camera().forward();
         let fwd_xz = Vec3::new(cam_f.x, 0.0, cam_f.z).normalize_or_zero();
         let right_xz = Vec3::new(-fwd_xz.z, 0.0, fwd_xz.x);
-        let base_speed = if running { run_speed } else { walk_speed };
+        let base_speed = if running {
+            self.editor.state.play.run_speed
+        } else {
+            self.editor.state.play.walk_speed
+        };
         let target_speed = if crouching {
-            base_speed * crouch_mult
+            base_speed * self.editor.state.play.crouch_speed_mult
         } else {
             base_speed
         };
@@ -907,139 +877,47 @@ impl<G: Game> App<G> {
             input_dir = input_dir.normalize();
         }
         let target_velocity = input_dir * target_speed;
-        let was_on_ground = self.editor.state.play.on_ground;
-        {
-            let play = &mut self.editor.state.play;
-            play.coyote_timer = if was_on_ground {
-                play.coyote_time
-            } else {
-                (play.coyote_timer - dt).max(0.0)
-            };
-        }
-        let jump_pressed = self.input.key_pressed(KeyCode::Space);
-        {
-            let play = &mut self.editor.state.play;
-            if jump_pressed {
-                play.jump_buffer_timer = play.jump_buffer_time;
-            } else {
-                play.jump_buffer_timer = (play.jump_buffer_timer - dt).max(0.0);
-            }
-        }
-        {
-            let play = &mut self.editor.state.play;
-            let tau = if was_on_ground {
-                ground_accel_tau
-            } else {
-                air_accel_tau
-            };
-            let alpha = if tau > 1e-4 {
-                1.0 - (-dt / tau).exp()
-            } else {
-                1.0
-            };
-            play.horizontal_velocity += (target_velocity - play.horizontal_velocity) * alpha;
-        }
-        let mut vvel = self.editor.state.play.vertical_velocity;
-        let mut on_ground = self.editor.state.play.on_ground;
-        let mut did_jump = false;
-        let can_jump = {
-            let play = &self.editor.state.play;
-            play.jump_buffer_timer > 0.0 && play.coyote_timer > 0.0 && !crouching
-        };
-        if can_jump {
-            vvel = jump_speed;
-            on_ground = false;
-            did_jump = true;
-            let play = &mut self.editor.state.play;
-            play.jump_buffer_timer = 0.0;
-            play.coyote_timer = 0.0;
-        }
-        vvel -= gravity * dt;
-        let dy = vvel * dt;
-        let eye_pos = self.game.camera().first_person_pos;
-        let feet = eye_pos - Vec3::Y * eye_height;
-        let pcap = PlayerCapsule {
-            radius: player_radius,
-            height: player_height,
-        };
-        let support_delta_y = {
-            let mut dy_extra = 0.0_f32;
-            if let Some(cache) = self.collider_cache.as_ref()
-                && let Some(support) = collision::find_support_entity(cache, feet, &pcap)
-                && let Some(rb) = self.world.get::<crate::physics::RigidBody>(support)
-                && rb.body_type == BodyType::Kinematic
-            {
-                dy_extra = rb.velocity.y * dt;
-            }
-            dy_extra
-        };
-        let horizontal = self.editor.state.play.horizontal_velocity;
-        let delta = horizontal * dt + Vec3::new(0.0, dy + support_delta_y, 0.0);
-        let terrain_ref = self.renderer.terrain.as_ref();
-        let cache_local;
-        let cache_ref: &ColliderCache = if let Some(c) = self.collider_cache.as_ref() {
-            c
-        } else {
-            cache_local = {
-                let mut c = ColliderCache::new();
-                c.build(&self.world);
-                c
-            };
-            &cache_local
-        };
-        let result = collision::resolve_movement_ex(
-            &self.world,
-            cache_ref,
-            feet,
-            delta,
-            &pcap,
-            floor_y,
-            step_down_max,
-            terrain_ref,
-        );
-        let new_feet = result.new_feet;
-        let landed = result.landed;
-        let mut slide_velocity = Vec3::ZERO;
-        if let Some(support) = result.support
-            && support.normal.y < slope_walk_limit_cos
-        {
-            let n = support.normal;
-            let g = Vec3::new(0.0, -gravity, 0.0);
-            let tangent = g - n * g.dot(n);
-            let steepness = ((slope_walk_limit_cos - n.y) / slope_walk_limit_cos.max(1e-4))
-                .clamp(0.0, 1.0);
-            slide_velocity = tangent.normalize_or_zero() * slope_slide_speed * steepness;
-        }
-        if slide_velocity.length_squared() > 1e-8 {
-            let play = &mut self.editor.state.play;
-            play.horizontal_velocity += slide_velocity * dt;
-        }
-        if did_jump {
-            on_ground = false;
-        } else if (landed && dy <= 0.0) || (dy < 0.0 && (new_feet.y - feet.y).abs() < 1e-4) {
-            vvel = 0.0;
-            on_ground = true;
-        } else if dy > 0.0 && (new_feet.y - feet.y).abs() < 1e-4 {
-            vvel = 0.0;
-        } else {
-            on_ground = false;
-        }
-        let horizontal_moved =
-            ((new_feet.x - feet.x).powi(2) + (new_feet.z - feet.z).powi(2)).sqrt();
-        let mut bob_dist = self.editor.state.play.bob_distance;
-        let mut bob_cur = self.editor.state.play.bob_current;
-        if bob_enabled && on_ground && horizontal_moved > 1e-6 {
-            bob_dist += horizontal_moved * if running { 1.4 } else { 1.0 };
-        }
-        let bob_target = if bob_enabled {
-            bob_dist.sin() * bob_amp
-        } else {
-            0.0
-        };
-        bob_cur = bob_cur * 0.85 + bob_target * 0.15;
-        let new_eye = new_feet + Vec3::Y * (eye_height + bob_cur);
 
-        // === Step 10.2: камера (FPS vs TPS) + collision ===
+        let jump_pressed = self.input.key_pressed(KeyCode::Space);
+
+        // === C1.3: config + move_character ===
+        let config =
+            crate::engine::collision::character_config_from_play(&self.editor.state.play);
+        let move_input = collision::CharacterInput {
+            target_horizontal_velocity: target_velocity,
+            jump_pressed,
+            crouching,
+            dt,
+        };
+
+        // Ensure cache (built in redraw but уточним).
+        if self.collider_cache.is_none() {
+            let mut c = ColliderCache::new();
+            c.build(&self.world);
+            self.collider_cache = Some(c);
+        }
+        let cache = self.collider_cache.as_ref().unwrap();
+
+        // Текущая позиция ног.
+        let eye_pos = self.game.camera().first_person_pos;
+        let feet = eye_pos
+            - Vec3::Y * self.editor.state.play.controller.current_eye_height;
+
+        let result = collision::move_character(
+            &mut self.world,
+            cache,
+            &mut self.editor.state.play.controller,
+            &config,
+            feet,
+            &move_input,
+            self.renderer.terrain.as_ref(),
+        );
+
+        let new_feet = result.new_feet;
+        let new_eye = result.new_eye;
+        let on_ground = result.on_ground;
+
+        // === Camera update (FPS / TPS) — использует new_eye ===
         {
             let play_mode = self.editor.state.play.camera_mode;
             let tps_distance = self.editor.state.play.tps_distance;
@@ -1063,7 +941,6 @@ impl<G: Game> App<G> {
                         let radius = cam.tps_collision_radius;
 
                         let mut min_hit: Option<f32> = None;
-                        // FIX: Стреляем 5-ю лучами (центр + 4 смещения), чтобы камера не застревала в углах
                         let offsets = [
                             Vec3::ZERO,
                             right * radius,
@@ -1098,17 +975,16 @@ impl<G: Game> App<G> {
             }
         }
 
-        {
-            let play = &mut self.editor.state.play;
-            play.vertical_velocity = vvel;
-            play.on_ground = on_ground;
-            play.bob_distance = bob_dist;
-            play.bob_current = bob_cur;
-            play.saved_position = new_eye;
-            play.fire_cooldown = (play.fire_cooldown - dt).max(0.0);
-            play.interact_cooldown = (play.interact_cooldown - dt).max(0.0);
-            play.ground_normal = result.support.map(|s| s.normal).unwrap_or(Vec3::Y);
-        }
+        // === Post-move: play-state (не runtime controller) ===
+        let play = &mut self.editor.state.play;
+        play.saved_position = new_eye;
+        play.fire_cooldown = (play.fire_cooldown - dt).max(0.0);
+        play.interact_cooldown = (play.interact_cooldown - dt).max(0.0);
+
+        // === Footstep noise ===
+        let horizontal_moved = ((new_feet.x - feet.x).powi(2)
+            + (new_feet.z - feet.z).powi(2))
+        .sqrt();
         if on_ground && horizontal_moved > 0.001 {
             self.footstep_timer -= dt;
             if self.footstep_timer <= 0.0 {
@@ -1123,6 +999,8 @@ impl<G: Game> App<G> {
         } else {
             self.footstep_timer = 0.0;
         }
+
+        // === Pick-ray, triggers, chasers — БЕЗ ИЗМЕНЕНИЙ ===
         let origin = self.game.camera().first_person_pos;
         let dir = self.game.camera().forward();
         let aim_hit = {
@@ -1138,7 +1016,8 @@ impl<G: Game> App<G> {
             }
         });
 
-        let player_feet_now = self.game.camera().first_person_pos - Vec3::Y * eye_height;
+        let player_feet_now = self.game.camera().first_person_pos
+            - Vec3::Y * self.editor.state.play.controller.current_eye_height;
         let triggers: Vec<Entity> = self.world.query::<Trigger>().map(|(e, _)| e).collect();
         for e in triggers {
             let trigger_data = self.world.get::<Trigger>(e).cloned();
@@ -1150,17 +1029,16 @@ impl<G: Game> App<G> {
                 continue;
             }
             let dist = (player_feet_now - pos).length();
-
-            // FIX #4: `t.fired` сохраняется в World для ВСЕХ триггеров.
             if dist <= t.radius {
                 if !t.fired {
                     match &t.action {
                         TriggerAction::Teleport(target) => {
-                            let new_feet = Vec3::from_array(*target);
-                            let eye_h = self.editor.state.play.current_eye_height;
-                            self.game.camera_mut().first_person_pos = new_feet + Vec3::Y * eye_h;
-                            self.editor.state.play.vertical_velocity = 0.0;
-                            self.editor.state.play.on_ground = true;
+                            let new_feet_tp = Vec3::from_array(*target);
+                            let eye_h = self.editor.state.play.controller.current_eye_height;
+                            self.game.camera_mut().first_person_pos =
+                                new_feet_tp + Vec3::Y * eye_h;
+                            self.editor.state.play.controller.vertical_velocity = 0.0;
+                            self.editor.state.play.controller.on_ground = true;
                         }
                         TriggerAction::Tint(c) => {
                             self.world.insert(e, Tint(*c));
@@ -1547,21 +1425,16 @@ impl<G: Game> App<G> {
 
         if esc_free {
             if self.editor.state.play.active {
-                // 1) Сначала игре — она может закрыть модалку (инвентарь,
-                //    диалог, вендор, крафт, character sheet).
                 if self.game.on_escape_pressed(&mut self.world) {
-                    // Игра поглотила Esc.
                 } else if self.editor.state.play.paused {
-                    // 2) Иначе, если на паузе — снять паузу.
                     self.editor.state.play.paused = false;
                     self.time.paused = false;
                     log::info!("Resumed play (Esc)");
-                    self.editor.state.play.coyote_timer =
+                    self.editor.state.play.controller.coyote_timer =
                         self.editor.state.play.coyote_time;
-                    self.editor.state.play.jump_buffer_timer = 0.0;
+                    self.editor.state.play.controller.jump_buffer_timer = 0.0;
                     self.sync_cursor();
                 } else {
-                    // 3) Иначе — поставить на паузу.
                     self.editor.state.play.paused = true;
                     self.time.paused = true;
                     log::info!("Paused play (Esc)");
@@ -2427,9 +2300,9 @@ impl<G: Game> App<G> {
             if self.editor.state.play.active && self.editor.state.play.paused {
                 self.editor.state.play.paused = false;
                 self.time.paused = false;
-                self.editor.state.play.coyote_timer =
+                self.editor.state.play.controller.coyote_timer =
                     self.editor.state.play.coyote_time;
-                self.editor.state.play.jump_buffer_timer = 0.0;
+                self.editor.state.play.controller.jump_buffer_timer = 0.0;
                 log::info!("Unpause requested by game");
             }
         }
@@ -2904,22 +2777,16 @@ impl<G: Game> App<G> {
                     play.paused = false;
                     self.time.paused = false;
                     self.input.play_mode = true;
-                    play.vertical_velocity = 0.0;
-                    play.on_ground = true;
-                    play.bob_distance = 0.0;
-                    play.bob_current = 0.0;
+                    let config =
+                        crate::engine::collision::character_config_from_play(play);
+                    play.controller =
+                        crate::game::components::CharacterController::new(&config);
+                    play.controller.coyote_timer = play.coyote_time;
                     play.health = play.max_health;
                     play.ammo = play.max_ammo;
                     play.fire_cooldown = 0.0;
                     play.interact_cooldown = 0.0;
                     play.highlight = None;
-                    play.crouching = false;
-                    play.sprint_toggled = false;
-                    play.current_eye_height = play.eye_height;
-                    play.horizontal_velocity = Vec3::ZERO;
-                    play.coyote_timer = play.coyote_time;
-                    play.jump_buffer_timer = 0.0;
-                    play.ground_normal = Vec3::Y;
                     let safe_pos = DEFAULT_PLAY_SPAWN;
                     let mut spawn = play.saved_position;
                     if !spawn.is_finite()
@@ -2970,9 +2837,9 @@ impl<G: Game> App<G> {
                 if self.editor.state.play.active && self.editor.state.play.paused {
                     self.editor.state.play.paused = false;
                     self.time.paused = false;
-                    self.editor.state.play.coyote_timer =
+                    self.editor.state.play.controller.coyote_timer =
                         self.editor.state.play.coyote_time;
-                    self.editor.state.play.jump_buffer_timer = 0.0;
+                    self.editor.state.play.controller.jump_buffer_timer = 0.0;
                     log::info!("Resumed play (from UI)");
                     self.sync_cursor();
                 }

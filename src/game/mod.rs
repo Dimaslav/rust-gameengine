@@ -36,6 +36,7 @@ pub use components::{
     MeshHandle, Name, Parent, SkeletonHandle, SlidingDoor, Spinner, TextureTiling, Tint,
     Transform, Trigger, TriggerAction, Velocity, Visible,
     HealthPickup, AmmoPickup, RootMotion,
+    CharacterConfig, CharacterController,
 };
 pub use crafting::{
     CraftingRegistry, CraftingSession, RecipeDef, RecipeInput, RecipeOutput,

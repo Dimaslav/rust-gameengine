@@ -1,9 +1,18 @@
 use std::sync::Arc;
+
 use glam::{Mat4, Quat, Vec3};
+
 use crate::ecs::{Entity, World};
 use crate::game::components::{Transform, Visible};
 use crate::physics::{BodyType, Collider, MeshCollider, RigidBody};
+
 use super::spatial_hash::SpatialHash2D;
+
+const MIN_SCALE: f32 = 1e-4;
+const MAX_SCALE: f32 = 1e6;
+const MIN_DET: f32 = 1e-12;
+const SHEAR_EPS_ABS: f32 = 1e-3;
+const SHEAR_EPS_REL: f32 = 1e-3;
 
 pub struct ColliderEntry {
     pub entity: Entity,
@@ -53,53 +62,130 @@ impl ColliderCache {
                 continue;
             }
 
+            if let Some(c) = &primitive
+                && let Err(reason) = validate_collider(c)
+            {
+                log::error!("ColliderCache: entity #{} skipped: {}", e, reason);
+                continue;
+            }
+            if let Some(m) = &mesh
+                && (m.vertices.is_empty() || m.indices.is_empty())
+            {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: MeshCollider empty",
+                    e
+                );
+                continue;
+            }
+
             let body_type = world
                 .get::<RigidBody>(e)
                 .map(|rb| rb.body_type)
                 .unwrap_or(BodyType::Static);
 
             let model = crate::game::world_matrix(world, e);
-            let (s, r, p) = model.to_scale_rotation_translation();
-
-            // C1.2: negative scale (reflection) — отклоняем.
-            if s.x < 0.0 || s.y < 0.0 || s.z < 0.0 {
+            if !model.is_finite() {
                 log::error!(
-                    "ColliderCache: entity #{} has negative scale ({:?}). \
-                     Skipped — reflection не поддерживается в C1.2.",
-                    e,
-                    s
+                    "ColliderCache: entity #{} skipped: model not finite",
+                    e
                 );
                 continue;
             }
 
-            // C1.2: детект shear — non-uniform scale родителя + поворот
-            // дочернего даёт shear, который to_scale_rotation_translation
-            // теряет. Сравниваем model с восстановленной T·R·S.
+            let det = model.determinant();
+            if det.abs() < MIN_DET {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: |det| = {:.3e} < {}",
+                    e,
+                    det.abs(),
+                    MIN_DET
+                );
+                continue;
+            }
+
+            if det < 0.0 {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: negative determinant \
+                     (reflection, det = {:.3e}). Не поддерживается.",
+                    e,
+                    det
+                );
+                continue;
+            }
+
+            let (s, r, p) = model.to_scale_rotation_translation();
+
+            let world_scale = s.abs();
+            if world_scale.min_element() < MIN_SCALE {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: min(scale) = {:.3e} < {}",
+                    e,
+                    world_scale.min_element(),
+                    MIN_SCALE
+                );
+                continue;
+            }
+            if world_scale.max_element() > MAX_SCALE {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: max(scale) = {:.3e} > {}",
+                    e,
+                    world_scale.max_element(),
+                    MAX_SCALE
+                );
+                continue;
+            }
+
             let reconstructed = Mat4::from_scale_rotation_translation(s, r, p);
             let shear_diff = (model - reconstructed)
                 .to_cols_array()
                 .iter()
                 .map(|x| x.abs())
                 .fold(0.0f32, f32::max);
-            if shear_diff > 1e-3 {
-                log::warn!(
-                    "ColliderCache: entity #{} has shear in transform \
-                     (diff={:.4}). Коллизия будет приближённой.",
+            let model_mag = model
+                .to_cols_array()
+                .iter()
+                .map(|x| x.abs())
+                .fold(0.0f32, f32::max);
+            let shear_threshold = SHEAR_EPS_ABS + SHEAR_EPS_REL * model_mag;
+            if shear_diff > shear_threshold {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: shear (diff = {:.4}, \
+                     threshold = {:.4}). Не поддерживается.",
                     e,
-                    shear_diff
+                    shear_diff,
+                    shear_threshold
                 );
+                continue;
             }
 
-            let world_scale = s.abs();
-
-            // Отдельные AABB для primitive и mesh (C1.2 п.4.4 — не пересчитывать
-            // mesh.world_aabb на каждом запросе).
             let primitive_aabb = primitive
                 .as_ref()
                 .map(|c| c.world_aabb(p, r, world_scale));
             let mesh_aabb = mesh
                 .as_ref()
                 .map(|m| m.world_aabb(p, r, world_scale));
+
+            for (label, aabb) in [
+                ("primitive", primitive_aabb),
+                ("mesh", mesh_aabb),
+            ] {
+                if let Some((mn, mx)) = aabb
+                    && (!mn.is_finite()
+                        || !mx.is_finite()
+                        || mn.x > mx.x + 1e-6
+                        || mn.y > mx.y + 1e-6
+                        || mn.z > mx.z + 1e-6)
+                {
+                    log::error!(
+                        "ColliderCache: entity #{} skipped: bad {} AABB \
+                         (min = {:?}, max = {:?})",
+                        e,
+                        label,
+                        mn,
+                        mx
+                    );
+                }
+            }
 
             let (aabb_min, aabb_max) = match (primitive_aabb, mesh_aabb) {
                 (Some((a1, b1)), Some((a2, b2))) => (a1.min(a2), b1.max(b2)),
@@ -108,7 +194,19 @@ impl ColliderCache {
                 (None, None) => unreachable!(),
             };
 
-            // C1.2: u32::try_from вместо as (переполнение → panic с сообщением).
+            if !aabb_min.is_finite()
+                || !aabb_max.is_finite()
+                || aabb_min.x > aabb_max.x + 1e-6
+                || aabb_min.y > aabb_max.y + 1e-6
+                || aabb_min.z > aabb_max.z + 1e-6
+            {
+                log::error!(
+                    "ColliderCache: entity #{} skipped: combined AABB invalid",
+                    e
+                );
+                continue;
+            }
+
             let idx = u32::try_from(self.entries.len())
                 .expect("ColliderCache: more than 4 billion colliders");
 
@@ -144,9 +242,6 @@ impl ColliderCache {
         self.hash.query_aabb(min, max, out);
     }
 
-    /// Проверка капсулы (segment [a, b], radius r) на пересечение.
-    /// `include_dynamic == false` → Dynamic-тела игнорируются (Kinematic
-    /// и Static — проверяются). NaN/Inf → `false` (C1.2).
     pub fn capsule_hits(
         &self,
         a: Vec3,
@@ -165,13 +260,7 @@ impl ColliderCache {
         include_dynamic: bool,
         except: Option<Entity>,
     ) -> bool {
-        // C1.2: NaN/Inf проверки. Публичный API — «нет пересечения» при
-        // некорректном вводе. Причины логируются на уровне вызывающего.
-        if !a.is_finite()
-            || !b.is_finite()
-            || !r.is_finite()
-            || r < 0.0
-        {
+        if !a.is_finite() || !b.is_finite() || !r.is_finite() || r < 0.0 {
             return false;
         }
         let mn = a.min(b) - Vec3::splat(r);
@@ -190,17 +279,20 @@ impl ColliderCache {
                 continue;
             }
 
-            // Broad-phase: консервативный segment-AABB.
             if !capsule_may_overlap_aabb(a, b, r, e.aabb_min, e.aabb_max) {
                 continue;
             }
 
-            if let Some(col) = &e.collider
-                && capsule_hits_primitive(a, b, r, col, e)
-            {
-                return true;
+            if let Some((pa, pb)) = e.primitive_aabb {
+                if capsule_may_overlap_aabb(a, b, r, pa, pb)
+                    && let Some(col) = &e.collider
+                    && capsule_hits_primitive(a, b, r, col, e)
+                {
+                    return true;
+                }
             }
 
+            // Narrow-phase 2: mesh (pre-check уже внутри).
             if let Some(mesh) = &e.mesh
                 && capsule_hits_mesh(a, b, r, mesh, e)
             {
@@ -218,16 +310,50 @@ impl Default for ColliderCache {
 }
 
 // ============================================================
-// Broad-phase: capsule-AABB (консервативный)
+// Валидация коллайдера (C1.2)
 // ============================================================
 
-/// **Broad phase**: капсула [a, b] радиуса r vs AABB. Консервативен:
-/// возможны false positives у углов расширенного AABB (Minkowski-sum
-/// AABB + sphere — это скруглённый бокс, но его AABB больше).
+fn validate_collider(c: &Collider) -> Result<(), String> {
+    match *c {
+        Collider::Sphere { radius } => {
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(format!("sphere.radius = {} (must be > 0)", radius));
+            }
+        }
+        Collider::Aabb { half_extents } => {
+            if !half_extents.is_finite()
+                || half_extents.x <= 0.0
+                || half_extents.y <= 0.0
+                || half_extents.z <= 0.0
+            {
+                return Err(format!(
+                    "aabb.half_extents = {:?} (must be all > 0)",
+                    half_extents
+                ));
+            }
+        }
+        Collider::Capsule { radius, height } => {
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(format!("capsule.radius = {} (must be > 0)", radius));
+            }
+            if !height.is_finite() || height <= 0.0 {
+                return Err(format!("capsule.height = {} (must be > 0)", height));
+            }
+        }
+    }
+    Ok(())
+}
+
+// ============================================================
+// Broad-phase: segment-AABB (консервативный)
+// ============================================================
+
+/// **Broad phase**: капсула [a, b] радиуса r vs AABB. Консервативен.
 ///
-/// `r == 0` тоже работает. **Короткие отрезки**: если `a ≈ b`, проверяем
-/// **оба** конца (C1.2 п.1.7).
-#[inline]
+/// **Нет отдельной ветки для коротких отрезков** (C1.2 после ревью #2):
+/// slab-test корректно обрабатывает и нулевые, и короткие отрезки.
+/// Раньше было `if d² < 1e-12 { проверить a или b }` — это давало false
+/// negative, когда оба конца снаружи, а отрезок внутри.
 pub fn capsule_may_overlap_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
     if r < 0.0 {
         return false;
@@ -236,12 +362,6 @@ pub fn capsule_may_overlap_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3
     let emax = amax + Vec3::splat(r);
 
     let d = b - a;
-
-    // C1.2 п.1.7: короткий отрезок — проверяем ОБА конца.
-    if d.length_squared() < 1e-12 {
-        return point_in_aabb(a, emin, emax) || point_in_aabb(b, emin, emax);
-    }
-
     let mut tmin = 0.0f32;
     let mut tmax = 1.0f32;
     for i in 0..3 {
@@ -268,25 +388,14 @@ pub fn capsule_may_overlap_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3
     true
 }
 
-#[inline]
-fn point_in_aabb(p: Vec3, amin: Vec3, amax: Vec3) -> bool {
-    p.x >= amin.x
-        && p.x <= amax.x
-        && p.y >= amin.y
-        && p.y <= amax.y
-        && p.z >= amin.z
-        && p.z <= amax.z
-}
-
-/// Совместимость: старое имя. Помечено как alias — используйте
-/// `capsule_may_overlap_aabb` для ясности.
+/// Совместимость: старое имя.
 #[inline]
 pub fn capsule_hits_aabb(a: Vec3, b: Vec3, r: f32, amin: Vec3, amax: Vec3) -> bool {
     capsule_may_overlap_aabb(a, b, r, amin, amax)
 }
 
 // ============================================================
-// Narrow-phase 1: primitive (точные формулы)
+// Narrow-phase 1: primitive
 // ============================================================
 
 fn capsule_hits_primitive(
@@ -301,27 +410,17 @@ fn capsule_hits_primitive(
 
     match *col {
         Collider::Sphere { radius } => {
-            // Non-uniform scale сферы — консервативная аппроксимация
-            // по max(scale). Документировано в Collider::world_aabb.
             let world_r = radius * scale.max_element();
             let rr = r + world_r;
             segment_point_dist_sq(a, b, e.world_pos) <= rr * rr
         }
         Collider::Aabb { half_extents } => {
-            // C1.2 п.1.1: точный narrow phase через segment-AABB distance.
-            // Segment и полуразмеры — в локали, r — в world (сферу
-            // масштабировать не нужно, т.к. расстояние в world).
             let local_a = inv_rot * (a - e.world_pos);
             let local_b = inv_rot * (b - e.world_pos);
             let half = half_extents * scale;
-            // r остаётся в world (расстояние в мире = расстояние в
-            // касательном пространстве OBB, т.к. поворот — изометрия).
-            // Масштаб полуразмеров даёт OBB в world.
             segment_aabb_dist_sq(local_a, local_b, -half, half) <= r * r
         }
         Collider::Capsule { radius, height } => {
-            // Non-uniform scale капсулы — по max(scale) для радиуса,
-            // по scale.y для высоты. Консервативно.
             let world_r = radius * scale.max_element();
             let hy = height * scale.y * 0.5;
             let up = e.world_rot * Vec3::new(0.0, hy, 0.0);
@@ -334,7 +433,7 @@ fn capsule_hits_primitive(
 }
 
 // ============================================================
-// Narrow-phase 2: mesh через BVH + точная проверка в world
+// Narrow-phase 2: mesh
 // ============================================================
 
 fn capsule_hits_mesh(
@@ -344,7 +443,6 @@ fn capsule_hits_mesh(
     mesh: &MeshCollider,
     e: &ColliderEntry,
 ) -> bool {
-    // Broad (world): sphere-AABB капсулы vs AABB mesh (уже посчитан в build).
     let Some((wmn, wmx)) = e.mesh_aabb else {
         return false;
     };
@@ -360,12 +458,12 @@ fn capsule_hits_mesh(
         return false;
     }
 
-    // BVH в local. local_r = r / min(scale) — консервативно.
+    // scale валидирован в build (≥ MIN_SCALE), safe_inv не даст 1.0.
     let scale_inv = safe_inv(e.world_scale);
     let inv_rot = e.world_rot.inverse();
     let local_a = (inv_rot * (a - e.world_pos)) * scale_inv;
     let local_b = (inv_rot * (b - e.world_pos)) * scale_inv;
-    let local_r = r / e.world_scale.min_element().max(1e-6);
+    let local_r = r / e.world_scale.min_element();
 
     let triangles = mesh.triangles();
     if triangles.is_empty() {
@@ -378,20 +476,17 @@ fn capsule_hits_mesh(
     let r2 = r * r;
     let mut hit = false;
 
-    // C1.2 п.4.3: for_each_in_aabb с early-break (bool return).
     bvh.for_each_in_aabb(cmin, cmax, |tri_idx| {
         let Some(tri) = triangles.get(tri_idx as usize) else {
-            // C1.2 п.5.6: debug_assert, не молчаливый return.
             debug_assert!(false, "BVH returned invalid tri index {}", tri_idx);
             return true;
         };
-        // C1.2 п.1.2: transform в world, точное расстояние в world.
         let wa = e.model.transform_point3(tri[0]);
         let wb = e.model.transform_point3(tri[1]);
         let wc = e.model.transform_point3(tri[2]);
         if segment_triangle_dist_sq(a, b, wa, wb, wc) <= r2 {
             hit = true;
-            return false; // early break
+            return false;
         }
         true
     });
@@ -404,6 +499,8 @@ fn capsule_hits_mesh(
 
 #[inline]
 fn safe_inv(v: Vec3) -> Vec3 {
+    // После валидации в build все элементы ≥ MIN_SCALE > 1e-6.
+    // Fallback 1.0 — защита от прямого вызова, не для боевого пути.
     Vec3::new(
         if v.x.abs() > 1e-6 { 1.0 / v.x } else { 1.0 },
         if v.y.abs() > 1e-6 { 1.0 / v.y } else { 1.0 },
@@ -411,7 +508,6 @@ fn safe_inv(v: Vec3) -> Vec3 {
     )
 }
 
-/// Точно: минимальное squared-расстояние от точки до segment.
 #[inline]
 fn segment_point_dist_sq(a: Vec3, b: Vec3, p: Vec3) -> f32 {
     let ab = b - a;
@@ -424,8 +520,6 @@ fn segment_point_dist_sq(a: Vec3, b: Vec3, p: Vec3) -> f32 {
     (p - closest).length_squared()
 }
 
-/// Точно: минимальное squared-расстояние между двумя segments.
-/// Reference: Ericson, RTCD, 5.1.9.
 fn segment_segment_dist_sq(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {
     let d1 = q1 - p1;
     let d2 = q2 - p2;
@@ -469,6 +563,11 @@ fn segment_segment_dist_sq(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {
     (c1 - c2).length_squared()
 }
 
+/// C1.2: точно, минимальное squared-расстояние от segment до AABB.
+/// Через 12 треугольников (2 на грань). Покрывает грани и рёбра.
+///
+/// **`best < 1e-12 → 0.0` убрано** — возвращаем точное значение.
+/// Касание при r=0 обрабатывается сравнением `<=` у вызывающего.
 fn segment_aabb_dist_sq(a: Vec3, b: Vec3, amin: Vec3, amax: Vec3) -> f32 {
     if segment_inside_aabb(a, b, amin, amax) {
         return 0.0;
@@ -482,31 +581,19 @@ fn segment_aabb_dist_sq(a: Vec3, b: Vec3, amin: Vec3, amax: Vec3) -> f32 {
     let c6 = Vec3::new(amin.x, amax.y, amax.z);
     let c7 = Vec3::new(amax.x, amax.y, amax.z);
     let corners = [c0, c1, c2, c3, c4, c5, c6, c7];
-
-    // 12 треугольников (2 на грань).
     let tris = [
-        // Bottom (y = y0)
         (0, 1, 5), (0, 5, 4),
-        // Top (y = y1)
         (2, 6, 7), (2, 7, 3),
-        // Front (z = z0)
         (0, 2, 3), (0, 3, 1),
-        // Back (z = z1)
         (4, 5, 7), (4, 7, 6),
-        // Left (x = x0)
         (0, 4, 6), (0, 6, 2),
-        // Right (x = x1)
         (1, 3, 7), (1, 7, 5),
     ];
-
     let mut best = f32::INFINITY;
     for (i, j, k) in tris {
         let d = segment_triangle_dist_sq(a, b, corners[i], corners[j], corners[k]);
         if d < best {
             best = d;
-            if best < 1e-12 {
-                return 0.0;
-            }
         }
     }
     best
@@ -538,8 +625,6 @@ fn segment_inside_aabb(a: Vec3, b: Vec3, amin: Vec3, amax: Vec3) -> bool {
     true
 }
 
-/// Расстояние segment ↔ triangle. Через segment-triangle intersection
-/// + минимум по вершинам/рёбрам.
 fn segment_triangle_dist_sq(p0: Vec3, p1: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     if segment_triangle_intersect(p0, p1, a, b, c) {
         return 0.0;
@@ -552,7 +637,6 @@ fn segment_triangle_dist_sq(p0: Vec3, p1: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f3
     dp0.min(dp1).min(de0).min(de1).min(de2)
 }
 
-/// Segment-Triangle intersection (Möller–Trumbore).
 fn segment_triangle_intersect(p0: Vec3, p1: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
     let e1 = b - a;
     let e2 = c - a;
@@ -577,16 +661,20 @@ fn segment_triangle_intersect(p0: Vec3, p1: Vec3, a: Vec3, b: Vec3, c: Vec3) -> 
     (0.0..=1.0).contains(&t)
 }
 
-/// Минимальное squared-расстояние от точки до треугольника.
-/// Reference: Ericson, RTCD, 5.1.5. Вырожденные — min по рёбрам.
+/// Точка ↔ треугольник. **C1.2 после ревью #2**: масштабно-относительный
+/// порог вырожденности. `n2 < ab² · ac² · 1e-8` означает
+/// `sin²(angle) < 1e-8` (= sin < 1e-4, угол < 0.006°). Маленькие, но
+/// валидные треугольники (1e-4 м) больше не считаются вырожденными.
 fn point_triangle_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
-    // C1.2 п.2.3: вырожденность проверяем В НАЧАЛЕ, до делений.
     let ab = b - a;
     let ac = c - a;
     let n = ab.cross(ac);
     let n2 = n.length_squared();
-    if n2 < 1e-12 {
-        // Вырожденный треугольник — минимум по рёбрам.
+    let ab2 = ab.length_squared();
+    let ac2 = ac.length_squared();
+
+    // Вырожденность: нулевое ребро ИЛИ синус угла < 1e-4.
+    if ab2 < 1e-20 || ac2 < 1e-20 || n2 < ab2 * ac2 * 1e-8 {
         return segment_point_dist_sq(a, b, p)
             .min(segment_point_dist_sq(b, c, p))
             .min(segment_point_dist_sq(c, a, p));
@@ -634,7 +722,6 @@ fn point_triangle_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
         return (p - closest).length_squared();
     }
 
-    // Внутри треугольника — до плоскости.
     let d = ap.dot(n);
     d * d / n2
 }
@@ -708,7 +795,72 @@ mod tests {
         w.insert(e, RigidBody::static_body());
         let mut cache = ColliderCache::new();
         cache.build(&w);
-        assert_eq!(cache.len(), 0, "negative scale must be rejected");
+        assert_eq!(cache.len(), 0);
+    }
+
+    /// C1.2 после ревью #2: shear → entity отклоняется.
+    #[test]
+    fn build_rejects_shear() {
+        let mut w = World::new();
+        let parent = w.spawn();
+        let mut pt = Transform::at(Vec3::ZERO);
+        pt.scale = Vec3::new(2.0, 1.0, 1.0); // non-uniform
+        w.insert(parent, pt);
+
+        let child = w.spawn();
+        let mut ct = Transform::at(Vec3::new(0.0, 0.0, 0.0));
+        ct.rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        w.insert(child, ct);
+        w.insert(child, crate::game::components::Parent(parent));
+        w.insert(child, Collider::aabb(Vec3::splat(0.5)));
+        w.insert(child, RigidBody::static_body());
+
+        let mut cache = ColliderCache::new();
+        cache.build(&w);
+        assert_eq!(cache.len(), 0, "shear must be rejected");
+    }
+
+    #[test]
+    fn build_rejects_zero_scale() {
+        let mut w = World::new();
+        let e = w.spawn();
+        let mut t = Transform::at(Vec3::ZERO);
+        t.scale = Vec3::new(0.0, 1.0, 1.0);
+        w.insert(e, t);
+        w.insert(e, Collider::aabb(Vec3::splat(0.5)));
+        w.insert(e, RigidBody::static_body());
+        let mut cache = ColliderCache::new();
+        cache.build(&w);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn build_rejects_invalid_collider() {
+        let mut w = World::new();
+        let e1 = w.spawn();
+        w.insert(e1, Transform::at(Vec3::ZERO));
+        w.insert(e1, Collider::Sphere { radius: -1.0 });
+        w.insert(e1, RigidBody::static_body());
+
+        let e2 = w.spawn();
+        w.insert(e2, Transform::at(Vec3::new(5.0, 0.0, 0.0)));
+        w.insert(e2, Collider::Capsule { radius: 0.5, height: 0.0 });
+        w.insert(e2, RigidBody::static_body());
+
+        let e3 = w.spawn();
+        w.insert(e3, Transform::at(Vec3::new(10.0, 0.0, 0.0)));
+        w.insert(e3, Collider::Aabb { half_extents: Vec3::new(-1.0, 1.0, 1.0) });
+        w.insert(e3, RigidBody::static_body());
+
+        let e4 = w.spawn();
+        w.insert(e4, Transform::at(Vec3::new(15.0, 0.0, 0.0)));
+        w.insert(e4, Collider::sphere(0.5));
+        w.insert(e4, RigidBody::static_body());
+
+        let mut cache = ColliderCache::new();
+        cache.build(&w);
+        assert_eq!(cache.len(), 1, "only the valid sphere should remain");
+        assert_eq!(cache.entries()[0].entity, e4);
     }
 
     #[test]
@@ -750,24 +902,14 @@ mod tests {
         assert!(!cache.capsule_hits(Vec3::ZERO, Vec3::Y * 2.0, 0.35, false));
     }
 
-    /// C1.2 п.3.2: регрессионный тест — угол OBB. Точечная капсула
-    /// в (1.9, 1.9, 0), r=1. Бокс [-1,1]³. Broad-phase даст true,
-    /// но точный narrow-phase должен дать false: расстояние до
-    /// угла (1, 1, 0) = √(0.9² + 0.9²) ≈ 1.27 > 1.
     #[test]
     fn capsule_near_corner_no_hit() {
         let mut w = World::new();
         spawn_box(&mut w, Vec3::ZERO, Vec3::splat(1.0), false);
         let mut cache = ColliderCache::new();
         cache.build(&w);
-        // Точечная капсула в (1.9, 1.9, 0), r = 1.
         let p = Vec3::new(1.9, 1.9, 0.0);
-        let hit = cache.capsule_hits(p, p, 1.0, false);
-        assert!(
-            !hit,
-            "capsule at (1.9,1.9,0) r=1 vs box [-1,1]³: distance ≈ 1.27 > 1 → must miss"
-        );
-        // При r = 1.5 — попадает.
+        assert!(!cache.capsule_hits(p, p, 1.0, false));
         assert!(cache.capsule_hits(p, p, 1.5, false));
     }
 
@@ -782,8 +924,6 @@ mod tests {
         assert!(cache.capsule_hits(Vec3::ZERO, Vec3::Y, 0.5, true));
     }
 
-    /// C1.2 п.3.1: РАНЬШЕ тест ставил бокс в 0.0 и проходил по случайности.
-    /// Теперь — 0.375, между сэмплами старого broad-phase (0.0 и 0.75).
     #[test]
     fn thin_box_between_samples_detected() {
         let mut w = World::new();
@@ -803,10 +943,8 @@ mod tests {
         ));
     }
 
-    /// C1.2 п.1.7: очень короткий segment, пересекающий AABB.
     #[test]
     fn short_segment_inside_aabb() {
-        // Segment [-0.001, 0.001] внутри AABB [-1, 1]³.
         assert!(capsule_may_overlap_aabb(
             Vec3::new(-0.001, 0.0, 0.0),
             Vec3::new(0.001, 0.0, 0.0),
@@ -814,6 +952,17 @@ mod tests {
             Vec3::splat(-1.0),
             Vec3::splat(1.0),
         ));
+    }
+
+    /// C1.2 после ревью #2: контрпример ревьюера — отрезок пересекает
+    /// маленький AABB, оба конца снаружи. Старый код возвращал `false`.
+    #[test]
+    fn short_segment_crosses_aabb_with_endpoints_outside() {
+        let a = Vec3::new(-4e-7, 0.0, 0.0);
+        let b = Vec3::new(4e-7, 0.0, 0.0);
+        let min = Vec3::new(-1e-7, -1.0, -1.0);
+        let max = Vec3::new(1e-7, 1.0, 1.0);
+        assert!(capsule_may_overlap_aabb(a, b, 0.0, min, max));
     }
 
     #[test]
@@ -849,7 +998,6 @@ mod tests {
         ));
     }
 
-    /// C1.2 п.2.4: NaN/Inf → false.
     #[test]
     fn nan_input_returns_false() {
         let mut w = World::new();
@@ -928,14 +1076,11 @@ mod tests {
         assert!(!cache.capsule_hits_except(a, b, 0.5, false, Some(e)));
     }
 
-    /// C1.2 п.3.3: mesh narrow-phase — точное расстояние до наклонной
-    /// грани, не только вершины.
     #[test]
     fn capsule_hits_near_tilted_triangle_face() {
         let mut w = World::new();
         let e = w.spawn();
         w.insert(e, Transform::at(Vec3::ZERO));
-        // Большой треугольник, наклонённый.
         let verts = vec![
             Vec3::new(-2.0, 0.0, -2.0),
             Vec3::new(2.0, 0.0, -2.0),
@@ -944,32 +1089,64 @@ mod tests {
         w.insert(e, MeshCollider::from_mesh(verts, vec![[0, 1, 2]]));
         let mut cache = ColliderCache::new();
         cache.build(&w);
-        // Точка в центре грани (0, 0.5, 0) — точно на плоскости треугольника.
         let p = Vec3::new(0.0, 0.5, 0.0);
-        assert!(cache.capsule_hits(p, p, 0.1, false), "point on face must hit");
-        // Точка далеко — miss.
+        assert!(cache.capsule_hits(p, p, 0.1, false));
         let far = Vec3::new(0.0, 5.0, 2.0);
         assert!(!cache.capsule_hits(far, far, 0.1, false));
     }
 
-    /// C1.2 п.3.3: mesh с поворотом и non-uniform scale.
+    /// C1.2 после ревью #2: **реальный поворот**, проверка точки на
+    /// грани (не на вершине).
     #[test]
-    fn capsule_hits_mesh_with_transform() {
+    fn capsule_hits_mesh_with_rotation_and_scale() {
         let mut w = World::new();
         let e = w.spawn();
+        // Поворот на 90° вокруг Y: локальная вершина (1, 0, 0) → world (0, 0, -1).
+        let rot = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         let mut t = Transform::at(Vec3::new(5.0, 0.0, 0.0));
-        t.scale = Vec3::new(2.0, 1.0, 1.0); // non-uniform
+        t.rotation = rot;
+        t.scale = Vec3::new(2.0, 1.0, 1.0);
         w.insert(e, t);
+        // Треугольник в XY-плоскости локально.
         let verts = vec![
-            Vec3::new(-1.0, 0.0, -1.0),
-            Vec3::new(1.0, 0.0, -1.0),
-            Vec3::new(0.0, 1.0, 1.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
         ];
         w.insert(e, MeshCollider::from_mesh(verts, vec![[0, 1, 2]]));
         let mut cache = ColliderCache::new();
         cache.build(&w);
-        // Точка около вершины в мире (5 + 0 * 2, 1, 0 + 1) = (5, 1, 1).
-        let near = Vec3::new(5.0, 1.0, 1.0);
-        assert!(cache.capsule_hits(near, near, 0.2, false));
+        assert_eq!(cache.len(), 1);
+
+        // Точка на середине гипотенузы. Локально (0.5, 0.5, 0) →
+        // world: (5,0,0) + R * S * (0.5, 0.5, 0).
+        // R вокруг Y на 90°: (x, y, z) → (z, y, -x). S = (2, 1, 1).
+        // S * (0.5, 0.5, 0) = (1.0, 0.5, 0).
+        // R * (1.0, 0.5, 0) = (0, 0.5, -1.0).
+        // world = (5.0, 0.5, -1.0).
+        let p = Vec3::new(5.0, 0.5, -1.0);
+        assert!(cache.capsule_hits(p, p, 0.1, false), "point on face");
+        // Далеко — miss.
+        let far = Vec3::new(5.0, 5.0, 0.0);
+        assert!(!cache.capsule_hits(far, far, 0.1, false));
+    }
+
+    /// C1.2 после ревью #2: маленький валидный треугольник (не должен
+    /// считаться вырожденным). Сторона 1e-4 м, прямой угол.
+    #[test]
+    fn small_valid_triangle_not_degenerate() {
+        let a = Vec3::ZERO;
+        let b = Vec3::new(1e-4, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1e-4, 0.0);
+        // Точка над центром треугольника на расстоянии 5e-5.
+        let p = Vec3::new(2.5e-5, 2.5e-5, 5e-5);
+        let d2 = point_triangle_dist_sq(p, a, b, c);
+        let expected = 25e-10;
+        assert!(
+            (d2 - expected).abs() < 1e-10,
+            "expected d2 ~ {:.3e}, got {:.3e}",
+            expected,
+            d2
+        );
     }
 }

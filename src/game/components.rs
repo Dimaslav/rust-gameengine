@@ -377,3 +377,181 @@ pub struct AmmoPickup {
 pub struct RootMotion {
     pub enabled: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharacterController {
+    pub vertical_velocity: f32,
+    pub horizontal_velocity: Vec3,
+    pub on_ground: bool,
+    pub ground_normal: Vec3,
+    pub coyote_timer: f32,
+    pub jump_buffer_timer: f32,
+    pub crouching: bool,
+    pub current_eye_height: f32,
+    pub bob_distance: f32,
+    pub bob_current: f32,
+    pub sprint_toggled: bool,
+    pub was_on_ground: bool,
+}
+
+impl CharacterController {
+    pub fn new(config: &CharacterConfig) -> Self {
+        Self {
+            vertical_velocity: 0.0,
+            horizontal_velocity: Vec3::ZERO,
+            on_ground: false,
+            ground_normal: Vec3::Y,
+            coyote_timer: 0.0,
+            jump_buffer_timer: 0.0,
+            crouching: false,
+            current_eye_height: config.eye_height,
+            bob_distance: 0.0,
+            bob_current: 0.0,
+            sprint_toggled: false,
+            was_on_ground: false,
+        }
+    }
+}
+
+impl Default for CharacterController {
+    fn default() -> Self {
+        Self::new(&CharacterConfig::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CharacterConfig {
+    pub radius: f32,
+    pub height: f32,
+    pub eye_height: f32,
+    pub crouch_height: f32,
+    pub walk_speed: f32,
+    pub run_speed: f32,
+    pub crouch_speed_mult: f32,
+    pub jump_speed: f32,
+    pub gravity: f32,
+    pub slope_walk_limit_cos: f32,
+    pub slope_slide_speed: f32,
+    pub step_up_max: f32,
+    pub step_down_max: f32,
+    pub snap_to_ground: bool,
+    pub push_force: f32,
+    pub ground_accel_tau: f32,
+    pub air_accel_tau: f32,
+    pub coyote_time: f32,
+    pub jump_buffer_time: f32,
+    pub bob_enabled: bool,
+    pub bob_amplitude: f32,
+    pub floor_y: f32,
+}
+
+impl CharacterConfig {
+    pub fn validate(&mut self) {
+        if !self.radius.is_finite() || self.radius < 0.05 {
+            log::warn!("CharacterConfig: radius={} clamped to 0.05", self.radius);
+            self.radius = 0.05;
+        }
+        let min_height = 2.0 * self.radius;
+        if !self.height.is_finite() || self.height < min_height {
+            log::warn!(
+                "CharacterConfig: height={} < 2*radius={}, clamped",
+                self.height,
+                min_height
+            );
+            self.height = min_height + 0.001;
+        }
+        if !self.eye_height.is_finite() || self.eye_height < 0.1 {
+            self.eye_height = 1.7;
+        }
+        if !self.crouch_height.is_finite() || self.crouch_height < 0.1 {
+            self.crouch_height = 1.0;
+        }
+        if self.crouch_height > self.eye_height {
+            self.crouch_height = self.eye_height;
+        }
+        let min_crouch = (2.0 * self.radius + 0.05).min(self.eye_height);
+        if self.crouch_height < min_crouch {
+            self.crouch_height = min_crouch;
+        }
+        if !self.walk_speed.is_finite() || self.walk_speed <= 0.0 {
+            self.walk_speed = 6.0;
+        }
+        if !self.run_speed.is_finite() || self.run_speed < self.walk_speed {
+            self.run_speed = self.walk_speed;
+        }
+        if !self.crouch_speed_mult.is_finite() || self.crouch_speed_mult <= 0.0 {
+            self.crouch_speed_mult = 0.5;
+        }
+        if !self.jump_speed.is_finite() || self.jump_speed <= 0.0 {
+            self.jump_speed = 6.0;
+        }
+        if !self.gravity.is_finite() || self.gravity <= 0.0 {
+            self.gravity = 20.0;
+        }
+        if !self.slope_walk_limit_cos.is_finite()
+            || self.slope_walk_limit_cos <= 0.0
+            || self.slope_walk_limit_cos > 1.0
+        {
+            self.slope_walk_limit_cos = std::f32::consts::FRAC_1_SQRT_2;
+        }
+        if !self.slope_slide_speed.is_finite() || self.slope_slide_speed < 0.0 {
+            self.slope_slide_speed = 6.0;
+        }
+        if !self.step_up_max.is_finite() || self.step_up_max < 0.0 {
+            self.step_up_max = 0.3;
+        }
+        if !self.step_down_max.is_finite() || self.step_down_max < 0.0 {
+            self.step_down_max = 0.5;
+        }
+        if !self.push_force.is_finite() || self.push_force < 0.0 {
+            self.push_force = 5.0;
+        }
+        if !self.ground_accel_tau.is_finite() || self.ground_accel_tau < 0.0 {
+            self.ground_accel_tau = 0.06;
+        }
+        if !self.air_accel_tau.is_finite() || self.air_accel_tau < 0.0 {
+            self.air_accel_tau = 0.30;
+        }
+        if !self.coyote_time.is_finite() || self.coyote_time < 0.0 {
+            self.coyote_time = 0.15;
+        }
+        if !self.jump_buffer_time.is_finite() || self.jump_buffer_time < 0.0 {
+            self.jump_buffer_time = 0.15;
+        }
+        if !self.bob_amplitude.is_finite() || self.bob_amplitude < 0.0 {
+            self.bob_amplitude = 0.03;
+        }
+        if !self.floor_y.is_finite() {
+            self.floor_y = 0.0;
+        }
+    }
+}
+
+impl Default for CharacterConfig {
+    fn default() -> Self {
+        Self {
+            radius: 0.35,
+            height: 1.8,
+            eye_height: 1.7,
+            crouch_height: 1.0,
+            walk_speed: 6.0,
+            run_speed: 12.0,
+            crouch_speed_mult: 0.5,
+            jump_speed: 6.0,
+            gravity: 20.0,
+            slope_walk_limit_cos: std::f32::consts::FRAC_1_SQRT_2,
+            slope_slide_speed: 6.0,
+            step_up_max: 0.3,
+            step_down_max: 0.5,
+            snap_to_ground: true,
+            push_force: 5.0,
+            ground_accel_tau: 0.06,
+            air_accel_tau: 0.30,
+            coyote_time: 0.15,
+            jump_buffer_time: 0.15,
+            bob_enabled: false,
+            bob_amplitude: 0.03,
+            floor_y: 0.0,
+        }
+    }
+}
